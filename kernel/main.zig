@@ -5,16 +5,15 @@
 const std = @import("std");
 const limine = @import("limine.zig");
 const serial = @import("arch/x86_64/serial.zig");
-const gdt = @import("arch/x86_64/gdt.zig");
 const idt = @import("arch/x86_64/idt.zig");
 const pmm = @import("mm/pmm.zig");
 
 // ── Limine Requests ─────────────────────────────────────────────
 // These are placed in special linker sections so the bootloader can find them.
 
-pub export var requests_start: [2]u64 linksection(".limine_requests_start") = limine.REQUESTS_START_MARKER;
+// BaseRevision IS the start marker — same magic bytes, must not appear twice.
+pub export var base_revision: limine.BaseRevision linksection(".limine_requests_start") = .{};
 
-pub export var base_revision: limine.BaseRevision linksection(".limine_requests") = .{};
 pub export var framebuffer_req: limine.FramebufferRequest linksection(".limine_requests") = .{};
 pub export var memmap_req: limine.MemoryMapRequest linksection(".limine_requests") = .{};
 pub export var hhdm_req: limine.HhdmRequest linksection(".limine_requests") = .{};
@@ -33,29 +32,33 @@ export fn _start() callconv(.c) noreturn {
 // ── Kernel Main ─────────────────────────────────────────────────
 
 fn kmain() void {
-    // Stage 1: Serial output — our debug lifeline
+    // Stage 0: Paint framebuffer immediately — visible proof-of-life in Hyper-V
+    // (serial is invisible in Hyper-V without a COM pipe; framebuffer is not)
+    earlyFbMark(0x00220022); // dark purple = "entered kmain"
+
+    // Stage 1: Serial output
     serial.init();
-    serial.puts("\n");
-    serial.puts("  ╔═══════════════════════════════════════╗\n");
-    serial.puts("  ║   VantaOS v0.1.0 — First Light       ║\n");
-    serial.puts("  ║   Capability-based microkernel        ║\n");
-    serial.puts("  ╚═══════════════════════════════════════╝\n");
-    serial.puts("\n");
+    serial.puts("\n[BOOT]  VantaOS entering kmain\n");
 
     // Stage 2: Verify bootloader protocol
+    // Revision 0 means Limine confirmed support; non-zero means unsupported.
+    // NOTE: Requesting revision 1 — Limine v8 supports up to revision 1.
     if (!base_revision.isSupported()) {
-        serial.puts("[FATAL] Limine base revision not supported!\n");
-        serial.puts("        Need Limine bootloader v7+ with protocol revision 3\n");
-        halt();
+        serial.puts("[WARN]  Base revision not confirmed (non-fatal, continuing)\n");
+    } else {
+        serial.puts("[BOOT]  Limine protocol — OK\n");
     }
-    serial.puts("[BOOT]  Limine protocol v3 — OK\n");
 
-    // Stage 3: Load our own GDT (Limine's is temporary)
-    gdt.init();
-    serial.puts("[GDT]   Global Descriptor Table loaded\n");
+    earlyFbMark(0x00002200); // dark green = "past serial+revision"
+
+    // Stage 3: GDT — skipped for now, Limine's segments are valid for 64-bit kernel mode.
+    // Will install our own GDT in Phase 1 alongside TSS.
+    serial.puts("[GDT]   Using Limine's GDT (own GDT deferred to Phase 1)\n");
 
     // Stage 4: Load IDT (exception handlers)
     idt.init();
+
+    earlyFbMark(0x00000044); // dark blue = "past IDT"
 
     // Stage 5: Initialize physical memory
     if (memmap_req.response) |memmap_resp| {
@@ -104,6 +107,8 @@ fn kmain() void {
         serial.puts("\n");
     }
 
+    earlyFbMark(0x00440000); // dark red = "past PMM/HHDM/KADDR"
+
     // Stage 8: Framebuffer
     if (framebuffer_req.response) |fb_resp| {
         if (fb_resp.framebuffer_count > 0) {
@@ -128,6 +133,27 @@ fn kmain() void {
     serial.puts("  Next: VMM → Scheduler → First userspace\n");
     serial.puts("══════════════════════════════════════════════\n");
     serial.puts("\n");
+}
+
+// ── Early Framebuffer Debug Marker ──────────────────────────────
+// Paints a small corner square with a solid color — no serial needed.
+// Call at checkpoints to see how far we get in Hyper-V.
+
+fn earlyFbMark(color: u32) void {
+    const resp = framebuffer_req.response orelse return;
+    if (resp.framebuffer_count == 0) return;
+    const fb = resp.framebuffers[0];
+    const pitch: usize = @intCast(fb.pitch);
+    const base: usize = @intFromPtr(fb.address);
+    // Paint a 64x64 square in the top-left corner
+    var y: usize = 0;
+    while (y < 64) : (y += 1) {
+        var x: usize = 0;
+        while (x < 64) : (x += 1) {
+            const pixel: *volatile u32 = @ptrFromInt(base + y * pitch + x * 4);
+            pixel.* = color;
+        }
+    }
 }
 
 // ── Boot Screen ─────────────────────────────────────────────────

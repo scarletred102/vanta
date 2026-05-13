@@ -106,9 +106,9 @@ pub fn init() void {
     }
 
     // Load GDT register
-    asm volatile ("lgdt (%[gdtr])"
+    asm volatile ("lgdt %[gdtr]"
         :
-        : [gdtr] "r" (&gdtr),
+        : [gdtr] "m" (gdtr),
         : .{ .memory = true }
     );
 

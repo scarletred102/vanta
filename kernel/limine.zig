@@ -31,10 +31,10 @@ const COMMON_MAGIC = [2]u64{
 
 pub const BaseRevision = extern struct {
     magic: [2]u64 = .{ 0xf9562b2d5c95a6c8, 0x6a7b384944536bdc },
-    revision: u64 = 3, // We request revision 3
+    revision: u64 = 1, // Request revision 1 — supported by Limine v5+
 
     pub fn isSupported(self: *volatile @This()) bool {
-        return self.revision == 0;
+        return self.revision == 0; // Bootloader clears this to 0 if supported
     }
 };
 

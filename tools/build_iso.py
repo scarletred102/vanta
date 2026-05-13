@@ -64,8 +64,11 @@ def build_iso():
         iso.add_directory(path, joliet_path=path)
 
     # ── Helper: add file in both namespaces ──
-    def add(local: Path, path: str):
+    def add(local: Path, path: str, text=False):
         data = local.read_bytes()
+        if text:
+            # Strip Windows CRLF — bootloaders expect LF-only
+            data = data.replace(b'\r\n', b'\n').replace(b'\r', b'\n')
         iso.add_fp(
             fp=io.BytesIO(data),
             length=len(data),
@@ -74,24 +77,26 @@ def build_iso():
         )
 
     # ── Directory tree ──
-    mkdir("/BOOT")
-    mkdir("/BOOT/LIMINE")
+    # Interchange level 4 allows lowercase. Joliet always preserves case.
+    # Paths here match limine.conf's kernel_path exactly.
+    mkdir("/boot")
+    mkdir("/boot/limine")
     mkdir("/EFI")
     mkdir("/EFI/BOOT")
 
     # ── Static files (add all BEFORE El Torito setup) ──
-    add(ROOT / "limine.conf",               "/BOOT/LIMINE/LIMINE.CFG")
-    add(KERNEL,                             "/BOOT/VANTA")
-    add(LIMINE / "limine-bios.sys",         "/BOOT/LIMINE/LIMINE-BIOS.SYS")
-    add(LIMINE / "limine-bios-cd.bin",      "/BOOT/LIMINE/LIMINE-BIOS-CD.BIN")
-    add(LIMINE / "limine-uefi-cd.bin",      "/BOOT/LIMINE/LIMINE-UEFI-CD.BIN")
+    add(ROOT / "limine.conf",               "/boot/limine/limine.conf", text=True)
+    add(KERNEL,                             "/boot/vanta")
+    add(LIMINE / "limine-bios.sys",         "/boot/limine/limine-bios.sys")
+    add(LIMINE / "limine-bios-cd.bin",      "/boot/limine/limine-bios-cd.bin")
+    add(LIMINE / "limine-uefi-cd.bin",      "/boot/limine/limine-uefi-cd.bin")
     add(LIMINE / "BOOTX64.EFI",             "/EFI/BOOT/BOOTX64.EFI")
     add(LIMINE / "BOOTIA32.EFI",            "/EFI/BOOT/BOOTIA32.EFI")
 
     # ── El Torito boot records (MUST be after files are added) ──
     # BIOS boot: no-emulation, boot-info-table (Limine requirement)
     iso.add_eltorito(
-        "/BOOT/LIMINE/LIMINE-BIOS-CD.BIN",
+        "/boot/limine/limine-bios-cd.bin",
         bootable=True,
         boot_load_size=4,
         boot_info_table=True,
@@ -99,7 +104,7 @@ def build_iso():
     )
     # UEFI boot: second El Torito entry
     iso.add_eltorito(
-        "/BOOT/LIMINE/LIMINE-UEFI-CD.BIN",
+        "/boot/limine/limine-uefi-cd.bin",
         bootable=True,
         boot_load_size=0,
         boot_info_table=False,
@@ -107,8 +112,11 @@ def build_iso():
         efi=True,
     )
 
-    iso.write(str(ISO_OUT))
+    tmp = ISO_OUT.with_suffix(".tmp")
+    iso.write(str(tmp))
     iso.close()
+    import shutil
+    shutil.move(str(tmp), str(ISO_OUT))
 
     kb = ISO_OUT.stat().st_size // 1024
     print(f"[iso]   {ISO_OUT.name} ({kb} KB)")

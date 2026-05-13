@@ -1,7 +1,9 @@
 // ============================================================================
 // VantaOS — Interrupt Descriptor Table (IDT)
-// Phase 0: Minimal exception handlers that print diagnostic info and halt.
-// Phase 1 will add proper ISR stubs with register saving and recovery.
+// Phase 0: Minimal exception handlers via module-level asm stubs.
+//
+// Each stub is generated at module-level inline asm with fixed 16-byte
+// alignment. The IDT is built by computing addresses from a base label.
 // ============================================================================
 
 const serial = @import("serial.zig");
@@ -11,8 +13,8 @@ const serial = @import("serial.zig");
 const IdtEntry = extern struct {
     offset_low: u16 = 0,
     selector: u16 = 0,
-    ist: u8 = 0, // bits 0-2: IST index, bits 3-7: reserved (0)
-    type_attr: u8 = 0, // type (4 bits) + DPL (2 bits) + present (1 bit)
+    ist: u8 = 0,
+    type_attr: u8 = 0,
     offset_mid: u16 = 0,
     offset_high: u32 = 0,
     reserved: u32 = 0,
@@ -22,14 +24,12 @@ comptime {
     if (@sizeOf(IdtEntry) != 16) @compileError("IDT entry must be 16 bytes");
 }
 
-fn makeGate(handler_addr: u64, selector: u16, ist: u3, gate_type: u4, dpl: u2) IdtEntry {
+fn makeGate(handler_addr: u64) IdtEntry {
     return .{
         .offset_low = @truncate(handler_addr & 0xFFFF),
-        .selector = selector,
-        .ist = ist,
-        .type_attr = (@as(u8, 1) << 7) | // Present
-            (@as(u8, dpl) << 5) |
-            @as(u8, gate_type),
+        .selector = 0x08, // Kernel code segment
+        .ist = 0,
+        .type_attr = 0x8E, // Present, DPL=0, 64-bit interrupt gate
         .offset_mid = @truncate((handler_addr >> 16) & 0xFFFF),
         .offset_high = @truncate((handler_addr >> 32) & 0xFFFFFFFF),
         .reserved = 0,
@@ -40,110 +40,266 @@ fn makeGate(handler_addr: u64, selector: u16, ist: u3, gate_type: u4, dpl: u2) I
 
 var idt: [256]IdtEntry = [_]IdtEntry{.{}} ** 256;
 
-// ── Exception Names ─────────────────────────────────────────────
-
 const EXCEPTION_NAMES = [32][]const u8{
-    "#DE Divide Error",
-    "#DB Debug",
-    "NMI Non-Maskable Interrupt",
-    "#BP Breakpoint",
-    "#OF Overflow",
-    "#BR Bound Range Exceeded",
-    "#UD Invalid Opcode",
-    "#NM Device Not Available",
-    "#DF Double Fault",
-    "Coprocessor Segment Overrun",
-    "#TS Invalid TSS",
-    "#NP Segment Not Present",
-    "#SS Stack-Segment Fault",
-    "#GP General Protection Fault",
-    "#PF Page Fault",
-    "Reserved (15)",
-    "#MF x87 FPU Error",
-    "#AC Alignment Check",
-    "#MC Machine Check",
-    "#XM SIMD FP Exception",
-    "#VE Virtualization Exception",
-    "#CP Control Protection",
-    "Reserved (22)",
-    "Reserved (23)",
-    "Reserved (24)",
-    "Reserved (25)",
-    "Reserved (26)",
-    "Reserved (27)",
-    "#HV Hypervisor Injection",
-    "#VC VMM Communication",
-    "#SX Security Exception",
-    "Reserved (31)",
+    "Divide Error",  "Debug",         "NMI",                 "Breakpoint",
+    "Overflow",      "Bound Range",   "Invalid Opcode",      "Device NA",
+    "Double Fault",  "Coproc Seg",    "Invalid TSS",         "Seg Not Present",
+    "Stack Fault",   "GP Fault",      "Page Fault",          "Reserved 15",
+    "x87 FPU",       "Align Check",   "Machine Check",       "SIMD",
+    "Virtualization","Control Prot",  "Reserved 22",         "Reserved 23",
+    "Reserved 24",   "Reserved 25",   "Reserved 26",         "Reserved 27",
+    "Hypervisor",    "VMM Comm",      "Security",            "Reserved 31",
 };
 
-// Exceptions that push an error code onto the stack
-fn hasErrorCode(vector: u8) bool {
-    return switch (vector) {
-        8, 10, 11, 12, 13, 14, 17, 21, 29, 30 => true,
-        else => false,
-    };
-}
-
-// ── ISR Stubs (comptime-generated) ──────────────────────────────
-// Each exception vector gets a minimal stub that:
-//   1. Disables interrupts
-//   2. Prints exception info via serial
-//   3. Halts the CPU
+// ── ISR Stubs via module-level inline asm ───────────────────────
+// Each stub is exactly 16 bytes (padded). The table starts at `isr_stub_table`.
+// Stub layout per vector:
+//   [optional pushq $0]   (only for vectors WITHOUT a CPU-pushed error code)
+//   pushq $vector
+//   jmp common_isr_handler
+//   .balign 16            (pad to 16 bytes)
 //
-// Phase 1 TODO: Save all registers, support recovery for non-fatal faults.
+// Error-code vectors: 8, 10, 11, 12, 13, 14, 17, 21, 29, 30
 
-fn makeIsrStub(comptime vector: u8) *const fn () callconv(.naked) void {
-    return &struct {
-        fn stub() callconv(.naked) void {
-            // Single asm block: disable interrupts, set vector arg, jump to handler
-            asm volatile (
-                \\cli
-                \\mov %[vec], %%edi
-                \\jmp *%[handler]
-                :
-                : [vec] "i" (@as(u32, vector)),
-                  [handler] "r" (&handleException),
-            );
-        }
-    }.stub;
+comptime {
+    asm (
+        \\.text
+        \\.balign 16
+        \\.global isr_stub_table
+        \\isr_stub_table:
+        \\
+        \\// Vector 0 — Divide Error (no error code)
+        \\pushq $0
+        \\pushq $0
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 1 — Debug
+        \\pushq $0
+        \\pushq $1
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 2 — NMI
+        \\pushq $0
+        \\pushq $2
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 3 — Breakpoint
+        \\pushq $0
+        \\pushq $3
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 4 — Overflow
+        \\pushq $0
+        \\pushq $4
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 5 — Bound Range
+        \\pushq $0
+        \\pushq $5
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 6 — Invalid Opcode
+        \\pushq $0
+        \\pushq $6
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 7 — Device NA
+        \\pushq $0
+        \\pushq $7
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 8 — Double Fault (HAS error code)
+        \\pushq $8
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 9 — Coprocessor (no error code, reserved)
+        \\pushq $0
+        \\pushq $9
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 10 — Invalid TSS (HAS error code)
+        \\pushq $10
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 11 — Segment Not Present (HAS error code)
+        \\pushq $11
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 12 — Stack Fault (HAS error code)
+        \\pushq $12
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 13 — GP Fault (HAS error code)
+        \\pushq $13
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 14 — Page Fault (HAS error code)
+        \\pushq $14
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 15 — Reserved
+        \\pushq $0
+        \\pushq $15
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 16 — x87 FPU
+        \\pushq $0
+        \\pushq $16
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 17 — Alignment Check (HAS error code)
+        \\pushq $17
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 18 — Machine Check
+        \\pushq $0
+        \\pushq $18
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 19 — SIMD
+        \\pushq $0
+        \\pushq $19
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 20 — Virtualization
+        \\pushq $0
+        \\pushq $20
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 21 — Control Protection (HAS error code)
+        \\pushq $21
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vectors 22-28 reserved (no error code)
+        \\pushq $0
+        \\pushq $22
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\pushq $0
+        \\pushq $23
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\pushq $0
+        \\pushq $24
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\pushq $0
+        \\pushq $25
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\pushq $0
+        \\pushq $26
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\pushq $0
+        \\pushq $27
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\pushq $0
+        \\pushq $28
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 29 — Hypervisor Injection (HAS error code)
+        \\pushq $29
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 30 — VMM Communication (HAS error code)
+        \\pushq $30
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 31 — Security
+        \\pushq $0
+        \\pushq $31
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\
+        \\// ── Common ISR Handler ──
+        \\.global common_isr_handler
+        \\common_isr_handler:
+        \\    push %rax
+        \\    push %rbx
+        \\    push %rcx
+        \\    push %rdx
+        \\    push %rsi
+        \\    push %rdi
+        \\    push %rbp
+        \\    push %r8
+        \\    push %r9
+        \\    push %r10
+        \\    push %r11
+        \\    push %r12
+        \\    push %r13
+        \\    push %r14
+        \\    push %r15
+        \\    mov %rsp, %rdi
+        \\    call handleException
+        \\    pop %r15
+        \\    pop %r14
+        \\    pop %r13
+        \\    pop %r12
+        \\    pop %r11
+        \\    pop %r10
+        \\    pop %r9
+        \\    pop %r8
+        \\    pop %rbp
+        \\    pop %rdi
+        \\    pop %rsi
+        \\    pop %rdx
+        \\    pop %rcx
+        \\    pop %rbx
+        \\    pop %rax
+        \\    add $16, %rsp
+        \\    iretq
+    );
 }
 
-fn handleException(vector: u32) callconv(.c) noreturn {
-    serial.puts("\n!!! EXCEPTION: ");
-    if (vector < 32) {
-        serial.puts(EXCEPTION_NAMES[vector]);
-    } else {
-        serial.puts("Unknown (");
-        serial.putDec(vector);
-        serial.puts(")");
+extern const isr_stub_table: u8;
+
+const STUB_SIZE: usize = 16;
+
+// ── Interrupt Frame & Exception Handler ─────────────────────────
+
+const InterruptFrame = extern struct {
+    r15: u64, r14: u64, r13: u64, r12: u64,
+    r11: u64, r10: u64, r9:  u64, r8:  u64,
+    rbp: u64, rdi: u64, rsi: u64, rdx: u64,
+    rcx: u64, rbx: u64, rax: u64,
+    vector: u64,
+    error_code: u64,
+    rip: u64, cs: u64, rflags: u64,
+};
+
+export fn handleException(frame: *InterruptFrame) callconv(.c) void {
+    const vec: u8 = @truncate(frame.vector);
+    serial.puts("\n!!! EXCEPTION #");
+    serial.putDec(vec);
+    serial.puts(": ");
+    if (frame.vector < 32) {
+        serial.puts(EXCEPTION_NAMES[frame.vector]);
     }
-    serial.puts(" !!!\n");
-
-    // TODO Phase 1: Print registers, stack trace, faulting address (CR2 for PF)
-
-    serial.puts("System halted.\n");
+    serial.puts("\n    RIP=0x");
+    serial.putHex(frame.rip);
+    serial.puts("  CS=0x");
+    serial.putHex(frame.cs);
+    serial.puts("\n    ERR=0x");
+    serial.putHex(frame.error_code);
+    serial.puts("\nSystem halted.\n");
     while (true) {
-        asm volatile ("hlt");
+        asm volatile ("cli; hlt");
     }
 }
 
 // ── IDT Initialization ──────────────────────────────────────────
 
 pub fn init() void {
-    // Install exception handlers for vectors 0-31
+    const stub_base: u64 = @intFromPtr(&isr_stub_table);
+
+    // Install gates for vectors 0-31
     inline for (0..32) |i| {
-        const handler_addr = @intFromPtr(makeIsrStub(i));
-        idt[i] = makeGate(
-            handler_addr,
-            0x08, // Kernel code segment
-            0, // No IST
-            0xE, // 64-bit interrupt gate
-            0, // Ring 0
-        );
+        idt[i] = makeGate(stub_base + i * STUB_SIZE);
     }
 
-    // Build and load IDTR (10 bytes: limit[2] + base[8])
+    // Build IDTR (10 bytes: limit[2] + base[8])
     var idtr: [10]u8 align(4) = undefined;
     const limit: u16 = @sizeOf(@TypeOf(idt)) - 1;
     const base: u64 = @intFromPtr(&idt);
@@ -154,9 +310,9 @@ pub fn init() void {
         idtr[2 + j] = @truncate(base >> (j * 8));
     }
 
-    asm volatile ("lidt (%[idtr])"
+    asm volatile ("lidt %[idtr]"
         :
-        : [idtr] "r" (&idtr),
+        : [idtr] "m" (idtr),
         : .{ .memory = true }
     );
 
