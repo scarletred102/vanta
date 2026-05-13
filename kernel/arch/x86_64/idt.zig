@@ -303,6 +303,7 @@ pub fn init() void {
     serial.puts("[IDT]   Using CS selector 0x");
     serial.putHex(selector);
     serial.puts("\n");
+    serial.puts("[IDT]   Building table\n");
 
     // Install gates for vectors 0-31
     inline for (0..32) |i| {
@@ -310,19 +311,22 @@ pub fn init() void {
     }
 
     // Build IDTR (10 bytes: limit[2] + base[8])
-    const Idtr = packed struct {
-        limit: u16,
-        base: u64,
-    };
-    var idtr = Idtr{
-        .limit = @as(u16, @intCast(@sizeOf(@TypeOf(idt)) - 1)),
-        .base = @intFromPtr(&idt),
-    };
+    var idtr: [10]u8 align(1) = undefined;
+    const limit: u16 = @as(u16, @intCast(@sizeOf(@TypeOf(idt)) - 1));
+    const base: u64 = @intFromPtr(&idt);
+    idtr[0] = @truncate(limit);
+    idtr[1] = @truncate(limit >> 8);
+    inline for (0..8) |i| {
+        idtr[2 + i] = @truncate(base >> (i * 8));
+    }
 
-    asm volatile ("lidt %[ptr]"
+    serial.puts("[IDT]   LIDT...\n");
+    asm volatile ("lidt %[idtr]"
         :
-        : [ptr] "*p" (&idtr),
+        : [idtr] "m" (idtr),
+        : .{ .memory = true }
     );
+    serial.puts("[IDT]   LIDT done\n");
 
     serial.puts("[IDT]   Loaded (32 exception vectors)\n");
 }

@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const limine = @import("limine.zig");
+const cpu = @import("arch/x86_64/cpu.zig");
 const serial = @import("arch/x86_64/serial.zig");
 const gdt = @import("arch/x86_64/gdt.zig");
 const idt = @import("arch/x86_64/idt.zig");
@@ -27,6 +28,7 @@ pub export var requests_end: [2]u64 linksection(".limine_requests_end") = limine
 
 export fn _start() callconv(.c) noreturn {
     asm volatile ("cli");
+    cpu.enableSse();
     kmain();
     halt();
 }
