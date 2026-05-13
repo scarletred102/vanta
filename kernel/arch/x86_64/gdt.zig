@@ -86,6 +86,56 @@ pub const KERNEL_DATA_SEL: u16 = 0x10;
 pub const USER_CODE_SEL: u16 = 0x18;
 pub const USER_DATA_SEL: u16 = 0x20;
 
+const SegmentSelectors = struct {
+    cs: u16,
+    ds: u16,
+    es: u16,
+    fs: u16,
+    gs: u16,
+    ss: u16,
+};
+
+fn readSelectors() SegmentSelectors {
+    var selectors: SegmentSelectors = undefined;
+    var cs: u16 = 0;
+    var ds: u16 = 0;
+    var es: u16 = 0;
+    var fs: u16 = 0;
+    var gs: u16 = 0;
+    var ss: u16 = 0;
+    asm volatile ("mov %%cs, %[out]" : [out] "=r" (cs));
+    asm volatile ("mov %%ds, %[out]" : [out] "=r" (ds));
+    asm volatile ("mov %%es, %[out]" : [out] "=r" (es));
+    asm volatile ("mov %%fs, %[out]" : [out] "=r" (fs));
+    asm volatile ("mov %%gs, %[out]" : [out] "=r" (gs));
+    asm volatile ("mov %%ss, %[out]" : [out] "=r" (ss));
+    selectors.cs = cs;
+    selectors.ds = ds;
+    selectors.es = es;
+    selectors.fs = fs;
+    selectors.gs = gs;
+    selectors.ss = ss;
+    return selectors;
+}
+
+pub fn logSelectors(tag: []const u8) void {
+    const selectors = readSelectors();
+    serial.puts(tag);
+    serial.puts(" CS=0x");
+    serial.putHex(selectors.cs);
+    serial.puts(" DS=0x");
+    serial.putHex(selectors.ds);
+    serial.puts(" ES=0x");
+    serial.putHex(selectors.es);
+    serial.puts(" FS=0x");
+    serial.putHex(selectors.fs);
+    serial.puts(" GS=0x");
+    serial.putHex(selectors.gs);
+    serial.puts(" SS=0x");
+    serial.putHex(selectors.ss);
+    serial.puts("\n");
+}
+
 // ── GDTR Loading ────────────────────────────────────────────────
 // The GDTR is a 10-byte structure: 2-byte limit + 8-byte base.
 // We build it in a byte array to avoid packed struct alignment issues.

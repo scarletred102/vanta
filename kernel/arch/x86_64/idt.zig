@@ -24,16 +24,22 @@ comptime {
     if (@sizeOf(IdtEntry) != 16) @compileError("IDT entry must be 16 bytes");
 }
 
-fn makeGate(handler_addr: u64) IdtEntry {
+fn makeGate(handler_addr: u64, selector: u16) IdtEntry {
     return .{
         .offset_low = @truncate(handler_addr & 0xFFFF),
-        .selector = 0x08, // Kernel code segment
+        .selector = selector,
         .ist = 0,
         .type_attr = 0x8E, // Present, DPL=0, 64-bit interrupt gate
         .offset_mid = @truncate((handler_addr >> 16) & 0xFFFF),
         .offset_high = @truncate((handler_addr >> 32) & 0xFFFFFFFF),
         .reserved = 0,
     };
+}
+
+fn currentCs() u16 {
+    var cs: u16 = 0;
+    asm volatile ("mov %%cs, %[out]" : [out] "=r" (cs));
+    return cs;
 }
 
 // ── IDT Table ───────────────────────────────────────────────────
@@ -293,27 +299,29 @@ export fn handleException(frame: *InterruptFrame) callconv(.c) void {
 
 pub fn init() void {
     const stub_base: u64 = @intFromPtr(&isr_stub_table);
+    const selector = currentCs();
+    serial.puts("[IDT]   Using CS selector 0x");
+    serial.putHex(selector);
+    serial.puts("\n");
 
     // Install gates for vectors 0-31
     inline for (0..32) |i| {
-        idt[i] = makeGate(stub_base + i * STUB_SIZE);
+        idt[i] = makeGate(stub_base + i * STUB_SIZE, selector);
     }
 
     // Build IDTR (10 bytes: limit[2] + base[8])
-    var idtr: [10]u8 align(4) = undefined;
-    const limit: u16 = @sizeOf(@TypeOf(idt)) - 1;
-    const base: u64 = @intFromPtr(&idt);
+    const Idtr = packed struct {
+        limit: u16,
+        base: u64,
+    };
+    var idtr = Idtr{
+        .limit = @as(u16, @intCast(@sizeOf(@TypeOf(idt)) - 1)),
+        .base = @intFromPtr(&idt),
+    };
 
-    idtr[0] = @truncate(limit);
-    idtr[1] = @truncate(limit >> 8);
-    inline for (0..8) |j| {
-        idtr[2 + j] = @truncate(base >> (j * 8));
-    }
-
-    asm volatile ("lidt %[idtr]"
+    asm volatile ("lidt %[ptr]"
         :
-        : [idtr] "m" (idtr),
-        : .{ .memory = true }
+        : [ptr] "*p" (&idtr),
     );
 
     serial.puts("[IDT]   Loaded (32 exception vectors)\n");

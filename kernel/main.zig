@@ -5,6 +5,7 @@
 const std = @import("std");
 const limine = @import("limine.zig");
 const serial = @import("arch/x86_64/serial.zig");
+const gdt = @import("arch/x86_64/gdt.zig");
 const idt = @import("arch/x86_64/idt.zig");
 const pmm = @import("mm/pmm.zig");
 
@@ -25,6 +26,7 @@ pub export var requests_end: [2]u64 linksection(".limine_requests_end") = limine
 // Limine sets up long mode, paging, and a stack before jumping here.
 
 export fn _start() callconv(.c) noreturn {
+    asm volatile ("cli");
     kmain();
     halt();
 }
@@ -53,10 +55,18 @@ fn kmain() void {
 
     // Stage 3: GDT — skipped for now, Limine's segments are valid for 64-bit kernel mode.
     // Will install our own GDT in Phase 1 alongside TSS.
+    serial.puts("[CHK]  GDT_PRE\n");
+    gdt.logSelectors("[CHK]  SEL_GDT_PRE");
     serial.puts("[GDT]   Using Limine's GDT (own GDT deferred to Phase 1)\n");
+    serial.puts("[CHK]  GDT_POST\n");
+    gdt.logSelectors("[CHK]  SEL_GDT_POST");
 
     // Stage 4: Load IDT (exception handlers)
     idt.init();
+    serial.puts("[CHK]  IDT_POST\n");
+    gdt.logSelectors("[CHK]  SEL_IDT_POST");
+
+    serial.puts("[CHK]  STI_SITE none (no STI in early boot)\n");
 
     earlyFbMark(0x00000044); // dark blue = "past IDT"
 
