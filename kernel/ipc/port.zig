@@ -10,6 +10,8 @@
 // ============================================================================
 
 const cap = @import("../cap/handle.zig");
+const sched = @import("../sched/scheduler.zig");
+const Thread = @import("../sched/thread.zig").Thread;
 
 // ── Message ─────────────────────────────────────────────────────
 // Fixed-size message that can be passed in registers (small) or via
@@ -82,15 +84,14 @@ pub const Port = struct {
     /// Port state
     state: PortState = .open,
 
-    // Phase 1 TODO:
-    // waiting_threads: ThreadList  — threads blocked on recv
+    /// Threads blocked on recv (singly-linked via Thread.next)
+    recv_waiters: ?*Thread = null,
+    /// Threads blocked on send-when-full
+    send_waiters: ?*Thread = null,
 
-    pub const PortState = enum {
-        open,
-        closed,
-    };
+    pub const PortState = enum { open, closed };
 
-    /// Send a message to this port. Returns false if the queue is full.
+    /// Non-blocking send. Returns false if queue full or port closed.
     pub fn send(self: *Port, msg: *const Message) bool {
         if (self.state == .closed) return false;
         if (self.count >= PORT_QUEUE_CAPACITY) return false;
@@ -98,21 +99,59 @@ pub const Port = struct {
         self.queue[self.tail] = msg.*;
         self.tail = (self.tail + 1) % PORT_QUEUE_CAPACITY;
         self.count += 1;
-        return true;
 
-        // Phase 1 TODO: Wake up any thread blocked on recv
+        // Wake one recv waiter if any
+        if (self.recv_waiters) |w| {
+            self.recv_waiters = w.next;
+            w.next = null;
+            sched.wake(w);
+        }
+        return true;
     }
 
-    /// Receive a message from this port. Returns null if empty.
+    /// Blocking send. Parks current thread on send_waiters until queue has room.
+    pub fn sendBlocking(self: *Port, msg: *const Message) bool {
+        while (true) {
+            if (self.state == .closed) return false;
+            if (self.send(msg)) return true;
+            // Park
+            const cur = sched.current orelse return false;
+            cur.state = .blocked;
+            cur.wait_obj = @intFromPtr(self);
+            cur.next = self.send_waiters;
+            self.send_waiters = cur;
+            sched.block();
+            // resumed → loop and retry
+        }
+    }
+
+    /// Non-blocking recv. Returns null if empty.
     pub fn recv(self: *Port) ?Message {
         if (self.count == 0) return null;
-
         const msg = self.queue[self.head];
         self.head = (self.head + 1) % PORT_QUEUE_CAPACITY;
         self.count -= 1;
+        // Wake one send waiter
+        if (self.send_waiters) |w| {
+            self.send_waiters = w.next;
+            w.next = null;
+            sched.wake(w);
+        }
         return msg;
+    }
 
-        // Phase 1 TODO: If queue was full, wake up blocked senders
+    /// Blocking recv. Parks until a message arrives.
+    pub fn recvBlocking(self: *Port) ?Message {
+        while (true) {
+            if (self.recv()) |m| return m;
+            if (self.state == .closed) return null;
+            const cur = sched.current orelse return null;
+            cur.state = .blocked;
+            cur.wait_obj = @intFromPtr(self);
+            cur.next = self.recv_waiters;
+            self.recv_waiters = cur;
+            sched.block();
+        }
     }
 
     /// Check if the port has pending messages.
@@ -125,12 +164,22 @@ pub const Port = struct {
         return self.count >= PORT_QUEUE_CAPACITY;
     }
 
-    /// Close the port. Pending messages are discarded.
+    /// Close the port. Pending messages are discarded. Wake all waiters.
     pub fn close(self: *Port) void {
         self.state = .closed;
         self.count = 0;
         self.head = 0;
         self.tail = 0;
+        while (self.recv_waiters) |w| {
+            self.recv_waiters = w.next;
+            w.next = null;
+            sched.wake(w);
+        }
+        while (self.send_waiters) |w| {
+            self.send_waiters = w.next;
+            w.next = null;
+            sched.wake(w);
+        }
     }
 };
 

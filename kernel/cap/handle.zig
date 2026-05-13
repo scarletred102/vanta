@@ -156,16 +156,33 @@ pub const CapabilityTable = struct {
         return self.insert(child);
     }
 
-    /// Revoke a capability and invalidate it.
-    /// Phase 1 TODO: Also revoke all descendants (walk derivation tree).
+    /// Revoke a capability and ALL descendants (depth-first via parent links).
     pub fn revoke(self: *CapabilityTable, handle: Handle) void {
         if (handle == 0 or handle >= MAX_CAPS) return;
-        if (self.entries[handle]) |_| {
-            self.entries[handle] = null;
-            self.count -= 1;
+        if (self.entries[handle] == null) return;
 
-            // Phase 1 TODO: Walk all entries and revoke children
-            // whose .parent == handle
+        // First pass: bump generation on the target (invalidate stale refs)
+        if (self.entries[handle]) |*c| c.generation +%= 1;
+
+        // Iteratively revoke any cap whose .parent chain ends at `handle`.
+        // Simple O(n²) for Phase 1 — fine for 256-slot table.
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (1..MAX_CAPS) |i| {
+                if (self.entries[i]) |cap| {
+                    if (cap.parent) |p| {
+                        if (p == handle or self.entries[p] == null) {
+                            self.entries[i] = null;
+                            self.count -= 1;
+                            changed = true;
+                        }
+                    }
+                }
+            }
         }
+
+        self.entries[handle] = null;
+        self.count -= 1;
     }
 };

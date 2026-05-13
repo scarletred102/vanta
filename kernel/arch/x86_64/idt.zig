@@ -24,15 +24,25 @@ comptime {
     if (@sizeOf(IdtEntry) != 16) @compileError("IDT entry must be 16 bytes");
 }
 
-fn makeGate(handler_addr: u64, selector: u16) IdtEntry {
+fn makeGate(handler_addr: u64, selector: u16, ist: u3) IdtEntry {
     return .{
         .offset_low = @truncate(handler_addr & 0xFFFF),
         .selector = selector,
-        .ist = 0,
+        .ist = ist,
         .type_attr = 0x8E, // Present, DPL=0, 64-bit interrupt gate
         .offset_mid = @truncate((handler_addr >> 16) & 0xFFFF),
         .offset_high = @truncate((handler_addr >> 32) & 0xFFFFFFFF),
         .reserved = 0,
+    };
+}
+
+// IST assignment per vector (matches tss.zig)
+fn istForVector(vec: usize) u3 {
+    return switch (vec) {
+        2 => 2,   // NMI       → IST2
+        8 => 1,   // #DF       → IST1
+        18 => 3,  // #MC       → IST3
+        else => 0,
     };
 }
 
@@ -305,9 +315,9 @@ pub fn init() void {
     serial.puts("\n");
     serial.puts("[IDT]   Building table\n");
 
-    // Install gates for vectors 0-31
+    // Install gates for vectors 0-31 (with IST for NMI/DF/MC)
     inline for (0..32) |i| {
-        idt[i] = makeGate(stub_base + i * STUB_SIZE, selector);
+        idt[i] = makeGate(stub_base + i * STUB_SIZE, selector, istForVector(i));
     }
 
     // Build IDTR (10 bytes: limit[2] + base[8])

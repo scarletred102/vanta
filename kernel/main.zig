@@ -1,5 +1,5 @@
 // ============================================================================
-// VantaOS Kernel — Entry Point
+// VantaOS Kernel — Entry Point (Phase 1)
 // ============================================================================
 
 const std = @import("std");
@@ -8,23 +8,24 @@ const cpu = @import("arch/x86_64/cpu.zig");
 const serial = @import("arch/x86_64/serial.zig");
 const gdt = @import("arch/x86_64/gdt.zig");
 const idt = @import("arch/x86_64/idt.zig");
+const syscall = @import("arch/x86_64/syscall.zig");
+const ctx = @import("arch/x86_64/context.zig");
 const pmm = @import("mm/pmm.zig");
+const vmm = @import("mm/vmm.zig");
+const sched = @import("sched/scheduler.zig");
+const thread = @import("sched/thread.zig");
+const proc = @import("proc/process.zig");
 
 // ── Limine Requests ─────────────────────────────────────────────
-// These are placed in special linker sections so the bootloader can find them.
 
-// BaseRevision IS the start marker — same magic bytes, must not appear twice.
 pub export var base_revision: limine.BaseRevision linksection(".limine_requests_start") = .{};
-
 pub export var framebuffer_req: limine.FramebufferRequest linksection(".limine_requests") = .{};
 pub export var memmap_req: limine.MemoryMapRequest linksection(".limine_requests") = .{};
 pub export var hhdm_req: limine.HhdmRequest linksection(".limine_requests") = .{};
 pub export var kaddr_req: limine.KernelAddressRequest linksection(".limine_requests") = .{};
-
 pub export var requests_end: [2]u64 linksection(".limine_requests_end") = limine.REQUESTS_END_MARKER;
 
-// ── Entry Point ─────────────────────────────────────────────────
-// Limine sets up long mode, paging, and a stack before jumping here.
+// ── Entry ───────────────────────────────────────────────────────
 
 export fn _start() callconv(.c) noreturn {
     asm volatile ("cli");
@@ -33,95 +34,90 @@ export fn _start() callconv(.c) noreturn {
     halt();
 }
 
-// ── Kernel Main ─────────────────────────────────────────────────
+// ── Test kernel threads ─────────────────────────────────────────
+
+var counter_a: u64 = 0;
+var counter_b: u64 = 0;
+
+fn threadA() callconv(.c) noreturn {
+    while (true) {
+        counter_a += 1;
+        if (counter_a % 1_000_000 == 0) {
+            serial.puts("[T-A]   tick ");
+            serial.putDec(counter_a / 1_000_000);
+            serial.puts("\n");
+            sched.yield();
+        }
+    }
+}
+
+fn threadB() callconv(.c) noreturn {
+    while (true) {
+        counter_b += 1;
+        if (counter_b % 1_000_000 == 0) {
+            serial.puts("[T-B]   tick ");
+            serial.putDec(counter_b / 1_000_000);
+            serial.puts("\n");
+            sched.yield();
+        }
+    }
+}
+
+// ── kmain ───────────────────────────────────────────────────────
 
 fn kmain() void {
-    // Stage 0: Paint framebuffer immediately — visible proof-of-life in Hyper-V
-    // (serial is invisible in Hyper-V without a COM pipe; framebuffer is not)
-    earlyFbMark(0x00220022); // dark purple = "entered kmain"
+    earlyFbMark(0x00220022);
 
-    // Stage 1: Serial output
     serial.init();
-    serial.puts("\n[BOOT]  VantaOS entering kmain\n");
+    serial.puts("\n[BOOT]  VantaOS Phase 1 starting\n");
 
-    // Stage 2: Verify bootloader protocol
-    // Revision 0 means Limine confirmed support; non-zero means unsupported.
-    // NOTE: Requesting revision 1 — Limine v8 supports up to revision 1.
     if (!base_revision.isSupported()) {
-        serial.puts("[WARN]  Base revision not confirmed (non-fatal, continuing)\n");
+        serial.puts("[WARN]  base revision not confirmed\n");
     } else {
         serial.puts("[BOOT]  Limine protocol — OK\n");
     }
 
-    earlyFbMark(0x00002200); // dark green = "past serial+revision"
+    // GDT + TSS
+    gdt.init();
+    serial.puts("[GDT]   own GDT + TSS loaded\n");
 
-    // Stage 3: GDT — skipped for now, Limine's segments are valid for 64-bit kernel mode.
-    // Will install our own GDT in Phase 1 alongside TSS.
-    serial.puts("[CHK]  GDT_PRE\n");
-    gdt.logSelectors("[CHK]  SEL_GDT_PRE");
-    serial.puts("[GDT]   Using Limine's GDT (own GDT deferred to Phase 1)\n");
-    serial.puts("[CHK]  GDT_POST\n");
-    gdt.logSelectors("[CHK]  SEL_GDT_POST");
-
-    // Stage 4: Load IDT (exception handlers)
+    // IDT
     idt.init();
-    serial.puts("[CHK]  IDT_POST\n");
-    gdt.logSelectors("[CHK]  SEL_IDT_POST");
 
-    serial.puts("[CHK]  STI_SITE none (no STI in early boot)\n");
+    earlyFbMark(0x00000044);
 
-    earlyFbMark(0x00000044); // dark blue = "past IDT"
-
-    // Stage 5: Initialize physical memory
-    if (memmap_req.response) |memmap_resp| {
-        pmm.init(memmap_resp);
-        serial.puts("[PMM]   Physical memory manager initialized\n");
-
-        // Print memory stats
-        const stats = pmm.getStats();
-        serial.puts("        Total: ");
-        serial.putDec(stats.total_pages * 4);
-        serial.puts(" KB (");
-        serial.putDec(stats.total_pages * 4 / 1024);
-        serial.puts(" MB)\n");
-        serial.puts("        Free:  ");
-        serial.putDec(stats.free_pages * 4);
-        serial.puts(" KB (");
-        serial.putDec(stats.free_pages * 4 / 1024);
-        serial.puts(" MB)\n");
-
-        // Test allocation
-        if (pmm.allocPage()) |page| {
-            serial.puts("        Alloc test: page at 0x");
-            serial.putHex(page);
-            serial.puts(" — OK\n");
-            pmm.freePage(page);
-        }
+    // PMM
+    if (memmap_req.response) |mm| {
+        pmm.init(mm);
+        const s = pmm.getStats();
+        serial.puts("[PMM]   total=");
+        serial.putDec(s.total_pages * 4 / 1024);
+        serial.puts("MB free=");
+        serial.putDec(s.free_pages * 4 / 1024);
+        serial.puts("MB\n");
     } else {
-        serial.puts("[FATAL] No memory map from bootloader!\n");
+        serial.puts("[FATAL] no memory map\n");
         halt();
     }
 
-    // Stage 6: HHDM info
-    if (hhdm_req.response) |hhdm| {
-        serial.puts("[HHDM]  Higher-half direct map at 0x");
-        serial.putHex(hhdm.offset);
-        serial.puts("\n");
+    // VMM
+    if (hhdm_req.response) |h| {
+        vmm.init(h);
+    } else {
+        serial.puts("[FATAL] no HHDM\n");
+        halt();
     }
 
-    // Stage 7: Kernel address info
-    if (kaddr_req.response) |kaddr| {
-        serial.puts("[KERN]  Physical base: 0x");
-        serial.putHex(kaddr.physical_base);
-        serial.puts("\n");
-        serial.puts("[KERN]  Virtual base:  0x");
-        serial.putHex(kaddr.virtual_base);
-        serial.puts("\n");
-    }
+    // Kernel process
+    proc.initKernelProc();
+    serial.puts("[PROC]  kernel proc (pid 0) initialized\n");
 
-    earlyFbMark(0x00440000); // dark red = "past PMM/HHDM/KADDR"
+    // SYSCALL MSRs
+    syscall.init();
 
-    // Stage 8: Framebuffer
+    earlyFbMark(0x00440000);
+
+    // Framebuffer info
     if (framebuffer_req.response) |fb_resp| {
         if (fb_resp.framebuffer_count > 0) {
             const fb = fb_resp.framebuffers[0];
@@ -132,24 +128,35 @@ fn kmain() void {
             serial.puts("x");
             serial.putDec(fb.bpp);
             serial.puts("bpp\n");
-
-            // Draw the Vanta Black boot screen
             drawBootScreen(fb);
         }
     }
 
-    // ── Boot complete ────────────────────────────────────────────
-    serial.puts("\n");
+    // Scheduler
+    sched.init();
+
+    // Spawn two test kernel threads
+    const ta = thread.create(threadA) orelse {
+        serial.puts("[FATAL] thread A create failed\n");
+        halt();
+    };
+    const tb = thread.create(threadB) orelse {
+        serial.puts("[FATAL] thread B create failed\n");
+        halt();
+    };
+    sched.enqueue(ta);
+    sched.enqueue(tb);
+    serial.puts("[SCHED] 2 test threads queued\n");
+
     serial.puts("══════════════════════════════════════════════\n");
-    serial.puts("  VantaOS kernel initialized successfully.\n");
-    serial.puts("  Next: VMM → Scheduler → First userspace\n");
+    serial.puts("  VantaOS Phase 1 ready. Starting scheduler.\n");
     serial.puts("══════════════════════════════════════════════\n");
-    serial.puts("\n");
+
+    // Hand off to scheduler — does not return
+    sched.start();
 }
 
-// ── Early Framebuffer Debug Marker ──────────────────────────────
-// Paints a small corner square with a solid color — no serial needed.
-// Call at checkpoints to see how far we get in Hyper-V.
+// ── Helpers ─────────────────────────────────────────────────────
 
 fn earlyFbMark(color: u32) void {
     const resp = framebuffer_req.response orelse return;
@@ -157,7 +164,6 @@ fn earlyFbMark(color: u32) void {
     const fb = resp.framebuffers[0];
     const pitch: usize = @intCast(fb.pitch);
     const base: usize = @intFromPtr(fb.address);
-    // Paint a 64x64 square in the top-left corner
     var y: usize = 0;
     while (y < 64) : (y += 1) {
         var x: usize = 0;
@@ -168,55 +174,30 @@ fn earlyFbMark(color: u32) void {
     }
 }
 
-// ── Boot Screen ─────────────────────────────────────────────────
-// Draw a deep dark gradient — Vanta Black aesthetic.
-
 fn drawBootScreen(fb: *volatile limine.Framebuffer) void {
     const width: usize = @intCast(fb.width);
     const height: usize = @intCast(fb.height);
     const pitch_bytes: usize = @intCast(fb.pitch);
     const addr = fb.address;
-
     for (0..height) |y| {
         const row: [*]volatile u32 = @ptrCast(@alignCast(addr + y * pitch_bytes));
         for (0..width) |x| {
-            // Deep dark gradient: almost black with subtle variation
             const gy: u32 = @intCast(@min(y * 6 / height, 5));
             const gx: u32 = @intCast(@min(x * 3 / width, 2));
             const shade: u32 = gy + gx;
             row[x] = shade | (shade << 8) | (shade << 16);
         }
     }
-
-    // Draw a small white rectangle as a "cursor" / proof of life
-    const cx: usize = width / 2 - 20;
-    const cy: usize = height / 2 - 2;
-    for (cy..cy + 4) |y| {
-        const row: [*]volatile u32 = @ptrCast(@alignCast(addr + y * pitch_bytes));
-        for (cx..cx + 40) |x| {
-            row[x] = 0x00CCCCCC; // Light gray
-        }
-    }
-
-    serial.puts("[FB]    Boot screen drawn (vanta black gradient)\n");
 }
-
-// ── Halt ─────────────────────────────────────────────────────────
 
 fn halt() noreturn {
-    serial.puts("[HALT]  System halted.\n");
+    serial.puts("[HALT]\n");
     asm volatile ("cli");
-    while (true) {
-        asm volatile ("hlt");
-    }
+    while (true) asm volatile ("hlt");
 }
 
-// ── Panic Handler ───────────────────────────────────────────────
-// Required for freestanding Zig. Called on @panic(), assert failures, etc.
-
 pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
-    serial.puts("\n");
-    serial.puts("!!! KERNEL PANIC !!!\n");
+    serial.puts("\n!!! PANIC: ");
     serial.puts(msg);
     serial.puts("\n");
     halt();

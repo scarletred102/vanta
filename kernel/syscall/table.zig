@@ -91,9 +91,8 @@ pub fn dispatch(
     arg5: u64,
     arg6: u64,
 ) Result {
-    const syscall = std.meta.intToEnum(Syscall, number) catch {
-        return .{ .err = .bad_syscall };
-    };
+    _ = arg3; _ = arg4; _ = arg5; _ = arg6;
+    const syscall: Syscall = @enumFromInt(number);
 
     return switch (syscall) {
         // ── Capability ops ──
