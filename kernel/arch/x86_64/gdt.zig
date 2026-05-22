@@ -54,8 +54,14 @@ const TssDescriptor = extern struct {
     reserved: u32 = 0,
 };
 
+const DescriptorRegister = extern struct {
+    limit: u16,
+    base: u64 align(1),
+};
+
 comptime {
     if (@sizeOf(TssDescriptor) != 16) @compileError("TSS descriptor must be 16 bytes");
+    if (@sizeOf(DescriptorRegister) != 10) @compileError("descriptor register must be 10 bytes");
 }
 
 // ── Public Selectors ────────────────────────────────────────────
@@ -160,19 +166,15 @@ pub fn init() void {
     gdt.tss_desc.base_upper = @truncate((tss_base >> 32) & 0xFFFFFFFF);
 
     // 3. Build GDTR (10 bytes: limit + base)
-    var gdtr: [10]u8 align(4) = undefined;
-    const limit: u16 = @sizeOf(GdtArray) - 1;
-    const base: u64 = @intFromPtr(&gdt);
-    gdtr[0] = @truncate(limit);
-    gdtr[1] = @truncate(limit >> 8);
-    inline for (0..8) |i| {
-        gdtr[2 + i] = @truncate(base >> (i * 8));
-    }
+    const gdtr = DescriptorRegister{
+        .limit = @sizeOf(GdtArray) - 1,
+        .base = @intFromPtr(&gdt),
+    };
 
     // 4. Load GDTR
-    asm volatile ("lgdt %[gdtr]"
+    asm volatile ("lgdt (%[gdtr])"
         :
-        : [gdtr] "m" (gdtr),
+        : [gdtr] "r" (&gdtr),
         : .{ .memory = true }
     );
 
