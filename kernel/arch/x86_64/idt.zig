@@ -20,8 +20,14 @@ const IdtEntry = extern struct {
     reserved: u32 = 0,
 };
 
+const DescriptorRegister = extern struct {
+    limit: u16,
+    base: u64 align(1),
+};
+
 comptime {
     if (@sizeOf(IdtEntry) != 16) @compileError("IDT entry must be 16 bytes");
+    if (@sizeOf(DescriptorRegister) != 10) @compileError("descriptor register must be 10 bytes");
 }
 
 fn makeGate(handler_addr: u64, selector: u16, ist: u3) IdtEntry {
@@ -321,19 +327,15 @@ pub fn init() void {
     }
 
     // Build IDTR (10 bytes: limit[2] + base[8])
-    var idtr: [10]u8 align(1) = undefined;
-    const limit: u16 = @as(u16, @intCast(@sizeOf(@TypeOf(idt)) - 1));
-    const base: u64 = @intFromPtr(&idt);
-    idtr[0] = @truncate(limit);
-    idtr[1] = @truncate(limit >> 8);
-    inline for (0..8) |i| {
-        idtr[2 + i] = @truncate(base >> (i * 8));
-    }
+    const idtr = DescriptorRegister{
+        .limit = @as(u16, @intCast(@sizeOf(@TypeOf(idt)) - 1)),
+        .base = @intFromPtr(&idt),
+    };
 
     serial.puts("[IDT]   LIDT...\n");
-    asm volatile ("lidt %[idtr]"
+    asm volatile ("lidt (%[idtr])"
         :
-        : [idtr] "m" (idtr),
+        : [idtr] "r" (&idtr),
         : .{ .memory = true }
     );
     serial.puts("[IDT]   LIDT done\n");
