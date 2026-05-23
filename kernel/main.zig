@@ -19,6 +19,7 @@ const interrupts = @import("arch/x86_64/interrupts.zig");
 const cap = @import("cap/handle.zig");
 const pci = @import("drivers/pci.zig");
 const port_mod = @import("ipc/port.zig");
+const cap_stress = @import("cap_stress_test.zig");
 
 // ── Limine Requests ─────────────────────────────────────────────
 
@@ -121,7 +122,7 @@ fn kmain() void {
     earlyFbMark(0x00220022);
 
     serial.init();
-    serial.puts("\n[BOOT]  VantaOS Phase 1 starting\n");
+    serial.puts("\n[BOOT]  VantaOS Phase 3 starting\n");
 
     if (!base_revision.isSupported()) {
         serial.puts("[WARN]  base revision not confirmed\n");
@@ -167,7 +168,7 @@ fn kmain() void {
     // SYSCALL MSRs
     syscall.init();
     // To run the Ring 3 automated syscall/sysret MSR verification test:
-    // syscall.verifySyscallFromRing3();
+    syscall.verifySyscallFromRing3();
 
     // APIC & Interrupt routing
     interrupts.init(rsdp_req.response);
@@ -197,29 +198,16 @@ fn kmain() void {
     // Scheduler
     sched.init();
 
-    // Create a capability for our test port with full rights
+    // Create a capability for our test port with full rights (Send=1, Recv=2, Grant=4 -> rights=7)
     const port_addr = @intFromPtr(&test_port);
-    const root_cap = cap.Capability{
-        .obj_type = .ipc_port,
-        .rights = cap.Rights.ALL,
-        .object = port_addr,
-        .parent = null,
-        .generation = 0,
-        .owner = 0, // kernel process
-    };
     
-    // Register the port capability in the kernel process's cap table
-    root_handle = proc.kernel_proc.cap_table.insert(root_cap) orelse {
+    root_handle = cap.cap_table_insert(&proc.kernel_proc.cap_table, port_addr, @intFromEnum(cap.CapType.Endpoint), 7) orelse {
         serial.puts("[FATAL] Failed to insert root port cap\n");
         halt();
     };
     
-    // Now let's derive a Write-Only capability mask (disable read, enable write and derive)
-    var write_only_rights = cap.Rights.ALL;
-    write_only_rights.read = false;
-    
-    // Derive it!
-    write_handle = proc.kernel_proc.cap_table.derive(root_handle, write_only_rights) orelse {
+    // Now let's derive a Send-Only (Write-Only) capability (rights = 1)
+    write_handle = cap.cap_table_insert(&proc.kernel_proc.cap_table, port_addr, @intFromEnum(cap.CapType.Endpoint), 1) orelse {
         serial.puts("[FATAL] Failed to derive write cap\n");
         halt();
     };
@@ -243,8 +231,11 @@ fn kmain() void {
     sched.enqueue(tb);
     serial.puts("[SCHED] producer and consumer threads queued\n");
 
+    // P3.8 — Capability stress test (runs synchronously before handing off to scheduler)
+    cap_stress.run();
+
     serial.puts("══════════════════════════════════════════════\n");
-    serial.puts("  VantaOS Phase 1 ready. Starting scheduler.\n");
+    serial.puts("  VantaOS Phase 3 complete. Starting scheduler.\n");
     serial.puts("══════════════════════════════════════════════\n");
 
     // Hand off to scheduler — does not return

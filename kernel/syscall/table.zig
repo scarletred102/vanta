@@ -153,15 +153,21 @@ pub fn getCurrentProcess() *proc.Process {
 fn handleCapSend(port_handle: u64, msg_ptr: u64) Result {
     if (msg_ptr == 0) return .{ .err = .invalid_argument };
     const current_proc = getCurrentProcess();
-    const cap = current_proc.cap_table.get(@truncate(port_handle)) orelse return .{ .err = .invalid_handle };
+    
+    // Strict validation!
+    const entry = cap_mod.cap_table_lookup(&current_proc.cap_table, port_handle) orelse return .{ .err = .invalid_handle };
+    if (entry.type != @intFromEnum(cap_mod.CapType.Endpoint)) return .{ .err = .permission_denied };
+    if ((entry.rights & cap_mod.Rights.EndpointSend) == 0) return .{ .err = .permission_denied };
 
-    if (cap.obj_type != .ipc_port) return .{ .err = .permission_denied };
-    if (!cap.rights.write) return .{ .err = .permission_denied };
+    const msg = @as(*port_mod.Message, @ptrFromInt(msg_ptr));
+    const port = @as(*port_mod.Port, @ptrFromInt(cap_mod.getObjectPtr(entry)));
 
-    const msg = @as(*const port_mod.Message, @ptrFromInt(msg_ptr));
-    const port = @as(*port_mod.Port, @ptrFromInt(cap.object));
+    // Prepare message for send (moves caps from sender table to message transit slots)
+    var msg_copy = msg.*;
+    const err = cap_mod.prepareMessageForSend(&current_proc.cap_table, &msg_copy);
+    if (err != .success) return .{ .err = err };
 
-    if (port.sendBlocking(msg)) {
+    if (port.sendBlocking(&msg_copy)) {
         return .{ .value = 0, .err = .success };
     } else {
         return .{ .err = .permission_denied };
@@ -171,15 +177,21 @@ fn handleCapSend(port_handle: u64, msg_ptr: u64) Result {
 fn handleCapRecv(port_handle: u64, msg_ptr: u64) Result {
     if (msg_ptr == 0) return .{ .err = .invalid_argument };
     const current_proc = getCurrentProcess();
-    const cap = current_proc.cap_table.get(@truncate(port_handle)) orelse return .{ .err = .invalid_handle };
 
-    if (cap.obj_type != .ipc_port) return .{ .err = .permission_denied };
-    if (!cap.rights.read) return .{ .err = .permission_denied };
+    // Strict validation!
+    const entry = cap_mod.cap_table_lookup(&current_proc.cap_table, port_handle) orelse return .{ .err = .invalid_handle };
+    if (entry.type != @intFromEnum(cap_mod.CapType.Endpoint)) return .{ .err = .permission_denied };
+    if ((entry.rights & cap_mod.Rights.EndpointRecv) == 0) return .{ .err = .permission_denied };
 
-    const port = @as(*port_mod.Port, @ptrFromInt(cap.object));
-    if (port.recvBlocking()) |msg| {
+    const port = @as(*port_mod.Port, @ptrFromInt(cap_mod.getObjectPtr(entry)));
+    if (port.recvBlocking()) |*msg| {
+        var msg_copy = msg.*;
+        
+        // Receive and unpack capabilities into the receiver's cap table!
+        cap_mod.receiveMessageCaps(&current_proc.cap_table, &msg_copy);
+        
         const dest = @as(*port_mod.Message, @ptrFromInt(msg_ptr));
-        dest.* = msg;
+        dest.* = msg_copy;
         return .{ .value = 0, .err = .success };
     } else {
         return .{ .err = .permission_denied };
@@ -189,21 +201,29 @@ fn handleCapRecv(port_handle: u64, msg_ptr: u64) Result {
 fn handleCapCall(port_handle: u64, msg_ptr: u64, reply_ptr: u64) Result {
     if (msg_ptr == 0 or reply_ptr == 0) return .{ .err = .invalid_argument };
     const current_proc = getCurrentProcess();
-    const cap = current_proc.cap_table.get(@truncate(port_handle)) orelse return .{ .err = .invalid_handle };
 
-    if (cap.obj_type != .ipc_port) return .{ .err = .permission_denied };
-    if (!cap.rights.write or !cap.rights.read) return .{ .err = .permission_denied };
+    // Strict validation!
+    const entry = cap_mod.cap_table_lookup(&current_proc.cap_table, port_handle) orelse return .{ .err = .invalid_handle };
+    if (entry.type != @intFromEnum(cap_mod.CapType.Endpoint)) return .{ .err = .permission_denied };
+    if ((entry.rights & cap_mod.Rights.EndpointSend) == 0 or (entry.rights & cap_mod.Rights.EndpointRecv) == 0) return .{ .err = .permission_denied };
 
-    const msg = @as(*const port_mod.Message, @ptrFromInt(msg_ptr));
-    const port = @as(*port_mod.Port, @ptrFromInt(cap.object));
+    const port = @as(*port_mod.Port, @ptrFromInt(cap_mod.getObjectPtr(entry)));
 
-    // Synchronous send
-    if (!port.sendBlocking(msg)) return .{ .err = .permission_denied };
+    // Send part
+    const msg = @as(*port_mod.Message, @ptrFromInt(msg_ptr));
+    var msg_copy = msg.*;
+    const err = cap_mod.prepareMessageForSend(&current_proc.cap_table, &msg_copy);
+    if (err != .success) return .{ .err = err };
 
-    // Synchronous receive
-    if (port.recvBlocking()) |reply| {
+    if (!port.sendBlocking(&msg_copy)) return .{ .err = .permission_denied };
+
+    // Recv part
+    if (port.recvBlocking()) |*reply| {
+        var reply_copy = reply.*;
+        cap_mod.receiveMessageCaps(&current_proc.cap_table, &reply_copy);
+        
         const dest = @as(*port_mod.Message, @ptrFromInt(reply_ptr));
-        dest.* = reply;
+        dest.* = reply_copy;
         return .{ .value = 0, .err = .success };
     } else {
         return .{ .err = .permission_denied };
@@ -212,10 +232,39 @@ fn handleCapCall(port_handle: u64, msg_ptr: u64, reply_ptr: u64) Result {
 
 fn handleCapDerive(parent_handle: u64, mask_val: u64, child_handle_ptr: u64) Result {
     const current_proc = getCurrentProcess();
-    _ = current_proc.cap_table.get(@truncate(parent_handle)) orelse return .{ .err = .invalid_handle };
 
-    const mask = @as(cap_mod.Rights, @bitCast(@as(u32, @truncate(mask_val))));
-    const child_handle = current_proc.cap_table.derive(@truncate(parent_handle), mask) orelse return .{ .err = .out_of_memory };
+    // Strict validation!
+    const parent = cap_mod.cap_table_lookup(&current_proc.cap_table, parent_handle) orelse return .{ .err = .invalid_handle };
+
+    const new_rights = @as(u8, @truncate(mask_val));
+
+    // Assertion: child rights must be a strict bitwise subset of parent rights!
+    if ((new_rights & parent.rights) != new_rights) {
+        return .{ .err = .permission_denied };
+    }
+
+    // Allocate a new slot pointing to same kernel object
+    const child_idx = findFreeSlot(&current_proc.cap_table) orelse return .{ .err = .out_of_memory };
+    const child = &current_proc.cap_table.entries[child_idx];
+    
+    child.type = parent.type;
+    child.rights = new_rights;
+    child.kernel_object_ptr = parent.kernel_object_ptr;
+    
+    // Set parent details for ancestry tracking
+    child.parent_table = &current_proc.cap_table;
+    child.parent_index = @as(u16, @truncate(parent_handle & 0xFFFFFFFFFFFF));
+    child.parent_generation = parent.generation;
+    
+    child.old_table = null;
+    child.old_index = 0;
+
+    current_proc.cap_table.count += 1;
+
+    // Link child into the kernel object's list
+    cap_mod.linkEntry(&current_proc.cap_table, child_idx);
+
+    const child_handle = cap_mod.encodeHandle(child_idx, child.generation);
 
     if (child_handle_ptr != 0) {
         const ptr = @as(*cap_mod.Handle, @ptrFromInt(child_handle_ptr));
@@ -224,10 +273,22 @@ fn handleCapDerive(parent_handle: u64, mask_val: u64, child_handle_ptr: u64) Res
     return .{ .value = child_handle, .err = .success };
 }
 
+fn findFreeSlot(table: *cap_mod.CapTable) ?u16 {
+    var i: usize = 1;
+    while (i < cap_mod.MAX_CAPS) : (i += 1) {
+        if (table.entries[i].type == 0) {
+            return @intCast(i);
+        }
+    }
+    return null;
+}
+
 fn handleCapRevoke(handle: u64) Result {
     const current_proc = getCurrentProcess();
-    _ = current_proc.cap_table.get(@truncate(handle)) orelse return .{ .err = .invalid_handle };
-    current_proc.cap_table.revoke(@truncate(handle));
+
+    // Strict validation!
+    _ = cap_mod.cap_table_lookup(&current_proc.cap_table, handle) orelse return .{ .err = .invalid_handle };
+    cap_mod.cap_revoke(&current_proc.cap_table, handle);
     return .{ .value = 0, .err = .success };
 }
 

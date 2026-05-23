@@ -17,7 +17,7 @@ pub const Process = struct {
     pid: u32,
     name: [16]u8 = [_]u8{0} ** 16,
     space: vmm.AddressSpace,
-    cap_table: cap.CapabilityTable = .{},
+    cap_table: cap.CapTable = .{},
     thread_count: u32 = 0,
     parent_pid: u32 = 0,
     vmas: [16]Vma = [_]Vma{.{ .start = 0, .end = 0, .flags = 0, .lazy = false, .cow = false }} ** 16,
@@ -71,7 +71,12 @@ pub fn create(name: []const u8, parent_pid: u32) ?*Process {
             pool[i].cap_table.count = 0;
             var c: usize = 0;
             while (c < cap.MAX_CAPS) : (c += 1) {
-                pool[i].cap_table.entries[c] = null;
+                pool[i].cap_table.entries[c] = .{
+                    .type = 0,
+                    .rights = 0,
+                    .generation = 1,
+                    .kernel_object_ptr = 0,
+                };
             }
             const n = @min(name.len, 15);
             @memcpy(pool[i].name[0..n], name[0..n]);

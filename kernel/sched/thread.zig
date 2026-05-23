@@ -32,6 +32,7 @@ pub const Thread = struct {
     next: ?*Thread = null, // run-queue link
     wake_at: u64 = 0,      // for sleeping threads (TSC ticks)
     wait_obj: u64 = 0,     // for blocked threads (object id)
+    cap_list: @import("../cap/handle.zig").CapListHead = .{},
 };
 
 var next_tid: u32 = 1;
