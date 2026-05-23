@@ -51,6 +51,10 @@ pub const Message = struct {
     /// The receiver gets a memory capability in their table.
     buffer_cap: cap.Handle = cap.NULL_HANDLE,
 
+    // Transferred capability slots in-transit (kernel-only)
+    transferred_caps: [MAX_CAP_TRANSFERS]cap.CapEntry = [_]cap.CapEntry{.{}} ** MAX_CAP_TRANSFERS,
+    transferred_buffer_cap: cap.CapEntry = .{},
+
     /// Write structured data into the payload at an offset.
     pub fn writePayload(self: *Message, offset: usize, data: []const u8) void {
         const end = @min(offset + data.len, MAX_INLINE_PAYLOAD);
@@ -80,6 +84,9 @@ pub const Port = struct {
 
     /// Capability handle of the owning process (for access checks)
     owner_cap: cap.Handle = cap.NULL_HANDLE,
+
+    /// Capability list head registered on this port for transitive invalidations
+    cap_list: cap.CapListHead = .{},
 
     /// Port state
     state: PortState = .open,
