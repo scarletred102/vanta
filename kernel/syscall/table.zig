@@ -78,7 +78,7 @@ pub const Error = enum(u64) {
 // ── Syscall Result ──────────────────────────────────────────────
 // Returned to userspace in rax (value) and rdx (error).
 
-pub const Result = struct {
+pub const Result = extern struct {
     value: u64 = 0,
     err: Error = .success,
 };

@@ -156,6 +156,7 @@ fn kmain() void {
         serial.puts("MB free=");
         serial.putDec(s.free_pages * 4 / 1024);
         serial.puts("MB\n");
+        @import("mm/slab.zig").init();
     } else {
         serial.puts("[FATAL] no memory map\n");
         halt();
@@ -172,6 +173,9 @@ fn kmain() void {
 
     // APIC & Interrupt routing
     interrupts.init(rsdp_req.response);
+    if (rsdp_req.response) |resp| {
+        @import("arch/x86_64/smp.zig").smp_init(resp.address);
+    }
     interrupts.routeIrq(1, 33, 0);
     serial.puts("[KBD]   PS/2 Keyboard routed (IRQ 1 -> Vector 33)\n");
 
@@ -198,44 +202,11 @@ fn kmain() void {
     // Scheduler
     sched.init();
 
-    // Create a capability for our test port with full rights (Send=1, Recv=2, Grant=4 -> rights=7)
-    const port_addr = @intFromPtr(&test_port);
-    
-    root_handle = cap.cap_table_insert(&proc.kernel_proc.cap_table, port_addr, @intFromEnum(cap.CapType.Endpoint), 7) orelse {
-        serial.puts("[FATAL] Failed to insert root port cap\n");
-        halt();
-    };
-    
-    // Now let's derive a Send-Only (Write-Only) capability (rights = 1)
-    write_handle = cap.cap_table_insert(&proc.kernel_proc.cap_table, port_addr, @intFromEnum(cap.CapType.Endpoint), 1) orelse {
-        serial.puts("[FATAL] Failed to derive write cap\n");
-        halt();
-    };
-    
-    serial.puts("[TEST]  IPC Caps initialized: Root Handle=");
-    serial.putDec(root_handle);
-    serial.puts("  Write-Only Handle=");
-    serial.putDec(write_handle);
-    serial.puts("\n");
-
-    // Spawn producer and consumer threads
-    const ta = thread.create(producerThread) orelse {
-        serial.puts("[FATAL] producer thread create failed\n");
-        halt();
-    };
-    const tb = thread.create(consumerThread) orelse {
-        serial.puts("[FATAL] consumer thread create failed\n");
-        halt();
-    };
-    sched.enqueue(ta);
-    sched.enqueue(tb);
-    serial.puts("[SCHED] producer and consumer threads queued\n");
-
-    // P3.8 — Capability stress test (runs synchronously before handing off to scheduler)
-    cap_stress.run();
+    // Run Phase 4 userspace end-to-end IPC integration test!
+    runPhase4Test();
 
     serial.puts("══════════════════════════════════════════════\n");
-    serial.puts("  VantaOS Phase 3 complete. Starting scheduler.\n");
+    serial.puts("  VantaOS Phase 4 complete. Starting scheduler.\n");
     serial.puts("══════════════════════════════════════════════\n");
 
     // Hand off to scheduler — does not return
@@ -287,4 +258,73 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     serial.puts(msg);
     serial.puts("\n");
     halt();
+}
+
+const producer_elf = @embedFile("bin/producer");
+const consumer_elf = @embedFile("bin/consumer");
+var shared_port: port_mod.Port = .{};
+
+pub fn runPhase4Test() void {
+    serial.puts("[P4-TEST] Spawning userspace producer and consumer...\n");
+
+    // 1. Create processes
+    const prod_proc = proc.create("producer", 0) orelse {
+        serial.puts("[FATAL] prod proc create failed\n");
+        halt();
+    };
+    const cons_proc = proc.create("consumer", 0) orelse {
+        serial.puts("[FATAL] cons proc create failed\n");
+        halt();
+    };
+
+    // 2. Setup shared port in slot 1 of both processes
+    const port_addr = @intFromPtr(&shared_port);
+    _ = cap.cap_table_insert(&prod_proc.cap_table, port_addr, @intFromEnum(cap.CapType.Endpoint), 1); // Send=1
+    _ = cap.cap_table_insert(&cons_proc.cap_table, port_addr, @intFromEnum(cap.CapType.Endpoint), 2); // Recv=2
+
+    // 3. Parse ELFs
+    const prod_elf_info = @import("elf.zig").parse_elf64(producer_elf) catch |err| {
+        serial.puts("[FATAL] prod ELF parse failed: ");
+        serial.puts(@errorName(err));
+        serial.puts("\n");
+        halt();
+    };
+    const cons_elf_info = @import("elf.zig").parse_elf64(consumer_elf) catch |err| {
+        serial.puts("[FATAL] cons ELF parse failed: ");
+        serial.puts(@errorName(err));
+        serial.puts("\n");
+        halt();
+    };
+
+    // 4. Load ELFs
+    const prod_entry = @import("elf.zig").load_elf(prod_elf_info, producer_elf, prod_proc.space.pml4_phys) catch unreachable;
+    const cons_entry = @import("elf.zig").load_elf(cons_elf_info, consumer_elf, cons_proc.space.pml4_phys) catch unreachable;
+
+    // 5. Alloc stacks
+    const prod_rsp = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = prod_proc.space.pml4_phys }, 4).?;
+    _ = prod_rsp;
+    const cons_rsp = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = cons_proc.space.pml4_phys }, 4).?;
+    _ = cons_rsp;
+
+    // 6. Push auxv/argc/envp/argv
+    const prod_stack_top = @import("elf.zig").setupUserStack(prod_proc.space.pml4_phys, prod_entry, prod_elf_info);
+    const cons_stack_top = @import("elf.zig").setupUserStack(cons_proc.space.pml4_phys, cons_entry, cons_elf_info);
+
+    // 7. Create threads
+    const ut_prod = thread.create_user(prod_entry, prod_stack_top, prod_proc.space.pml4_phys, prod_proc.pid) orelse {
+        serial.puts("[FATAL] ut_prod create failed\n");
+        halt();
+    };
+    const ut_cons = thread.create_user(cons_entry, cons_stack_top, cons_proc.space.pml4_phys, cons_proc.pid) orelse {
+        serial.puts("[FATAL] ut_cons create failed\n");
+        halt();
+    };
+
+    sched.enqueue(ut_prod);
+    prod_proc.thread_count += 1;
+
+    sched.enqueue(ut_cons);
+    cons_proc.thread_count += 1;
+
+    serial.puts("[P4-TEST] Spawning complete. Running scheduler...\n");
 }

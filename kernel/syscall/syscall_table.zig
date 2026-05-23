@@ -28,7 +28,7 @@ pub const SyscallNumber = enum(u64) {
     _, // Allow others without compilation error
 };
 
-pub const Result = struct {
+pub const Result = extern struct {
     value: u64 = 0,
     err: table_orig.Error = .success,
 };
@@ -56,7 +56,7 @@ pub fn dispatch(
         .MemCreate   => handleMemCreate(arg1),
         .MemMap      => handleMemMap(arg1, arg2, arg3),
         .MemUnmap    => handleMemUnmap(arg1),
-        .ThreadSpawn => stubNotImpl("ThreadSpawn"),
+        .ThreadSpawn => handleThreadSpawn(arg1),
         .CapWait     => handleCapWait(arg1, arg2),
         .CapNotify   => handleCapNotify(arg1, arg2),
         .NotifCreate => handleNotifCreate(),
@@ -331,3 +331,53 @@ fn stubNotImpl(name: []const u8) Result {
     serial.puts(" — not implemented\n");
     return .{ .err = .not_implemented };
 }
+
+fn handleThreadSpawn(mem_cap_handle: u64) Result {
+    const current_proc = table_orig.getCurrentProcess();
+
+    const entry = cap_mod.cap_table_lookup(&current_proc.cap_table, mem_cap_handle) orelse return .{ .err = .invalid_handle };
+    if (entry.type != @intFromEnum(cap_mod.CapType.Memory)) return .{ .err = .permission_denied };
+    const base_phys = cap_mod.getObjectPtr(entry);
+
+    const data = @as([*]const u8, @ptrFromInt(vmm.phys2virt(base_phys)))[0 .. 512 * 4096];
+    const elf_info = @import("../elf.zig").parse_elf64(data) catch |err| {
+        serial.puts("[ThreadSpawn] ELF parse failed: ");
+        serial.puts(@errorName(err));
+        serial.puts("\n");
+        return .{ .err = .invalid_argument };
+    };
+
+    const new_proc = proc.create("user_app", current_proc.pid) orelse return .{ .err = .out_of_memory };
+
+    const user_entry = @import("../elf.zig").load_elf(elf_info, data, new_proc.space.pml4_phys) catch |err| {
+        serial.puts("[ThreadSpawn] ELF load failed: ");
+        serial.puts(@errorName(err));
+        serial.puts("\n");
+        return .{ .err = .out_of_memory };
+    };
+
+    const user_rsp = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = new_proc.space.pml4_phys }, 4) orelse {
+        return .{ .err = .out_of_memory };
+    };
+    _ = user_rsp;
+
+    const argc_start = @import("../elf.zig").setupUserStack(new_proc.space.pml4_phys, user_entry, elf_info);
+
+    const ut = @import("../sched/thread.zig").create_user(user_entry, argc_start, new_proc.space.pml4_phys, new_proc.pid) orelse {
+        return .{ .err = .out_of_memory };
+    };
+
+    sched.enqueue(ut);
+    new_proc.thread_count += 1;
+
+    // Create Thread capability for the new thread
+    const th_handle = cap_mod.cap_table_insert(
+        &current_proc.cap_table,
+        @intFromPtr(ut),
+        @intFromEnum(cap_mod.CapType.Thread),
+        cap_mod.Rights.ThreadControl | cap_mod.Rights.ThreadInspect,
+    ) orelse return .{ .err = .out_of_memory };
+
+    return .{ .value = th_handle, .err = .success };
+}
+

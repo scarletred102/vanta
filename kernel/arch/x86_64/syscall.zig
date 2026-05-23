@@ -13,6 +13,7 @@ const MSR_STAR: u32 = 0xC0000081;
 const MSR_LSTAR: u32 = 0xC0000082;
 const MSR_FMASK: u32 = 0xC0000084;
 const MSR_EFER: u32 = 0xC0000080;
+const MSR_KERNEL_GS_BASE: u32 = 0xC0000102;
 
 const syscall_table = @import("../../syscall/syscall_table.zig");
 
@@ -38,23 +39,7 @@ inline fn wrmsr(msr: u32, val: u64) void {
     );
 }
 
-// Per-CPU storage layout at GS base:
-//   offset 0  = self pointer (u64)
-//   offset 8  = kernel RSP for syscall entry (u64) — kstack_top of current thread
-//   offset 16 = scratch for user RSP save (u64)
-// We use a simple static struct for Phase 2 (single-CPU).
-pub const CpuLocal = extern struct {
-    self_ptr: u64 = 0,
-    kernel_rsp: u64 = 0,
-    user_rsp_scratch: u64 = 0,
-};
-
-var bsp_cpu_local: CpuLocal = .{};
-
-fn writeMsrGsBase(val: u64) void {
-    const MSR_GS_BASE: u32 = 0xC0000101;
-    wrmsr(MSR_GS_BASE, val);
-}
+const cpu_local = @import("cpu_local.zig");
 
 // Kernel stack for syscall entry fallback
 var syscall_kernel_stack: [16 * 1024]u8 align(16) = [_]u8{0} ** (16 * 1024);
@@ -62,10 +47,13 @@ var syscall_kernel_stack: [16 * 1024]u8 align(16) = [_]u8{0} ** (16 * 1024);
 // Called from the kernel entry stub; receives syscall number in rax and args.
 export fn syscall_dispatch_from_asm(
     number: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64
-) callconv(.c) u64 {
-    _ = a6;
-    const result = syscall_table.dispatch(number, a1, a2, a3, a4, a5, 0);
-    return result.value;
+) callconv(.c) syscall_table.Result {
+    return syscall_table.dispatch(number, a1, a2, a3, a4, a5, a6);
+}
+
+fn writeMsrGsBase(val: u64) void {
+    const MSR_GS_BASE: u32 = 0xC0000101;
+    wrmsr(MSR_GS_BASE, val);
 }
 
 pub fn init() void {
@@ -78,9 +66,11 @@ pub fn init() void {
     wrmsr(MSR_STAR, star);
 
     // Set up GS base to point to CpuLocal so the syscall entry stub can swap stacks.
-    bsp_cpu_local.self_ptr = @intFromPtr(&bsp_cpu_local);
-    bsp_cpu_local.kernel_rsp = @intFromPtr(&syscall_kernel_stack) + syscall_kernel_stack.len;
-    writeMsrGsBase(@intFromPtr(&bsp_cpu_local));
+    const bsp_cpu = &cpu_local.cpus[0];
+    bsp_cpu.self_ptr = @intFromPtr(bsp_cpu);
+    bsp_cpu.kernel_rsp = @intFromPtr(&syscall_kernel_stack) + syscall_kernel_stack.len;
+    writeMsrGsBase(@intFromPtr(bsp_cpu));
+    wrmsr(MSR_KERNEL_GS_BASE, @intFromPtr(bsp_cpu));
 
     // LSTAR: address of syscall_entry (defined in inline asm below via wrapper)
     wrmsr(MSR_LSTAR, @intFromPtr(&syscall_entry_wrapper));
@@ -97,7 +87,8 @@ pub fn init() void {
 // Update the kernel RSP in CpuLocal when the scheduler switches threads.
 // Called by scheduler after setRsp0.
 pub fn setCpuKernelRsp(rsp: u64) void {
-    bsp_cpu_local.kernel_rsp = rsp;
+    const self = cpu_local.get_cpu_local();
+    self.kernel_rsp = rsp;
 }
 
 // The SYSCALL entry wrapper: saves registers, dispatches, restores, SYSRETQs.
@@ -121,14 +112,23 @@ export fn syscall_entry_wrapper() callconv(.naked) void {
         \\ pushq %%r9
         \\ pushq %%rbx
         \\ pushq %%rbp
-        \\ movq %%r10, %%rcx
+        \\ // Shift registers from System V syscall ABI to C calling convention
+        \\ subq $8, %%rsp            // 8-byte padding to align stack to 16-byte boundary
+        \\ pushq %%r9                // 7th argument on stack (a6)
+        \\ movq %%r8, %%r9          // 6th argument (a5)
+        \\ movq %%r10, %%r8         // 5th argument (a4)
+        \\ movq %%rdx, %%rcx         // 4th argument (a3)
+        \\ movq %%rsi, %%rdx         // 3rd argument (a2)
+        \\ movq %%rdi, %%rsi         // 2nd argument (a1)
+        \\ movq %%rax, %%rdi         // 1st argument (syscall number)
         \\ callq syscall_dispatch_from_asm
+        \\ addq $16, %%rsp           // Pop 7th argument and padding
         \\ popq %%rbp
         \\ popq %%rbx
         \\ popq %%r9
         \\ popq %%r8
         \\ popq %%r10
-        \\ popq %%rdx
+        \\ addq $8, %%rsp            // Skip popping rdx to preserve returned err in rdx!
         \\ popq %%rsi
         \\ popq %%rdi
         \\ popq %%r11
@@ -142,6 +142,8 @@ export fn syscall_entry_wrapper() callconv(.naked) void {
 // Ring 0 → Ring 3 transition via IRET
 pub fn enter_userspace(entry_addr: u64, stack: u64, _arg0: u64) noreturn {
     _ = _arg0;
+    const self = cpu_local.get_cpu_local();
+    wrmsr(MSR_KERNEL_GS_BASE, @intFromPtr(self));
     // Set user data segments
     asm volatile (
         \\ movw $0x23, %%ax
@@ -151,7 +153,7 @@ pub fn enter_userspace(entry_addr: u64, stack: u64, _arg0: u64) noreturn {
         \\ movw %%ax, %%gs
         :
         :
-        : "rax"
+        : .{ .rax = true }
     );
     // IRET frame: SS, RSP, RFLAGS, CS, RIP
     asm volatile (

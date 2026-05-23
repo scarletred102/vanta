@@ -264,6 +264,10 @@ comptime {
         \\    push %r13
         \\    push %r14
         \\    push %r15
+        \\    testb $3, 144(%rsp)
+        \\    jz 1f
+        \\    swapgs
+        \\1:
         \\    mov %rsp, %rdi
         \\    call handleException
         \\    pop %r15
@@ -282,6 +286,10 @@ comptime {
         \\    pop %rbx
         \\    pop %rax
         \\    add $16, %rsp
+        \\    testb $3, 8(%rsp)
+        \\    jz 2f
+        \\    swapgs
+        \\2:
         \\    iretq
     );
 }
