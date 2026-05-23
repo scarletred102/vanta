@@ -54,6 +54,18 @@ pub fn yield() void {
     next_t.state = .running;
     current = next_t;
 
+    // Load CR3 if page tables differ (prevents expensive TLB flush on same-process switches)
+    if (prev) |p| {
+        if (p.page_table != next_t.page_table) {
+            @import("../mm/vmm.zig").writeCr3(next_t.page_table);
+        }
+    } else {
+        @import("../mm/vmm.zig").writeCr3(next_t.page_table);
+    }
+
+    // Update TSS.RSP0 for user-to-kernel transition stack switches
+    @import("../arch/x86_64/tss.zig").setRsp0(next_t.kstack_top);
+
     if (prev) |p| {
         ctx.switch_context(&p.rsp, next_t.rsp);
     } else {
@@ -107,7 +119,44 @@ pub fn start() noreturn {
     };
     first.state = .running;
     current = first;
+
+    // Load CR3 for the first thread
+    @import("../mm/vmm.zig").writeCr3(first.page_table);
+
+    // Update TSS.RSP0 for user-to-kernel transition stack switches
+    @import("../arch/x86_64/tss.zig").setRsp0(first.kstack_top);
+
     var scratch: u64 = 0;
     ctx.switch_context(&scratch, first.rsp);
+    while (true) asm volatile ("hlt"); // unreachable
+}
+
+pub fn exitCurrentThread() noreturn {
+    if (current) |c| {
+        c.state = .dead;
+    }
+    
+    const next_t = dequeue() orelse {
+        serial.puts("[SCHED] No more threads to schedule! Halting system.\n");
+        // Trigger clean QEMU ACPI poweroff
+        asm volatile ("outw %[val], %[port]"
+            :
+            : [val] "{ax}" (@as(u16, 0x2000)),
+              [port] "{dx}" (@as(u16, 0x604)),
+        );
+        while (true) asm volatile ("cli; hlt");
+    };
+
+    next_t.state = .running;
+    current = next_t;
+
+    // Load CR3
+    @import("../mm/vmm.zig").writeCr3(next_t.page_table);
+
+    // Update TSS.RSP0
+    @import("../arch/x86_64/tss.zig").setRsp0(next_t.kstack_top);
+
+    var scratch: u64 = 0;
+    ctx.switch_context(&scratch, next_t.rsp);
     while (true) asm volatile ("hlt"); // unreachable
 }

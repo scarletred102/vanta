@@ -5,6 +5,14 @@
 const vmm = @import("../mm/vmm.zig");
 const cap = @import("../cap/handle.zig");
 
+pub const Vma = struct {
+    start: u64,
+    end: u64,
+    flags: u64,
+    lazy: bool = false,
+    cow: bool = false,
+};
+
 pub const Process = struct {
     pid: u32,
     name: [16]u8 = [_]u8{0} ** 16,
@@ -12,10 +20,38 @@ pub const Process = struct {
     cap_table: cap.CapabilityTable = .{},
     thread_count: u32 = 0,
     parent_pid: u32 = 0,
+    vmas: [16]Vma = [_]Vma{.{ .start = 0, .end = 0, .flags = 0, .lazy = false, .cow = false }} ** 16,
+    vma_count: usize = 0,
+
+    pub fn addVma(self: *Process, start: u64, end: u64, flags: u64, lazy: bool) bool {
+        if (self.vma_count >= 16) return false;
+        self.vmas[self.vma_count] = .{
+            .start = start,
+            .end = end,
+            .flags = flags,
+            .lazy = lazy,
+        };
+        self.vma_count += 1;
+        return true;
+    }
+
+    pub fn findVma(self: *const Process, addr: u64) ?*const Vma {
+        var i: usize = 0;
+        while (i < self.vma_count) : (i += 1) {
+            const vma = &self.vmas[i];
+            if (addr >= vma.start and addr < vma.end) {
+                return vma;
+            }
+        }
+        return null;
+    }
 };
 
 const MAX_PROCS: usize = 32;
-var pool: [MAX_PROCS]Process = undefined;
+var pool: [MAX_PROCS]Process = [_]Process{.{
+    .pid = 0,
+    .space = .{ .pml4_phys = 0 },
+}} ** MAX_PROCS;
 var used: [MAX_PROCS]bool = [_]bool{false} ** MAX_PROCS;
 var next_pid: u32 = 1;
 
@@ -27,11 +63,16 @@ pub fn create(name: []const u8, parent_pid: u32) ?*Process {
                 used[i] = false;
                 return null;
             };
-            pool[i] = .{
-                .pid = next_pid,
-                .space = space,
-                .parent_pid = parent_pid,
-            };
+            pool[i].pid = next_pid;
+            pool[i].space = space;
+            pool[i].parent_pid = parent_pid;
+            pool[i].thread_count = 0;
+            pool[i].vma_count = 0;
+            pool[i].cap_table.count = 0;
+            var c: usize = 0;
+            while (c < cap.MAX_CAPS) : (c += 1) {
+                pool[i].cap_table.entries[c] = null;
+            }
             const n = @min(name.len, 15);
             @memcpy(pool[i].name[0..n], name[0..n]);
             next_pid += 1;
@@ -57,12 +98,12 @@ pub fn byPid(pid: u32) ?*Process {
 // ── Kernel process (pid 0) ─────────────────────────────────────
 // All early kernel threads belong to this synthetic process.
 
-pub var kernel_proc: Process = undefined;
+pub var kernel_proc: Process = .{
+    .pid = 0,
+    .space = .{ .pml4_phys = 0 },
+};
 
 pub fn initKernelProc() void {
-    kernel_proc = .{
-        .pid = 0,
-        .space = vmm.AddressSpace.current(),
-    };
+    kernel_proc.space = vmm.AddressSpace.current();
     @memcpy(kernel_proc.name[0..6], "kernel");
 }

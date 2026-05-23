@@ -25,6 +25,7 @@ pub const PTE_ACCESS:  u64 = 1 << 5;
 pub const PTE_DIRTY:   u64 = 1 << 6;
 pub const PTE_HUGE:    u64 = 1 << 7;
 pub const PTE_GLOBAL:  u64 = 1 << 8;
+pub const PTE_COW:     u64 = 1 << 9;
 pub const PTE_NX:      u64 = 1 << 63;
 
 pub const ADDR_MASK: u64 = 0x000FFFFFFFFFF000;
@@ -61,6 +62,20 @@ pub fn createAddressSpace() ?AddressSpace {
     i = 256;
     while (i < 512) : (i += 1) v[i] = cur[i];
     return .{ .pml4_phys = pml4 };
+}
+
+pub fn create_user_address_space() ?u64 {
+    const pml4 = pmm.allocPage() orelse return null;
+    const v = @as([*]volatile u64, @ptrFromInt(phys2virt(pml4)));
+    // Zero entire PML4
+    var i: usize = 0;
+    while (i < 512) : (i += 1) v[i] = 0;
+    // Copy kernel-half entries (256-511) from current PML4 (shares kernel mappings above 0xFFFF800000000000)
+    const cur_pml4 = readCr3() & ADDR_MASK;
+    const cur = @as([*]volatile u64, @ptrFromInt(phys2virt(cur_pml4)));
+    i = 256;
+    while (i < 512) : (i += 1) v[i] = cur[i];
+    return pml4;
 }
 
 // ── CR3 / TLB ──────────────────────────────────────────────────
@@ -131,11 +146,82 @@ pub fn unmap(space: AddressSpace, v: u64) void {
     invlpg(v);
 }
 
+/// Map a page as non-present in the page table (but ensure intermediate tables exist with user permission).
+/// Returns false on failure to allocate intermediate page tables.
+pub fn map_non_present(space: AddressSpace, v: u64) bool {
+    const pte = walk(space.pml4_phys, v, true, true) orelse return false;
+    pte.* = 0;
+    invlpg(v);
+    return true;
+}
+
+/// Allocate n_pages from buddy, map them top-down at a fixed virtual range (0x7FFF00000000 downward),
+/// map one additional unmapped guard page below the bottom. Return top-of-stack virtual address.
+pub fn alloc_user_stack(n_pages: usize) ?u64 {
+    if (n_pages == 0) return null;
+    const space = AddressSpace.current();
+    const top_addr: u64 = 0x7FFF00000000;
+
+    var i: usize = 0;
+    while (i < n_pages) : (i += 1) {
+        const paddr = pmm.allocPage() orelse {
+            // Cleanup previously mapped pages
+            var j: usize = 0;
+            while (j < i) : (j += 1) {
+                const cleanup_vaddr = top_addr - (j + 1) * PAGE_SIZE;
+                if (translate(space, cleanup_vaddr)) |phys| {
+                    unmap(space, cleanup_vaddr);
+                    pmm.freePage(phys);
+                }
+            }
+            return null;
+        };
+        const vaddr = top_addr - (i + 1) * PAGE_SIZE;
+        // Map as user, writable
+        if (!map(space, vaddr, paddr, PTE_USER | PTE_WRITE)) {
+            pmm.freePage(paddr);
+            // Cleanup previously mapped pages
+            var j: usize = 0;
+            while (j < i) : (j += 1) {
+                const cleanup_vaddr = top_addr - (j + 1) * PAGE_SIZE;
+                if (translate(space, cleanup_vaddr)) |phys| {
+                    unmap(space, cleanup_vaddr);
+                    pmm.freePage(phys);
+                }
+            }
+            return null;
+        }
+    }
+
+    // Map one additional guard page below the bottom with no-present PTE
+    const guard_vaddr = top_addr - (n_pages + 1) * PAGE_SIZE;
+    if (!map_non_present(space, guard_vaddr)) {
+        // Cleanup all stack pages
+        var j: usize = 0;
+        while (j < n_pages) : (j += 1) {
+            const cleanup_vaddr = top_addr - (j + 1) * PAGE_SIZE;
+            if (translate(space, cleanup_vaddr)) |phys| {
+                unmap(space, cleanup_vaddr);
+                pmm.freePage(phys);
+            }
+        }
+        return null;
+    }
+
+    return top_addr;
+}
+
 /// Translate virt → phys. Returns null if not mapped.
 pub fn translate(space: AddressSpace, v: u64) ?u64 {
     const pte = walk(space.pml4_phys, v, false, false) orelse return null;
     if ((pte.* & PTE_PRESENT) == 0) return null;
     return (pte.* & ADDR_MASK) | (v & 0xFFF);
+}
+
+/// Retrieve the pointer to the leaf page table entry (PTE) for a virtual address.
+/// Returns null if not mapped.
+pub fn getPte(space: AddressSpace, v: u64) ?*volatile u64 {
+    return walk(space.pml4_phys, v, false, false);
 }
 
 // ── Init ───────────────────────────────────────────────────────

@@ -166,6 +166,8 @@ fn kmain() void {
 
     // SYSCALL MSRs
     syscall.init();
+    // To run the Ring 3 automated syscall/sysret MSR verification test:
+    // syscall.verifySyscallFromRing3();
 
     // APIC & Interrupt routing
     interrupts.init(rsdp_req.response);

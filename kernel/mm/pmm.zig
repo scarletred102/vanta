@@ -16,6 +16,7 @@ const MAX_PAGES: usize = 1024 * 1024;
 // Bit 7: 1 = Allocated, 0 = Free
 // Bits 0-6: order (0 to 10)
 var page_metadata: [MAX_PAGES]u8 = [_]u8{0x80} ** MAX_PAGES; // All allocated initially
+pub var page_refcounts: [MAX_PAGES]u16 = [_]u16{0} ** MAX_PAGES;
 
 var total_pages: usize = 0;
 var free_pages: usize = 0;
@@ -137,6 +138,13 @@ fn allocBlockInternal(order: usize) ?u64 {
         const idx = phys / PAGE_SIZE;
         setAllocated(idx, true);
         free_pages -= @as(usize, 1) << @as(u6, @intCast(order));
+        
+        // Initialize refcounts
+        const size = @as(usize, 1) << @as(u6, @intCast(order));
+        var i: usize = 0;
+        while (i < size) : (i += 1) {
+            page_refcounts[idx + i] = 1;
+        }
         return phys;
     }
 
@@ -175,6 +183,13 @@ fn allocBlockInternal(order: usize) ?u64 {
             const idx = phys / PAGE_SIZE;
             setAllocated(idx, true);
             free_pages -= @as(usize, 1) << @as(u6, @intCast(order));
+            
+            // Initialize refcounts
+            const size = @as(usize, 1) << @as(u6, @intCast(order));
+            var i: usize = 0;
+            while (i < size) : (i += 1) {
+                page_refcounts[idx + i] = 1;
+            }
             return phys;
         }
     }
@@ -304,4 +319,31 @@ pub fn allocContiguous(count: usize) ?u64 {
         }
     }
     return null;
+}
+
+pub fn refPage(phys: u64) void {
+    const idx = phys / PAGE_SIZE;
+    if (idx < MAX_PAGES) {
+        page_refcounts[idx] += 1;
+    }
+}
+
+pub fn unrefPage(phys: u64) void {
+    const idx = phys / PAGE_SIZE;
+    if (idx < MAX_PAGES) {
+        if (page_refcounts[idx] > 0) {
+            page_refcounts[idx] -= 1;
+            if (page_refcounts[idx] == 0) {
+                freePage(phys);
+            }
+        }
+    }
+}
+
+pub fn getRefCount(phys: u64) u16 {
+    const idx = phys / PAGE_SIZE;
+    if (idx < MAX_PAGES) {
+        return page_refcounts[idx];
+    }
+    return 0;
 }

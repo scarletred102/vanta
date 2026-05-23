@@ -54,7 +54,7 @@ var rsp0_stack: [IST_STACK_SIZE]u8 align(16) = [_]u8{0} ** IST_STACK_SIZE;
 
 // ── TSS Instance ────────────────────────────────────────────────
 
-pub var tss: Tss = .{};
+pub export var tss: Tss = .{};
 
 pub fn init() void {
     tss = .{};
