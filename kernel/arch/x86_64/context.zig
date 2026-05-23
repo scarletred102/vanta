@@ -54,15 +54,17 @@ pub fn initStack(stack_top: u64, entry: u64) u64 {
     // Leave one dummy return slot so entry sees the normal SysV stack alignment.
     rsp -= 8; @as(*u64, @ptrFromInt(rsp)).* = 0;
 
-    // Push frame: rip, r15, r14, r13, r12, rbp, rbx, rflags
-    // (in order high→low on stack)
-    rsp -= 8; @as(*u64, @ptrFromInt(rsp)).* = entry;       // RIP
-    rsp -= 8; @as(*u64, @ptrFromInt(rsp)).* = 0;           // r15
-    rsp -= 8; @as(*u64, @ptrFromInt(rsp)).* = 0;           // r14
-    rsp -= 8; @as(*u64, @ptrFromInt(rsp)).* = 0;           // r13
-    rsp -= 8; @as(*u64, @ptrFromInt(rsp)).* = 0;           // r12
-    rsp -= 8; @as(*u64, @ptrFromInt(rsp)).* = 0;           // rbp
-    rsp -= 8; @as(*u64, @ptrFromInt(rsp)).* = 0;           // rbx
-    rsp -= 8; @as(*u64, @ptrFromInt(rsp)).* = 0x2;         // rflags (IF=0 until IRQs exist)
+    // Push frame: RIP, rflags, rbx, rbp, r12, r13, r14, r15
+    // This perfectly matches the pop sequence in switch_context:
+    // pop %r15, pop %r14, pop %r13, pop %r12, pop %rbp, pop %rbx, popfq, ret.
+    // Order from high to low address on the stack:
+    rsp -= 8; @as(*u64, @ptrFromInt(rsp)).* = entry;       // RIP (popped last by ret)
+    rsp -= 8; @as(*u64, @ptrFromInt(rsp)).* = 0x202;       // rflags (IF=1 to enable interrupts, popped seventh by popfq)
+    rsp -= 8; @as(*u64, @ptrFromInt(rsp)).* = 0;           // rbx (popped sixth by pop %rbx)
+    rsp -= 8; @as(*u64, @ptrFromInt(rsp)).* = 0;           // rbp (popped fifth by pop %rbp)
+    rsp -= 8; @as(*u64, @ptrFromInt(rsp)).* = 0;           // r12 (popped fourth by pop %r12)
+    rsp -= 8; @as(*u64, @ptrFromInt(rsp)).* = 0;           // r13 (popped third by pop %r13)
+    rsp -= 8; @as(*u64, @ptrFromInt(rsp)).* = 0;           // r14 (popped second by pop %r14)
+    rsp -= 8; @as(*u64, @ptrFromInt(rsp)).* = 0;           // r15 (popped first by pop %r15)
     return rsp;
 }
