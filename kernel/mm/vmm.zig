@@ -29,7 +29,10 @@ pub const PTE_NX:      u64 = 1 << 63;
 
 pub const ADDR_MASK: u64 = 0x000FFFFFFFFFF000;
 
-pub inline fn phys2virt(p: u64) u64 { return p + hhdm_offset; }
+pub inline fn phys2virt(p: u64) u64 {
+    if (p >= hhdm_offset and hhdm_offset != 0) return p;
+    return p + hhdm_offset;
+}
 pub inline fn virt2phys_hhdm(v: u64) u64 { return v - hhdm_offset; }
 
 // ── Address Space ──────────────────────────────────────────────

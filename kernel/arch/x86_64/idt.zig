@@ -7,6 +7,7 @@
 // ============================================================================
 
 const serial = @import("serial.zig");
+const sched = @import("../../sched/scheduler.zig");
 
 // ── IDT Entry (16 bytes) ────────────────────────────────────────
 
@@ -234,6 +235,16 @@ comptime {
         \\pushq $31
         \\jmp common_isr_handler
         \\.balign 16
+        \\// Vector 32 — Timer IRQ
+        \\pushq $0
+        \\pushq $32
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 33 — Keyboard IRQ
+        \\pushq $0
+        \\pushq $33
+        \\jmp common_isr_handler
+        \\.balign 16
         \\
         \\// ── Common ISR Handler ──
         \\.global common_isr_handler
@@ -293,6 +304,22 @@ const InterruptFrame = extern struct {
 
 export fn handleException(frame: *InterruptFrame) callconv(.c) void {
     const vec: u8 = @truncate(frame.vector);
+
+    if (vec == 32) {
+        const interrupts = @import("interrupts.zig");
+        sched.tick();
+        interrupts.eoi();
+        return;
+    }
+
+    if (vec == 33) {
+        const interrupts = @import("interrupts.zig");
+        const keyboard = @import("../../drivers/keyboard.zig");
+        keyboard.handleInterrupt();
+        interrupts.eoi();
+        return;
+    }
+
     serial.puts("\n!!! EXCEPTION #");
     serial.putDec(vec);
     serial.puts(": ");
@@ -321,8 +348,8 @@ pub fn init() void {
     serial.puts("\n");
     serial.puts("[IDT]   Building table\n");
 
-    // Install gates for vectors 0-31 (with IST for NMI/DF/MC)
-    inline for (0..32) |i| {
+    // Install gates for vectors 0-33 (with IST for NMI/DF/MC)
+    inline for (0..34) |i| {
         idt[i] = makeGate(stub_base + i * STUB_SIZE, selector, istForVector(i));
     }
 

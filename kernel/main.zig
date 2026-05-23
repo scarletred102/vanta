@@ -15,6 +15,10 @@ const vmm = @import("mm/vmm.zig");
 const sched = @import("sched/scheduler.zig");
 const thread = @import("sched/thread.zig");
 const proc = @import("proc/process.zig");
+const interrupts = @import("arch/x86_64/interrupts.zig");
+const cap = @import("cap/handle.zig");
+const pci = @import("drivers/pci.zig");
+const port_mod = @import("ipc/port.zig");
 
 // ── Limine Requests ─────────────────────────────────────────────
 
@@ -23,6 +27,7 @@ pub export var framebuffer_req: limine.FramebufferRequest linksection(".limine_r
 pub export var memmap_req: limine.MemoryMapRequest linksection(".limine_requests") = .{};
 pub export var hhdm_req: limine.HhdmRequest linksection(".limine_requests") = .{};
 pub export var kaddr_req: limine.KernelAddressRequest linksection(".limine_requests") = .{};
+pub export var rsdp_req: limine.RsdpRequest linksection(".limine_requests") = .{};
 pub export var requests_end: [2]u64 linksection(".limine_requests_end") = limine.REQUESTS_END_MARKER;
 
 // ── Entry ───────────────────────────────────────────────────────
@@ -34,31 +39,78 @@ export fn _start() callconv(.c) noreturn {
     halt();
 }
 
-// ── Test kernel threads ─────────────────────────────────────────
+// ── Test capability-based IPC threads ───────────────────────────
 
-var counter_a: u64 = 0;
-var counter_b: u64 = 0;
+var test_port: port_mod.Port = .{};
+var root_handle: cap.Handle = 0;
+var write_handle: cap.Handle = 0;
 
-fn threadA() callconv(.c) noreturn {
+fn consumerThread() callconv(.c) noreturn {
+    var msg: port_mod.Message = undefined;
+    var msg_count: u64 = 0;
+    
     while (true) {
-        counter_a += 1;
-        if (counter_a % 1_000_000 == 0) {
-            serial.puts("[T-A]   tick ");
-            serial.putDec(counter_a / 1_000_000);
+        // Call the cap_recv system call directly using table.dispatch
+        const res = @import("syscall/table.zig").dispatch(
+            @intFromEnum(@import("syscall/table.zig").Syscall.cap_recv),
+            root_handle,
+            @intFromPtr(&msg),
+            0, 0, 0, 0
+        );
+        
+        if (res.err != .success) {
+            serial.puts("[CONSUMER] recv failed! Error: ");
+            serial.putDec(@intFromEnum(res.err));
             serial.puts("\n");
             sched.yield();
+            continue;
         }
+        
+        msg_count += 1;
+        const payload = msg.readPayload(0, 32);
+        const actual_str = std.mem.sliceTo(payload, 0);
+        serial.puts("[CONSUMER] Got Message #");
+        serial.putDec(msg_count);
+        serial.puts(": '");
+        serial.puts(actual_str);
+        serial.puts("'\n");
     }
 }
 
-fn threadB() callconv(.c) noreturn {
+fn producerThread() callconv(.c) noreturn {
+    var msg: port_mod.Message = .{};
+    var msg_count: u64 = 0;
+    
     while (true) {
-        counter_b += 1;
-        if (counter_b % 1_000_000 == 0) {
-            serial.puts("[T-B]   tick ");
-            serial.putDec(counter_b / 1_000_000);
+        msg_count += 1;
+        
+        // Format message
+        var buf: [32]u8 = [_]u8{0} ** 32;
+        const msg_str = std.fmt.bufPrint(&buf, "VantaOS Msg #{d}", .{msg_count}) catch unreachable;
+        msg.writePayload(0, msg_str);
+        
+        serial.puts("[PRODUCER] Sending Message #");
+        serial.putDec(msg_count);
+        serial.puts("...\n");
+        
+        // Call the cap_send system call
+        const res = @import("syscall/table.zig").dispatch(
+            @intFromEnum(@import("syscall/table.zig").Syscall.cap_send),
+            write_handle,
+            @intFromPtr(&msg),
+            0, 0, 0, 0
+        );
+        
+        if (res.err != .success) {
+            serial.puts("[PRODUCER] send failed! Error: ");
+            serial.putDec(@intFromEnum(res.err));
             serial.puts("\n");
-            sched.yield();
+        }
+        
+        // Sleep or busy-loop a bit so it's readable
+        var delay: u64 = 0;
+        while (delay < 1_000_000) : (delay += 1) {
+            asm volatile ("pause");
         }
     }
 }
@@ -86,6 +138,14 @@ fn kmain() void {
 
     earlyFbMark(0x00000044);
 
+    // VMM
+    if (hhdm_req.response) |h| {
+        vmm.init(h);
+    } else {
+        serial.puts("[FATAL] no HHDM\n");
+        halt();
+    }
+
     // PMM
     if (memmap_req.response) |mm| {
         pmm.init(mm);
@@ -100,20 +160,20 @@ fn kmain() void {
         halt();
     }
 
-    // VMM
-    if (hhdm_req.response) |h| {
-        vmm.init(h);
-    } else {
-        serial.puts("[FATAL] no HHDM\n");
-        halt();
-    }
-
     // Kernel process
     proc.initKernelProc();
     serial.puts("[PROC]  kernel proc (pid 0) initialized\n");
 
     // SYSCALL MSRs
     syscall.init();
+
+    // APIC & Interrupt routing
+    interrupts.init(rsdp_req.response);
+    interrupts.routeIrq(1, 33, 0);
+    serial.puts("[KBD]   PS/2 Keyboard routed (IRQ 1 -> Vector 33)\n");
+
+    // PCI Bus Scanner
+    pci.init();
 
     earlyFbMark(0x00440000);
 
@@ -135,18 +195,51 @@ fn kmain() void {
     // Scheduler
     sched.init();
 
-    // Spawn two test kernel threads
-    const ta = thread.create(threadA) orelse {
-        serial.puts("[FATAL] thread A create failed\n");
+    // Create a capability for our test port with full rights
+    const port_addr = @intFromPtr(&test_port);
+    const root_cap = cap.Capability{
+        .obj_type = .ipc_port,
+        .rights = cap.Rights.ALL,
+        .object = port_addr,
+        .parent = null,
+        .generation = 0,
+        .owner = 0, // kernel process
+    };
+    
+    // Register the port capability in the kernel process's cap table
+    root_handle = proc.kernel_proc.cap_table.insert(root_cap) orelse {
+        serial.puts("[FATAL] Failed to insert root port cap\n");
         halt();
     };
-    const tb = thread.create(threadB) orelse {
-        serial.puts("[FATAL] thread B create failed\n");
+    
+    // Now let's derive a Write-Only capability mask (disable read, enable write and derive)
+    var write_only_rights = cap.Rights.ALL;
+    write_only_rights.read = false;
+    
+    // Derive it!
+    write_handle = proc.kernel_proc.cap_table.derive(root_handle, write_only_rights) orelse {
+        serial.puts("[FATAL] Failed to derive write cap\n");
+        halt();
+    };
+    
+    serial.puts("[TEST]  IPC Caps initialized: Root Handle=");
+    serial.putDec(root_handle);
+    serial.puts("  Write-Only Handle=");
+    serial.putDec(write_handle);
+    serial.puts("\n");
+
+    // Spawn producer and consumer threads
+    const ta = thread.create(producerThread) orelse {
+        serial.puts("[FATAL] producer thread create failed\n");
+        halt();
+    };
+    const tb = thread.create(consumerThread) orelse {
+        serial.puts("[FATAL] consumer thread create failed\n");
         halt();
     };
     sched.enqueue(ta);
     sched.enqueue(tb);
-    serial.puts("[SCHED] 2 test threads queued\n");
+    serial.puts("[SCHED] producer and consumer threads queued\n");
 
     serial.puts("══════════════════════════════════════════════\n");
     serial.puts("  VantaOS Phase 1 ready. Starting scheduler.\n");

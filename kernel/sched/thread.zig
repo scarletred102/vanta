@@ -22,7 +22,8 @@ pub const Thread = struct {
     state: State,
     rsp: u64,              // saved kernel rsp (during switch)
     kstack_top: u64,       // top (high) of kernel stack
-    kstack_pages: u64,     // phys base of kstack (HHDM-mapped)
+    kstack_pages: u64,     // phys base of kstack
+    kstack_virt: u64,      // virtual base of kstack (above guard page)
     entry: u64,            // entry function
     proc_id: u32 = 0,      // owning process (0 = kernel)
     next: ?*Thread = null, // run-queue link
@@ -32,18 +33,52 @@ pub const Thread = struct {
 
 var next_tid: u32 = 1;
 
+// Start mapping kernel stacks starting at 0xFFFF900000000000.
+// This is safely located in the shared kernel half.
+var next_kstack_virt: u64 = 0xFFFF900000000000;
+
 /// Create a kernel thread that runs `entry` on first dispatch.
 pub fn create(entry: fn () callconv(.c) noreturn) ?*Thread {
     // Allocate Thread struct itself from a tiny static pool (Phase 1 simple)
     const slot = allocSlot() orelse return null;
 
-    // Allocate kernel stack (contiguous physical pages, HHDM-mapped)
+    // Allocate kernel stack (contiguous physical pages)
     const phys = pmm.allocContiguous(KSTACK_PAGES) orelse {
         freeSlot(slot);
         return null;
     };
-    const kstack_base = vmm.phys2virt(phys);
-    const kstack_top = kstack_base + KSTACK_SIZE;
+
+    // Allocate virtual range for stack (with an unmapped guard page)
+    const space = vmm.AddressSpace.current();
+    const stack_base_virt = next_kstack_virt + pmm.PAGE_SIZE; // Skip first page as guard page
+    
+    // Map each physical page into our virtual range
+    var i: usize = 0;
+    while (i < KSTACK_PAGES) : (i += 1) {
+        const vaddr = stack_base_virt + i * pmm.PAGE_SIZE;
+        const paddr = phys + i * pmm.PAGE_SIZE;
+        if (!vmm.map(space, vaddr, paddr, vmm.PTE_WRITE)) {
+            // Rollback mappings on failure
+            var j: usize = 0;
+            while (j < i) : (j += 1) {
+                vmm.unmap(space, stack_base_virt + j * pmm.PAGE_SIZE);
+            }
+            // Free physical memory
+            var p: u64 = phys;
+            var k: usize = 0;
+            while (k < KSTACK_PAGES) : (k += 1) {
+                pmm.freePage(p);
+                p += pmm.PAGE_SIZE;
+            }
+            freeSlot(slot);
+            return null;
+        }
+    }
+
+    const kstack_top = stack_base_virt + KSTACK_SIZE;
+    
+    // Advance virtual stack allocator (leave an extra page of padding between stacks as well)
+    next_kstack_virt += (KSTACK_PAGES + 2) * pmm.PAGE_SIZE;
 
     slot.* = .{
         .id = next_tid,
@@ -51,6 +86,7 @@ pub fn create(entry: fn () callconv(.c) noreturn) ?*Thread {
         .rsp = ctx.initStack(kstack_top, @intFromPtr(&entry)),
         .kstack_top = kstack_top,
         .kstack_pages = phys,
+        .kstack_virt = stack_base_virt,
         .entry = @intFromPtr(&entry),
     };
     next_tid += 1;
@@ -58,10 +94,17 @@ pub fn create(entry: fn () callconv(.c) noreturn) ?*Thread {
 }
 
 pub fn destroy(t: *Thread) void {
-    // Free kstack
-    var p: u64 = t.kstack_pages;
+    // Unmap virtual pages
+    const space = vmm.AddressSpace.current();
     var i: usize = 0;
     while (i < KSTACK_PAGES) : (i += 1) {
+        vmm.unmap(space, t.kstack_virt + i * pmm.PAGE_SIZE);
+    }
+
+    // Free kstack physical pages
+    var p: u64 = t.kstack_pages;
+    var j: usize = 0;
+    while (j < KSTACK_PAGES) : (j += 1) {
         pmm.freePage(p);
         p += pmm.PAGE_SIZE;
     }
