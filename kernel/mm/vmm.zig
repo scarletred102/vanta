@@ -211,6 +211,55 @@ pub fn alloc_user_stack(n_pages: usize) ?u64 {
     return top_addr;
 }
 
+pub fn alloc_user_stack_in_space(space: AddressSpace, n_pages: usize) ?u64 {
+    if (n_pages == 0) return null;
+    const top_addr: u64 = 0x7FFF00000000;
+
+    var i: usize = 0;
+    while (i < n_pages) : (i += 1) {
+        const paddr = pmm.allocPage() orelse {
+            var j: usize = 0;
+            while (j < i) : (j += 1) {
+                const cleanup_vaddr = top_addr - (j + 1) * PAGE_SIZE;
+                if (translate(space, cleanup_vaddr)) |phys| {
+                    unmap(space, cleanup_vaddr);
+                    pmm.freePage(phys);
+                }
+            }
+            return null;
+        };
+        const vaddr = top_addr - (i + 1) * PAGE_SIZE;
+        if (!map(space, vaddr, paddr, PTE_USER | PTE_WRITE)) {
+            pmm.freePage(paddr);
+            var j: usize = 0;
+            while (j < i) : (j += 1) {
+                const cleanup_vaddr = top_addr - (j + 1) * PAGE_SIZE;
+                if (translate(space, cleanup_vaddr)) |phys| {
+                    unmap(space, cleanup_vaddr);
+                    pmm.freePage(phys);
+                }
+            }
+            return null;
+        }
+    }
+
+    const guard_vaddr = top_addr - (n_pages + 1) * PAGE_SIZE;
+    if (!map_non_present(space, guard_vaddr)) {
+        var j: usize = 0;
+        while (j < n_pages) : (j += 1) {
+            const cleanup_vaddr = top_addr - (j + 1) * PAGE_SIZE;
+            if (translate(space, cleanup_vaddr)) |phys| {
+                unmap(space, cleanup_vaddr);
+                pmm.freePage(phys);
+            }
+        }
+        return null;
+    }
+
+    return top_addr;
+}
+
+
 /// Translate virt → phys. Returns null if not mapped.
 pub fn translate(space: AddressSpace, v: u64) ?u64 {
     const pte = walk(space.pml4_phys, v, false, false) orelse return null;
@@ -222,6 +271,53 @@ pub fn translate(space: AddressSpace, v: u64) ?u64 {
 /// Returns null if not mapped.
 pub fn getPte(space: AddressSpace, v: u64) ?*volatile u64 {
     return walk(space.pml4_phys, v, false, false);
+}
+
+pub fn freeAddressSpacePages(pml4_phys: u64) void {
+    const pml4 = tableAt(pml4_phys);
+    var idx4: usize = 0;
+    while (idx4 < 256) : (idx4 += 1) {
+        const e4 = pml4[idx4];
+        if ((e4 & PTE_PRESENT) != 0) {
+            const pdpt_phys = e4 & ADDR_MASK;
+            const pdpt = tableAt(pdpt_phys);
+            var idx3: usize = 0;
+            while (idx3 < 512) : (idx3 += 1) {
+                const e3 = pdpt[idx3];
+                if ((e3 & PTE_PRESENT) != 0) {
+                    if ((e3 & PTE_HUGE) != 0) {
+                        pmm.freePage(e3 & ADDR_MASK);
+                    } else {
+                        const pd_phys = e3 & ADDR_MASK;
+                        const pd = tableAt(pd_phys);
+                        var idx2: usize = 0;
+                        while (idx2 < 512) : (idx2 += 1) {
+                            const e2 = pd[idx2];
+                            if ((e2 & PTE_PRESENT) != 0) {
+                                if ((e2 & PTE_HUGE) != 0) {
+                                    pmm.freePage(e2 & ADDR_MASK);
+                                } else {
+                                    const pt_phys = e2 & ADDR_MASK;
+                                    const pt = tableAt(pt_phys);
+                                    var idx1: usize = 0;
+                                    while (idx1 < 512) : (idx1 += 1) {
+                                        const e1 = pt[idx1];
+                                        if ((e1 & PTE_PRESENT) != 0) {
+                                            pmm.freePage(e1 & ADDR_MASK);
+                                        }
+                                    }
+                                    pmm.freePage(pt_phys);
+                                }
+                            }
+                        }
+                        pmm.freePage(pd_phys);
+                    }
+                }
+            }
+            pmm.freePage(pdpt_phys);
+        }
+    }
+    pmm.freePage(pml4_phys);
 }
 
 // ── Init ───────────────────────────────────────────────────────

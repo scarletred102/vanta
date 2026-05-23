@@ -208,3 +208,36 @@ fn reloadSegments() void {
         : .{ .rax = true, .memory = true }
     );
 }
+
+var ap_gdts: [64]GdtArray align(8) = undefined;
+var ap_tsses: [64]tss.Tss align(16) = undefined;
+var ap_ist_stacks: [64][16384]u8 align(16) = undefined;
+
+pub fn init_ap(cpu_id: usize, rsp0: u64) void {
+    ap_gdts[cpu_id] = gdt;
+    
+    const cur_tss = &ap_tsses[cpu_id];
+    cur_tss.* = .{};
+    cur_tss.rsp0 = rsp0;
+    cur_tss.ist1 = @intFromPtr(&ap_ist_stacks[cpu_id]) + 16384;
+    cur_tss.ist2 = cur_tss.ist1;
+    cur_tss.ist3 = cur_tss.ist1;
+    cur_tss.iopb_offset = @sizeOf(tss.Tss);
+
+    const tss_base = @intFromPtr(cur_tss);
+    const tss_limit = @sizeOf(tss.Tss) - 1;
+    ap_gdts[cpu_id].tss_desc.limit_low = @truncate(tss_limit & 0xFFFF);
+    ap_gdts[cpu_id].tss_desc.base_low = @truncate(tss_base & 0xFFFF);
+    ap_gdts[cpu_id].tss_desc.base_mid1 = @truncate((tss_base >> 16) & 0xFF);
+    ap_gdts[cpu_id].tss_desc.limit_hi_flags = @truncate(((tss_limit >> 16) & 0x0F) | 0x00);
+    ap_gdts[cpu_id].tss_desc.base_mid2 = @truncate((tss_base >> 24) & 0xFF);
+    ap_gdts[cpu_id].tss_desc.base_upper = @truncate((tss_base >> 32) & 0xFFFFFFFF);
+
+    const gdtr = DescriptorRegister{
+        .limit = @sizeOf(GdtArray) - 1,
+        .base = @intFromPtr(&ap_gdts[cpu_id]),
+    };
+    asm volatile ("lgdt (%[gdtr])" : : [gdtr] "r" (&gdtr) : .{ .memory = true });
+    reloadSegments();
+    asm volatile ("ltr %[sel]" : : [sel] "r" (@as(u16, TSS_SEL)) : .{ .memory = true });
+}

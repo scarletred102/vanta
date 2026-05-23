@@ -198,11 +198,11 @@ fn parseMadt(rsdp_phys: u64) ?MadtInfo {
 
     if (revision >= 2) {
         // ACPI 2.0+
-        const xsdt_ptr = @as(*const u64, @ptrFromInt(rsdp_virt + 24));
+        const xsdt_ptr = @as(*align(1) const u64, @ptrFromInt(rsdp_virt + 24));
         xsdt_phys = xsdt_ptr.*;
     } else {
         // ACPI 1.0
-        const rsdt_ptr = @as(*const u32, @ptrFromInt(rsdp_virt + 16));
+        const rsdt_ptr = @as(*align(1) const u32, @ptrFromInt(rsdp_virt + 16));
         rsdt_phys = rsdt_ptr.*;
     }
 
@@ -221,12 +221,12 @@ fn parseMadt(rsdp_phys: u64) ?MadtInfo {
 
     const table_virt = vmm.phys2virt(table_phys);
     const header_sig = @as([*]const u8, @ptrFromInt(table_virt));
-    const header_len = @as(*const u32, @ptrFromInt(table_virt + 4)).*;
+    const header_len = @as(*align(1) const u32, @ptrFromInt(table_virt + 4)).*;
 
     if (is_xsdt) {
         if (!std.mem.eql(u8, header_sig[0..4], "XSDT")) return null;
         const entry_count = (header_len - 36) / 8;
-        const entries = @as([*]const u64, @ptrFromInt(table_virt + 36));
+        const entries = @as([*]align(4) const u64, @ptrFromInt(table_virt + 36));
         var i: usize = 0;
         while (i < entry_count) : (i += 1) {
             if (checkMadt(entries[i])) |info| return info;
@@ -253,9 +253,9 @@ fn checkMadt(table_phys: u64) ?MadtInfo {
     }
 
     serial.puts("[ACPI]  MADT found!\n");
-    const len = @as(*const u32, @ptrFromInt(table_virt + 4)).*;
+    const len = @as(*align(1) const u32, @ptrFromInt(table_virt + 4)).*;
 
-    const lapic_phys: u64 = @as(*const u32, @ptrFromInt(table_virt + 36)).*;
+    const lapic_phys: u64 = @as(*align(1) const u32, @ptrFromInt(table_virt + 36)).*;
     var ioapic_phys: u64 = 0xFEC00000;
 
     var offset: usize = 44;
@@ -266,7 +266,7 @@ fn checkMadt(table_phys: u64) ?MadtInfo {
 
         if (entry_type == 1) {
             // I/O APIC Record
-            const ioapic_addr = @as(*const u32, @ptrFromInt(table_virt + offset + 4)).*;
+            const ioapic_addr = @as(*align(1) const u32, @ptrFromInt(table_virt + offset + 4)).*;
             ioapic_phys = ioapic_addr;
             serial.puts("[ACPI]  MADT reports I/O APIC at 0x");
             serial.putHex(ioapic_phys);

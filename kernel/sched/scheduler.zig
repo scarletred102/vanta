@@ -14,6 +14,7 @@ const Thread = thread.Thread;
 pub var current: ?*Thread = null;
 var head: ?*Thread = null; // ready queue head
 var tail: ?*Thread = null;
+var thread_to_reap: ?*Thread = null;
 
 // ── Queue ──────────────────────────────────────────────────────
 
@@ -41,6 +42,11 @@ fn dequeue() ?*Thread {
 
 /// Yield: pick next ready thread, switch to it.
 pub fn yield() void {
+    if (thread_to_reap) |t| {
+        thread.destroy(t);
+        thread_to_reap = null;
+    }
+
     const next_t = dequeue() orelse return; // nothing else ready
 
     const prev = current;
@@ -65,6 +71,7 @@ pub fn yield() void {
 
     // Update TSS.RSP0 for user-to-kernel transition stack switches
     @import("../arch/x86_64/tss.zig").setRsp0(next_t.kstack_top);
+    @import("../arch/x86_64/syscall.zig").setCpuKernelRsp(next_t.kstack_top);
 
     if (prev) |p| {
         ctx.switch_context(&p.rsp, next_t.rsp);
@@ -108,11 +115,17 @@ pub fn init() void {
     current = null;
     head = null;
     tail = null;
+    thread_to_reap = null;
     serial.puts("[SCHED] Round-robin scheduler ready\n");
 }
 
 /// Kick off scheduling — never returns. Pulls first thread from ready queue.
 pub fn start() noreturn {
+    if (thread_to_reap) |t| {
+        thread.destroy(t);
+        thread_to_reap = null;
+    }
+
     const first = dequeue() orelse {
         serial.puts("[SCHED] PANIC: start() with empty ready queue\n");
         while (true) asm volatile ("hlt");
@@ -125,6 +138,7 @@ pub fn start() noreturn {
 
     // Update TSS.RSP0 for user-to-kernel transition stack switches
     @import("../arch/x86_64/tss.zig").setRsp0(first.kstack_top);
+    @import("../arch/x86_64/syscall.zig").setCpuKernelRsp(first.kstack_top);
 
     var scratch: u64 = 0;
     ctx.switch_context(&scratch, first.rsp);
@@ -132,8 +146,23 @@ pub fn start() noreturn {
 }
 
 pub fn exitCurrentThread() noreturn {
+    if (thread_to_reap) |t| {
+        thread.destroy(t);
+        thread_to_reap = null;
+    }
+
     if (current) |c| {
         c.state = .dead;
+        if (c.proc_id != 0) {
+            if (@import("../proc/process.zig").byPid(c.proc_id)) |p| {
+                p.thread_count -= 1;
+                if (p.thread_count == 0) {
+                    serial.puts("[PROC] Last thread exited, destroying process\n");
+                    @import("../proc/process.zig").destroy(p);
+                }
+            }
+        }
+        thread_to_reap = c;
     }
     
     const next_t = dequeue() orelse {
@@ -155,6 +184,7 @@ pub fn exitCurrentThread() noreturn {
 
     // Update TSS.RSP0
     @import("../arch/x86_64/tss.zig").setRsp0(next_t.kstack_top);
+    @import("../arch/x86_64/syscall.zig").setCpuKernelRsp(next_t.kstack_top);
 
     var scratch: u64 = 0;
     ctx.switch_context(&scratch, next_t.rsp);

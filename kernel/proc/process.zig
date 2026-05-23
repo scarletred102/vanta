@@ -88,9 +88,17 @@ pub fn create(name: []const u8, parent_pid: u32) ?*Process {
 }
 
 pub fn destroy(p: *Process) void {
+    var i: usize = 1;
+    while (i < cap.MAX_CAPS) : (i += 1) {
+        if (p.cap_table.entries[i].type != 0) {
+            cap.cap_revoke(&p.cap_table, cap.encodeHandle(@intCast(i), p.cap_table.entries[i].generation));
+        }
+    }
+    if (p.space.pml4_phys != 0) {
+        vmm.freeAddressSpacePages(p.space.pml4_phys);
+    }
     const idx = (@intFromPtr(p) - @intFromPtr(&pool[0])) / @sizeOf(Process);
     if (idx < MAX_PROCS) used[idx] = false;
-    // TODO: free page tables (walk and PMM-free)
 }
 
 pub fn byPid(pid: u32) ?*Process {
