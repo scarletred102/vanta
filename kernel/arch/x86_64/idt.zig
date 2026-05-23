@@ -320,6 +320,107 @@ export fn handleException(frame: *InterruptFrame) callconv(.c) void {
         return;
     }
 
+    if (vec == 14) {
+        var cr2: u64 = 0;
+        asm volatile ("mov %%cr2, %[cr2]" : [cr2] "=r" (cr2));
+
+        const is_userspace = cr2 < 0x0000800000000000;
+        const is_not_present = (frame.error_code & 1) == 0;
+        const is_protection_fault = (frame.error_code & 1) != 0;
+        const is_write = (frame.error_code & 2) != 0;
+
+        if (is_userspace) {
+            const vmm = @import("../../mm/vmm.zig");
+            const pmm = @import("../../mm/pmm.zig");
+            const table_mod = @import("../../syscall/table.zig");
+            const cur_proc = table_mod.getCurrentProcess();
+
+            // 1. Check Copy-on-Write (COW)
+            if (is_protection_fault and is_write) {
+                if (vmm.getPte(vmm.AddressSpace.current(), cr2)) |pte_ptr| {
+                    if ((pte_ptr.* & vmm.PTE_COW) != 0) {
+                        const old_phys = pte_ptr.* & vmm.ADDR_MASK;
+                        const ref = pmm.getRefCount(old_phys);
+
+                        if (ref == 1) {
+                            // Only 1 reference: mark writable and clear COW
+                            pte_ptr.* = (pte_ptr.* & ~vmm.PTE_COW) | vmm.PTE_WRITE;
+                            vmm.invlpg(cr2);
+
+                            return;
+                        } else if (ref > 1) {
+                            // More than 1 reference: copy-on-write allocate & copy
+                            if (pmm.allocPage()) |new_phys| {
+                                const old_virt = vmm.phys2virt(old_phys);
+                                const new_virt = vmm.phys2virt(new_phys);
+
+                                const old_ptr = @as([*]const u8, @ptrFromInt(old_virt));
+                                const new_ptr = @as([*]u8, @ptrFromInt(new_virt));
+                                var idx: usize = 0;
+                                while (idx < pmm.PAGE_SIZE) : (idx += 1) {
+                                    new_ptr[idx] = old_ptr[idx];
+                                }
+
+                                pmm.unrefPage(old_phys);
+                                const flags = (pte_ptr.* & ~vmm.ADDR_MASK & ~vmm.PTE_COW) | vmm.PTE_WRITE;
+                                pte_ptr.* = new_phys | flags;
+                                vmm.invlpg(cr2);
+
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Check Lazy demand paging (VMA)
+            if (is_not_present) {
+                if (cur_proc.findVma(cr2)) |vma| {
+                    if (vma.lazy) {
+                        if (pmm.allocPage()) |phys| {
+                            const virt_addr = vmm.phys2virt(phys);
+                            const ptr = @as([*]volatile u8, @ptrFromInt(virt_addr));
+                            var idx: usize = 0;
+                            while (idx < pmm.PAGE_SIZE) : (idx += 1) ptr[idx] = 0;
+
+                            const page_vaddr = cr2 & ~@as(u64, 0xFFF);
+                            const flags = vmm.PTE_USER | (if ((vma.flags & vmm.PTE_WRITE) != 0) vmm.PTE_WRITE else 0);
+                            if (vmm.map(vmm.AddressSpace.current(), page_vaddr, phys, flags)) {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // If we are here, userspace page fault is fatal
+            serial.puts("[FAULT] Fatal Page Fault in user space. CR2=0x");
+            serial.putHex(cr2);
+            serial.puts("  RIP=0x");
+            serial.putHex(frame.rip);
+            serial.puts("  ERR=0x");
+            serial.putHex(frame.error_code);
+            serial.puts(". Terminating process.\n");
+
+            sched.exitCurrentThread();
+        }
+
+        // Kernel space page fault remains a hard panic
+        serial.puts("\n!!! EXCEPTION #14: Kernel Page Fault\n");
+        serial.puts("    RIP=0x");
+        serial.putHex(frame.rip);
+        serial.puts("  CS=0x");
+        serial.putHex(frame.cs);
+        serial.puts("\n    ERR=0x");
+        serial.putHex(frame.error_code);
+        serial.puts("  CR2=0x");
+        serial.putHex(cr2);
+        serial.puts("\nSystem halted.\n");
+        while (true) {
+            asm volatile ("cli; hlt");
+        }
+    }
+
     serial.puts("\n!!! EXCEPTION #");
     serial.putDec(vec);
     serial.puts(": ");

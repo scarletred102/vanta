@@ -17,6 +17,8 @@ pub const State = enum(u8) {
     dead,
 };
 
+pub const PhysAddr = u64;
+
 pub const Thread = struct {
     id: u32,
     state: State,
@@ -26,6 +28,7 @@ pub const Thread = struct {
     kstack_virt: u64,      // virtual base of kstack (above guard page)
     entry: u64,            // entry function
     proc_id: u32 = 0,      // owning process (0 = kernel)
+    page_table: PhysAddr,  // CR3 physical address of the page table
     next: ?*Thread = null, // run-queue link
     wake_at: u64 = 0,      // for sleeping threads (TSC ticks)
     wait_obj: u64 = 0,     // for blocked threads (object id)
@@ -88,6 +91,7 @@ pub fn create(entry: fn () callconv(.c) noreturn) ?*Thread {
         .kstack_pages = phys,
         .kstack_virt = stack_base_virt,
         .entry = @intFromPtr(&entry),
+        .page_table = space.pml4_phys,
     };
     next_tid += 1;
     return slot;
