@@ -35,6 +35,7 @@ pub const Thread = struct {
     cap_list: @import("../cap/handle.zig").CapListHead = .{},
     user_entry: u64 = 0,
     user_stack: u64 = 0,
+    yielded: bool = true,
 };
 
 var next_tid: u32 = 1;
@@ -44,8 +45,24 @@ var next_tid: u32 = 1;
 var next_kstack_virt: u64 = 0xFFFF900000000000;
 
 fn userThreadTrampoline() callconv(.c) noreturn {
-    const current_t = @import("scheduler.zig").current.?;
+    const cpu = @import("../arch/x86_64/cpu_local.zig").get_cpu_local();
+    if (cpu.prev_thread) |p| {
+        @atomicStore(bool, &p.yielded, true, .release);
+        cpu.prev_thread = null;
+    }
+    const current_t = cpu.current_thread.?;
     @import("../arch/x86_64/syscall.zig").enter_userspace(current_t.user_entry, current_t.user_stack, 0);
+}
+
+fn kernelThreadTrampoline() callconv(.c) noreturn {
+    const cpu = @import("../arch/x86_64/cpu_local.zig").get_cpu_local();
+    if (cpu.prev_thread) |p| {
+        @atomicStore(bool, &p.yielded, true, .release);
+        cpu.prev_thread = null;
+    }
+    const current_t = cpu.current_thread.?;
+    const entry_fn = @as(fn () callconv(.c) noreturn, @ptrFromInt(current_t.entry));
+    entry_fn();
 }
 
 pub fn create_user(entry_addr: u64, stack_addr: u64, page_table: PhysAddr, proc_id: u32) ?*Thread {
@@ -94,7 +111,7 @@ pub fn create(entry: fn () callconv(.c) noreturn) ?*Thread {
     slot.* = .{
         .id = next_tid,
         .state = .ready,
-        .rsp = ctx.initStack(kstack_top, @intFromPtr(&entry)),
+        .rsp = ctx.initStack(kstack_top, @intFromPtr(&kernelThreadTrampoline)),
         .kstack_top = kstack_top,
         .kstack_pages = phys,
         .kstack_virt = stack_base_virt,
@@ -119,9 +136,9 @@ pub fn destroy(t: *Thread) void {
 const slab = @import("../mm/slab.zig");
 
 fn allocSlot() ?*Thread {
-    return slab.thread_cache.alloc();
+    return slab.alloc_thread();
 }
 
 fn freeSlot(t: *Thread) void {
-    slab.thread_cache.free(t);
+    slab.free_thread(t);
 }

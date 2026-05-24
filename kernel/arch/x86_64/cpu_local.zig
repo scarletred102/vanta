@@ -7,14 +7,14 @@ const Thread = @import("../../sched/thread.zig").Thread;
 const tss_mod = @import("tss.zig");
 
 // Run queue definition (Phase 6)
-pub const RunQueue = extern struct {
+pub const RunQueue = struct {
     head: ?*Thread = null,
     tail: ?*Thread = null,
     lock: TicketLock = .{},
     length: u32 = 0,
 };
 
-pub const TicketLock = extern struct {
+pub const TicketLock = struct {
     next_ticket: u16 = 0,
     now_serving: u16 = 0,
 
@@ -26,12 +26,37 @@ pub const TicketLock = extern struct {
     }
 
     pub fn unlock(self: *TicketLock) void {
-        const current = @atomicLoad(u16, &self.now_serving, .seq_cst);
-        @atomicStore(u16, &self.now_serving, current + 1, .seq_cst);
+        const cur = @atomicLoad(u16, &self.now_serving, .seq_cst);
+        @atomicStore(u16, &self.now_serving, cur +% 1, .seq_cst);
+    }
+
+    pub fn lock_irqsave(self: *TicketLock) u64 {
+        var flags: u64 = 0;
+        asm volatile (
+            \\ pushfq
+            \\ popq %[flags]
+            \\ cli
+            : [flags] "=r" (flags),
+            :
+            : .{ .memory = true }
+        );
+        self.lock();
+        return flags;
+    }
+
+    pub fn unlock_irqrestore(self: *TicketLock, flags: u64) void {
+        self.unlock();
+        asm volatile (
+            \\ pushq %[flags]
+            \\ popfq
+            :
+            : [flags] "r" (flags),
+            : .{ .memory = true }
+        );
     }
 };
 
-pub const CpuLocal = extern struct {
+pub const CpuLocal = struct {
     // Offset 0: self pointer (essential for %gs:0 to work)
     self_ptr: u64 = 0,
     // Offset 8: kernel RSP for syscall entry
@@ -48,11 +73,19 @@ pub const CpuLocal = extern struct {
     // Per-CPU runqueue
     run_queue: RunQueue = .{},
 
+    thread_to_reap: ?*Thread = null,
+
     // Slab magazines for Thread and CapEntry (Phase 5 magazines)
     thread_magazine: [64]u64 = [_]u64{0} ** 64,
     thread_mag_count: u32 = 0,
     cap_magazine: [64]u64 = [_]u64{0} ** 64,
     cap_mag_count: u32 = 0,
+
+    timer_ticks: u64 = 0,
+    watchdog_last_ticks: u64 = 0,
+    watchdog_miss_count: u32 = 0,
+    tss_ptr: ?*tss_mod.Tss = null,
+    prev_thread: ?*Thread = null,
 };
 
 pub var cpus: [64]CpuLocal = [_]CpuLocal{.{}} ** 64;

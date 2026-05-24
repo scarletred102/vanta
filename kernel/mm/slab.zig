@@ -12,6 +12,7 @@ const Thread = @import("../sched/thread.zig").Thread;
 const CapEntry = @import("../cap/handle.zig").CapEntry;
 const IpcPort = @import("../ipc/port.zig").Port;
 const VmaEntry = @import("../proc/process.zig").Vma;
+const cpu_local = @import("../arch/x86_64/cpu_local.zig");
 
 pub fn SlabCache(comptime T: type, comptime alignment: ?usize) type {
     return struct {
@@ -37,7 +38,7 @@ pub fn SlabCache(comptime T: type, comptime alignment: ?usize) type {
             var slots: comptime_int = 1;
             while (true) {
                 const words = (slots + 63) / 64;
-                const h_size = 16 + words * 8; // pointer + u32 + padding
+                const h_size = 16 + words * 8;
                 const start = (h_size + obj_align - 1) & ~(obj_align - 1);
                 if (start + (slots + 1) * obj_size > 4096) {
                     return slots;
@@ -62,7 +63,7 @@ pub fn SlabCache(comptime T: type, comptime alignment: ?usize) type {
             const phys = pmm.allocPage() orelse return null;
             const virt = vmm.phys2virt(phys);
             const h = @as(*Header, @ptrFromInt(virt));
-            
+
             h.next = self.head;
             h.free_count = slots_per_page;
             @memset(&h.bitmap, 0);
@@ -90,12 +91,11 @@ pub fn SlabCache(comptime T: type, comptime alignment: ?usize) type {
                     if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
                         const uaf_ptr = @as(*const u64, @ptrCast(@alignCast(ptr)));
                         if ((uaf_ptr.* >> 32) == 0xDEADC0DE) {
-                            @panic("SlabCache: Use-after-free or corruption detected (contains 0xDEADC0DE)!");
+                            @panic("SlabCache: Use-after-free or corruption detected!");
                         }
                     }
 
                     @memset(@as([*]u8, @ptrCast(ptr))[0..obj_size], 0);
-
                     return ptr;
                 }
             }
@@ -105,9 +105,9 @@ pub fn SlabCache(comptime T: type, comptime alignment: ?usize) type {
         pub fn free(self: *Self, ptr: *T) void {
             const h = @as(*Header, @ptrFromInt(@intFromPtr(ptr) & ~@as(u64, 4095)));
             const slot_idx = (@intFromPtr(ptr) - (@intFromPtr(h) + slots_start)) / obj_size;
-            
+
             if (slot_idx >= slots_per_page) {
-                @panic("SlabCache: free pointer out of bounds for slab page!");
+                @panic("SlabCache: free pointer out of bounds!");
             }
 
             const word_idx = slot_idx / 64;
@@ -160,4 +160,59 @@ pub fn init() void {
     port_cache.init();
     vma_cache.init();
     serial.puts("[SLAB]  Slab allocator online\n");
+}
+
+// ── Magazine-aware alloc/free for Thread and CapEntry ──────────────────────
+// On free: deposit into per-CPU magazine (skip global slab if not full).
+// On alloc: drain from per-CPU magazine first (skip global slab if available).
+
+pub fn alloc_thread() ?*Thread {
+    const cpu = cpu_local.get_cpu_local();
+    if (cpu.thread_mag_count > 0) {
+        cpu.thread_mag_count -= 1;
+        const ptr: *Thread = @ptrFromInt(cpu.thread_magazine[cpu.thread_mag_count]);
+        @memset(@as([*]u8, @ptrCast(ptr))[0..@sizeOf(Thread)], 0);
+        return ptr;
+    }
+    return thread_cache.alloc();
+}
+
+pub fn free_thread(ptr: *Thread) void {
+    const cpu = cpu_local.get_cpu_local();
+    if (cpu.thread_mag_count < 64) {
+        cpu.thread_magazine[cpu.thread_mag_count] = @intFromPtr(ptr);
+        cpu.thread_mag_count += 1;
+        // Write sentinel so magazine slots aren't confused with live objects
+        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+            const uaf_ptr = @as(*u64, @ptrCast(@alignCast(ptr)));
+            uaf_ptr.* = 0xDEADC0DEDEADBEEF;
+        }
+        return;
+    }
+    thread_cache.free(ptr);
+}
+
+pub fn alloc_cap() ?*CapEntry {
+    const cpu = cpu_local.get_cpu_local();
+    if (cpu.cap_mag_count > 0) {
+        cpu.cap_mag_count -= 1;
+        const ptr: *CapEntry = @ptrFromInt(cpu.cap_magazine[cpu.cap_mag_count]);
+        @memset(@as([*]u8, @ptrCast(ptr))[0..@sizeOf(CapEntry)], 0);
+        return ptr;
+    }
+    return cap_cache.alloc();
+}
+
+pub fn free_cap(ptr: *CapEntry) void {
+    const cpu = cpu_local.get_cpu_local();
+    if (cpu.cap_mag_count < 64) {
+        cpu.cap_magazine[cpu.cap_mag_count] = @intFromPtr(ptr);
+        cpu.cap_mag_count += 1;
+        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+            const uaf_ptr = @as(*u64, @ptrCast(@alignCast(ptr)));
+            uaf_ptr.* = 0xDEADC0DEDEADBEEF;
+        }
+        return;
+    }
+    cap_cache.free(ptr);
 }

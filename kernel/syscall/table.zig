@@ -140,7 +140,8 @@ pub fn dispatch(
 // ── Implemented Handlers ────────────────────────────────────────
 
 pub fn getCurrentProcess() *proc.Process {
-    if (sched.current) |t| {
+    const cpu = @import("../arch/x86_64/cpu_local.zig").get_cpu_local();
+    if (cpu.current_thread) |t| {
         if (t.proc_id == 0) {
             return &proc.kernel_proc;
         } else {

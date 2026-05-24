@@ -8,11 +8,52 @@
 const pmm = @import("pmm.zig");
 const limine = @import("../limine.zig");
 const serial = @import("../arch/x86_64/serial.zig");
+const cpu_local = @import("../arch/x86_64/cpu_local.zig");
+const interrupts = @import("../arch/x86_64/interrupts.zig");
 
 pub const PAGE_SIZE: u64 = 4096;
 
 // HHDM offset captured from Limine — phys + offset = virt
 pub var hhdm_offset: u64 = 0;
+
+// TLB shootdown state
+pub var shootdown_va: u64 = 0;
+pub var shootdown_count: u32 = 0;
+
+// Send TLB invalidation IPI to all CPUs sharing the same pml4 (excluding self).
+// Vector 0x40 is the TLB shootdown IPI.
+pub fn tlb_shootdown(pml4_phys: u64, va: u64) void {
+    const n = @atomicLoad(u32, &cpu_local.cpu_count, .monotonic);
+    if (n <= 1) return;
+
+    // Count CPUs that need shootdown
+    var targets: u32 = 0;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const t = cpu_local.cpus[i].current_thread orelse continue;
+        if (t.page_table == pml4_phys) targets += 1;
+    }
+    if (targets == 0) return;
+
+    @atomicStore(u64, &shootdown_va, va, .release);
+    @atomicStore(u32, &shootdown_count, targets, .release);
+
+    // Send fixed IPI (vector 0x40) to all other CPUs
+    i = 0;
+    while (i < n) : (i += 1) {
+        const apic_id = cpu_local.cpus[i].apic_id;
+        const my_apic = cpu_local.get_cpu_local().apic_id;
+        if (apic_id == my_apic) continue;
+        interrupts.lapicWrite(0x310, @as(u32, apic_id) << 24);
+        interrupts.lapicWrite(0x300, 0x00004040); // fixed, vector 0x40
+    }
+
+    // Spin until all targets have acknowledged
+    var timeout: u32 = 1_000_000;
+    while (@atomicLoad(u32, &shootdown_count, .acquire) > 0 and timeout > 0) : (timeout -= 1) {
+        asm volatile ("pause");
+    }
+}
 
 // ── PTE ────────────────────────────────────────────────────────
 
@@ -136,6 +177,7 @@ pub fn map(space: AddressSpace, v: u64, p: u64, flags: u64) bool {
     const pte = walk(space.pml4_phys, v, true, (flags & PTE_USER) != 0) orelse return false;
     pte.* = (p & ADDR_MASK) | flags | PTE_PRESENT;
     invlpg(v);
+    tlb_shootdown(space.pml4_phys, v);
     return true;
 }
 
@@ -144,6 +186,7 @@ pub fn unmap(space: AddressSpace, v: u64) void {
     const pte = walk(space.pml4_phys, v, false, false) orelse return;
     pte.* = 0;
     invlpg(v);
+    tlb_shootdown(space.pml4_phys, v);
 }
 
 /// Map a page as non-present in the page table (but ensure intermediate tables exist with user permission).

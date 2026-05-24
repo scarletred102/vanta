@@ -84,6 +84,24 @@ pub fn init() void {
     serial.puts("\n");
 }
 
+pub fn init_ap(self: *cpu_local.CpuLocal) void {
+    // Enable SCE (System Call Extensions) in EFER
+    const efer = rdmsr(MSR_EFER);
+    wrmsr(MSR_EFER, efer | 1);
+
+    // STAR: bits[47:32] = kernel CS=0x08, bits[63:48] = 0x1B
+    const star: u64 = (@as(u64, 0x1B) << 48) | (@as(u64, gdt.KERNEL_CODE_SEL) << 32);
+    wrmsr(MSR_STAR, star);
+
+    // LSTAR: address of syscall_entry (defined in inline asm below via wrapper)
+    wrmsr(MSR_LSTAR, @intFromPtr(&syscall_entry_wrapper));
+
+    // FMASK: clear RFLAGS.IF on syscall entry
+    wrmsr(MSR_FMASK, 0x200);
+
+    wrmsr(MSR_KERNEL_GS_BASE, @intFromPtr(self));
+}
+
 // Update the kernel RSP in CpuLocal when the scheduler switches threads.
 // Called by scheduler after setRsp0.
 pub fn setCpuKernelRsp(rsp: u64) void {
