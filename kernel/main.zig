@@ -123,6 +123,18 @@ fn kmain() void {
 
     serial.init();
     serial.puts("\n[BOOT]  VantaOS Phase 3 starting\n");
+    
+    // Dump CpuLocal offsets
+    const cpu_local = @import("arch/x86_64/cpu_local.zig");
+    serial.puts("[DEBUG] CpuLocal size: ");
+    serial.putDec(@sizeOf(cpu_local.CpuLocal));
+    serial.puts("  timer_ticks offset: ");
+    serial.putDec(@offsetOf(cpu_local.CpuLocal, "timer_ticks"));
+    serial.puts("  watchdog_last_ticks offset: ");
+    serial.putDec(@offsetOf(cpu_local.CpuLocal, "watchdog_last_ticks"));
+    serial.puts("  watchdog_miss_count offset: ");
+    serial.putDec(@offsetOf(cpu_local.CpuLocal, "watchdog_miss_count"));
+    serial.puts("\n");
 
     if (!base_revision.isSupported()) {
         serial.puts("[WARN]  base revision not confirmed\n");
@@ -174,7 +186,8 @@ fn kmain() void {
     // APIC & Interrupt routing
     interrupts.init(rsdp_req.response);
     if (rsdp_req.response) |resp| {
-        @import("arch/x86_64/smp.zig").smp_init(resp.address);
+        const vmm_mod = @import("mm/vmm.zig");
+        @import("arch/x86_64/smp.zig").smp_init(vmm_mod.virt2phys_hhdm(resp.address));
     }
     interrupts.routeIrq(1, 33, 0);
     serial.puts("[KBD]   PS/2 Keyboard routed (IRQ 1 -> Vector 33)\n");
@@ -253,9 +266,13 @@ fn halt() noreturn {
     while (true) asm volatile ("hlt");
 }
 
-pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
+pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, return_address: ?usize) noreturn {
     serial.puts("\n!!! PANIC: ");
     serial.puts(msg);
+    if (return_address) |ra| {
+        serial.puts(" at RIP=0x");
+        serial.putHex(ra);
+    }
     serial.puts("\n");
     halt();
 }

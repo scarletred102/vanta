@@ -17,7 +17,7 @@ pub const TicketLock = struct {
 
     pub fn unlock(self: *TicketLock) void {
         const current = @atomicLoad(u16, &self.now_serving, .seq_cst);
-        @atomicStore(u16, &self.now_serving, current + 1, .seq_cst);
+        @atomicStore(u16, &self.now_serving, current +% 1, .seq_cst);
     }
 };
 

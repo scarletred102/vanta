@@ -8,6 +8,9 @@
 
 const serial = @import("serial.zig");
 const sched = @import("../../sched/scheduler.zig");
+const vmm = @import("../../mm/vmm.zig");
+const interrupts_mod = @import("interrupts.zig");
+const cpu_local = @import("cpu_local.zig");
 
 // ── IDT Entry (16 bytes) ────────────────────────────────────────
 
@@ -296,6 +299,42 @@ comptime {
 
 extern const isr_stub_table: u8;
 
+// Naked stub for TLB shootdown IPI (vector 0x40)
+comptime {
+    asm (
+        \\.global tlb_ipi_stub
+        \\tlb_ipi_stub:
+        \\    pushq %rax
+        \\    pushq %rcx
+        \\    pushq %rdx
+        \\    pushq %rsi
+        \\    pushq %rdi
+        \\    pushq %r8
+        \\    pushq %r9
+        \\    pushq %r10
+        \\    pushq %r11
+        \\    callq handleTlbShootdown
+        \\    popq %r11
+        \\    popq %r10
+        \\    popq %r9
+        \\    popq %r8
+        \\    popq %rdi
+        \\    popq %rsi
+        \\    popq %rdx
+        \\    popq %rcx
+        \\    popq %rax
+        \\    iretq
+    );
+}
+extern fn tlb_ipi_stub() void;
+
+export fn handleTlbShootdown() callconv(.c) void {
+    const va = @atomicLoad(u64, &vmm.shootdown_va, .acquire);
+    asm volatile ("invlpg (%[v])" :: [v] "r" (va) : .{ .memory = true });
+    _ = @atomicRmw(u32, &vmm.shootdown_count, .Sub, 1, .release);
+    interrupts_mod.eoi();
+}
+
 const STUB_SIZE: usize = 16;
 
 // ── Interrupt Frame & Exception Handler ─────────────────────────
@@ -315,6 +354,43 @@ export fn handleException(frame: *InterruptFrame) callconv(.c) void {
 
     if (vec == 32) {
         const interrupts = @import("interrupts.zig");
+        const cpu = cpu_local.get_cpu_local();
+        const current_ticks = @atomicLoad(u64, &cpu.timer_ticks, .monotonic);
+        if (current_ticks == 0) {
+            serial.puts("[WATCHDOG] CPU ");
+            serial.putDec(cpu.cpu_id);
+            serial.puts(" first tick. CpuLocal=0x");
+            serial.putHex(@intFromPtr(cpu));
+            serial.puts(" timer_ticks=0x");
+            serial.putHex(@intFromPtr(&cpu.timer_ticks));
+            serial.puts("\n");
+        }
+        @atomicStore(u64, &cpu.timer_ticks, current_ticks + 1, .monotonic);
+
+        if (cpu.cpu_id == 0) {
+            var idx: usize = 0;
+            while (idx < cpu_local.cpu_count) : (idx += 1) {
+                const other_cpu = &cpu_local.cpus[idx];
+                if (other_cpu.cpu_id == 0) continue;
+
+                const other_ticks = @atomicLoad(u64, &other_cpu.timer_ticks, .monotonic);
+                if (other_ticks == other_cpu.watchdog_last_ticks) {
+                    other_cpu.watchdog_miss_count += 1;
+                    if (other_cpu.watchdog_miss_count >= 100) {
+                        serial.puts("\n!!! WATCHDOG PANIC: CPU ");
+                        serial.putDec(other_cpu.cpu_id);
+                        serial.puts(" LAPIC timer stalled for 1 second! (ticks: ");
+                        serial.putDec(other_ticks);
+                        serial.puts(")\n");
+                        while (true) asm volatile ("cli; hlt");
+                    }
+                } else {
+                    other_cpu.watchdog_last_ticks = other_ticks;
+                    other_cpu.watchdog_miss_count = 0;
+                }
+            }
+        }
+
         sched.tick();
         interrupts.eoi();
         return;
@@ -338,7 +414,6 @@ export fn handleException(frame: *InterruptFrame) callconv(.c) void {
         const is_write = (frame.error_code & 2) != 0;
 
         if (is_userspace) {
-            const vmm = @import("../../mm/vmm.zig");
             const pmm = @import("../../mm/pmm.zig");
             const table_mod = @import("../../syscall/table.zig");
             const cur_proc = table_mod.getCurrentProcess();
@@ -461,6 +536,9 @@ pub fn init() void {
     inline for (0..34) |i| {
         idt[i] = makeGate(stub_base + i * STUB_SIZE, selector, istForVector(i));
     }
+
+    // Vector 0x40: TLB shootdown IPI
+    idt[0x40] = makeGate(@intFromPtr(&tlb_ipi_stub), selector, 0);
 
     // Build IDTR (10 bytes: limit[2] + base[8])
     const idtr = DescriptorRegister{

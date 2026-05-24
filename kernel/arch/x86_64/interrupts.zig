@@ -29,6 +29,7 @@ const LAPIC_TMRDIV: u32 = 0x3E0;
 // Globals
 pub var lapic_virt: u64 = 0;
 pub var ioapic_virt: u64 = 0;
+pub var lapic_ticks_in_10ms: u32 = 0;
 
 pub fn init(rsdp_response: ?*volatile limine.RsdpResponse) void {
     // 1. Mask the legacy 8259 PIC
@@ -41,10 +42,14 @@ pub fn init(rsdp_response: ?*volatile limine.RsdpResponse) void {
     var ioapic_phys: u64 = 0xFEC00000;
 
     if (rsdp_response) |resp| {
-        serial.puts("[ACPI]  RSDP found at physical 0x");
+        // Limine gives a virtual (HHDM) address; convert to physical for parseMadt
+        const rsdp_phys = vmm.virt2phys_hhdm(resp.address);
+        serial.puts("[ACPI]  RSDP at virt=0x");
         serial.putHex(resp.address);
+        serial.puts(" phys=0x");
+        serial.putHex(rsdp_phys);
         serial.puts("\n");
-        if (parseMadt(resp.address)) |madt_info| {
+        if (parseMadt(rsdp_phys)) |madt_info| {
             lapic_phys = madt_info.lapic_phys;
             ioapic_phys = madt_info.ioapic_phys;
         }
@@ -165,6 +170,8 @@ fn calibrateTimer() void {
     serial.putDec(ticks_in_10ms);
     serial.puts(" LAPIC ticks per 10ms\n");
 
+    lapic_ticks_in_10ms = ticks_in_10ms;
+
     // Configure LAPIC Timer for periodic interrupts on Vector 32 (Timer IRQ)
     // Periodic mode is bit 17
     lapicWrite(LAPIC_LVT_TMR, 0x20000 | 32);
@@ -174,6 +181,15 @@ fn calibrateTimer() void {
     lapicWrite(LAPIC_TMRINIT, ticks_in_10ms);
 
     serial.puts("[SCHED] Periodic preemption timer enabled (100Hz)\n");
+}
+
+pub fn setupApTimer() void {
+    // Configure LAPIC Timer for periodic interrupts on Vector 32 (Timer IRQ)
+    lapicWrite(LAPIC_LVT_TMR, 0x20000 | 32);
+    // Divide by 16
+    lapicWrite(LAPIC_TMRDIV, 0x03);
+    // Initial count to the calibrated value
+    lapicWrite(LAPIC_TMRINIT, lapic_ticks_in_10ms);
 }
 
 // ── ACPI / MADT Parsing ──────────────────────────────────────────
@@ -226,7 +242,7 @@ fn parseMadt(rsdp_phys: u64) ?MadtInfo {
     if (is_xsdt) {
         if (!std.mem.eql(u8, header_sig[0..4], "XSDT")) return null;
         const entry_count = (header_len - 36) / 8;
-        const entries = @as([*]align(4) const u64, @ptrFromInt(table_virt + 36));
+        const entries = @as([*]align(1) const u64, @ptrFromInt(table_virt + 36));
         var i: usize = 0;
         while (i < entry_count) : (i += 1) {
             if (checkMadt(entries[i])) |info| return info;
@@ -234,7 +250,7 @@ fn parseMadt(rsdp_phys: u64) ?MadtInfo {
     } else {
         if (!std.mem.eql(u8, header_sig[0..4], "RSDT")) return null;
         const entry_count = (header_len - 36) / 4;
-        const entries = @as([*]const u32, @ptrFromInt(table_virt + 36));
+        const entries = @as([*]align(1) const u32, @ptrFromInt(table_virt + 36));
         var i: usize = 0;
         while (i < entry_count) : (i += 1) {
             if (checkMadt(entries[i])) |info| return info;

@@ -42,11 +42,22 @@ pub const Notification = struct {
                 cur = prev.?;
             }
             // No bits set — block
-            const t = sched.current orelse return 0;
+            const t = @import("../arch/x86_64/cpu_local.zig").get_cpu_local().current_thread orelse return 0;
             t.state = .blocked;
             t.wait_obj = @intFromPtr(self);
-            t.next = self.waiters;
-            self.waiters = t;
+            var already_in = false;
+            var curr_w = self.waiters;
+            while (curr_w) |w| {
+                if (w == t) {
+                    already_in = true;
+                    break;
+                }
+                curr_w = w.next;
+            }
+            if (!already_in) {
+                t.next = self.waiters;
+                self.waiters = t;
+            }
             sched.block();
             // Resumed — loop and re-check
         }

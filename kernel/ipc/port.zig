@@ -82,6 +82,9 @@ pub const Port = struct {
     tail: usize = 0,
     count: usize = 0,
 
+    /// Spinlock to protect queue operations under SMP
+    lock: @import("../arch/x86_64/cpu_local.zig").TicketLock = .{},
+
     /// Capability handle of the owning process (for access checks)
     owner_cap: cap.Handle = cap.NULL_HANDLE,
 
@@ -100,8 +103,11 @@ pub const Port = struct {
 
     /// Non-blocking send. Returns false if queue full or port closed.
     pub fn send(self: *Port, msg: *const Message) bool {
-        if (self.state == .closed) return false;
-        if (self.count >= PORT_QUEUE_CAPACITY) return false;
+        const flags = self.lock.lock_irqsave();
+        if (self.state == .closed or self.count >= PORT_QUEUE_CAPACITY) {
+            self.lock.unlock_irqrestore(flags);
+            return false;
+        }
 
         self.queue[self.tail] = msg.*;
         self.tail = (self.tail + 1) % PORT_QUEUE_CAPACITY;
@@ -111,52 +117,128 @@ pub const Port = struct {
         if (self.recv_waiters) |w| {
             self.recv_waiters = w.next;
             w.next = null;
+            self.lock.unlock_irqrestore(flags);
             sched.wake(w);
+            return true;
         }
+        self.lock.unlock_irqrestore(flags);
         return true;
     }
 
     /// Blocking send. Parks current thread on send_waiters until queue has room.
     pub fn sendBlocking(self: *Port, msg: *const Message) bool {
         while (true) {
-            if (self.state == .closed) return false;
-            if (self.send(msg)) return true;
+            const flags = self.lock.lock_irqsave();
+            if (self.state == .closed) {
+                self.lock.unlock_irqrestore(flags);
+                return false;
+            }
+            if (self.count < PORT_QUEUE_CAPACITY) {
+                self.queue[self.tail] = msg.*;
+                self.tail = (self.tail + 1) % PORT_QUEUE_CAPACITY;
+                self.count += 1;
+
+                if (self.recv_waiters) |w| {
+                    self.recv_waiters = w.next;
+                    w.next = null;
+                    self.lock.unlock_irqrestore(flags);
+                    sched.wake(w);
+                    return true;
+                }
+                self.lock.unlock_irqrestore(flags);
+                return true;
+            }
+
             // Park
-            const cur = sched.current orelse return false;
-            cur.state = .blocked;
-            cur.wait_obj = @intFromPtr(self);
-            cur.next = self.send_waiters;
-            self.send_waiters = cur;
+            const cur = @import("../arch/x86_64/cpu_local.zig").get_cpu_local().current_thread orelse {
+                self.lock.unlock_irqrestore(flags);
+                return false;
+            };
+            var already_in = false;
+            var curr_w = self.send_waiters;
+            while (curr_w) |w| {
+                if (w == cur) {
+                    already_in = true;
+                    break;
+                }
+                curr_w = w.next;
+            }
+            if (!already_in) {
+                cur.next = self.send_waiters;
+                self.send_waiters = cur;
+            }
+            @atomicStore(bool, &cur.yielded, false, .release);
+            self.lock.unlock_irqrestore(flags);
             sched.block();
-            // resumed → loop and retry
         }
     }
 
     /// Non-blocking recv. Returns null if empty.
     pub fn recv(self: *Port) ?Message {
-        if (self.count == 0) return null;
+        const flags = self.lock.lock_irqsave();
+        if (self.count == 0) {
+            self.lock.unlock_irqrestore(flags);
+            return null;
+        }
         const msg = self.queue[self.head];
         self.head = (self.head + 1) % PORT_QUEUE_CAPACITY;
         self.count -= 1;
+
         // Wake one send waiter
         if (self.send_waiters) |w| {
             self.send_waiters = w.next;
             w.next = null;
+            self.lock.unlock_irqrestore(flags);
             sched.wake(w);
+            return msg;
         }
+        self.lock.unlock_irqrestore(flags);
         return msg;
     }
 
     /// Blocking recv. Parks until a message arrives.
     pub fn recvBlocking(self: *Port) ?Message {
         while (true) {
-            if (self.recv()) |m| return m;
-            if (self.state == .closed) return null;
-            const cur = sched.current orelse return null;
-            cur.state = .blocked;
-            cur.wait_obj = @intFromPtr(self);
-            cur.next = self.recv_waiters;
-            self.recv_waiters = cur;
+            const flags = self.lock.lock_irqsave();
+            if (self.count > 0) {
+                const msg = self.queue[self.head];
+                self.head = (self.head + 1) % PORT_QUEUE_CAPACITY;
+                self.count -= 1;
+
+                if (self.send_waiters) |w| {
+                    self.send_waiters = w.next;
+                    w.next = null;
+                    self.lock.unlock_irqrestore(flags);
+                    sched.wake(w);
+                    return msg;
+                }
+                self.lock.unlock_irqrestore(flags);
+                return msg;
+            }
+            if (self.state == .closed) {
+                self.lock.unlock_irqrestore(flags);
+                return null;
+            }
+
+            const cur = @import("../arch/x86_64/cpu_local.zig").get_cpu_local().current_thread orelse {
+                self.lock.unlock_irqrestore(flags);
+                return null;
+            };
+            var already_in = false;
+            var curr_w = self.recv_waiters;
+            while (curr_w) |w| {
+                if (w == cur) {
+                    already_in = true;
+                    break;
+                }
+                curr_w = w.next;
+            }
+            if (!already_in) {
+                cur.next = self.recv_waiters;
+                self.recv_waiters = cur;
+            }
+            @atomicStore(bool, &cur.yielded, false, .release);
+            self.lock.unlock_irqrestore(flags);
             sched.block();
         }
     }
@@ -173,19 +255,29 @@ pub const Port = struct {
 
     /// Close the port. Pending messages are discarded. Wake all waiters.
     pub fn close(self: *Port) void {
+        const flags = self.lock.lock_irqsave();
         self.state = .closed;
         self.count = 0;
         self.head = 0;
         self.tail = 0;
-        while (self.recv_waiters) |w| {
-            self.recv_waiters = w.next;
+        
+        var rw = self.recv_waiters;
+        self.recv_waiters = null;
+        var sw = self.send_waiters;
+        self.send_waiters = null;
+        self.lock.unlock_irqrestore(flags);
+
+        while (rw) |w| {
+            const nxt = w.next;
             w.next = null;
             sched.wake(w);
+            rw = nxt;
         }
-        while (self.send_waiters) |w| {
-            self.send_waiters = w.next;
+        while (sw) |w| {
+            const nxt = w.next;
             w.next = null;
             sched.wake(w);
+            sw = nxt;
         }
     }
 };

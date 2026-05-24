@@ -95,7 +95,7 @@ const GdtArray = extern struct {
     tss_desc: TssDescriptor,
 };
 
-var gdt: GdtArray align(8) = .{
+var gdt: GdtArray align(16) = .{
     .null_entry  = entry(0, 0, 0, 0),
     // Access flags:
     //   P=1 DPL=00 S=1 E=1 RW=1 = 0x9A (kernel code)
@@ -209,14 +209,48 @@ fn reloadSegments() void {
     );
 }
 
-var ap_gdts: [64]GdtArray align(8) = undefined;
-var ap_tsses: [64]tss.Tss align(16) = undefined;
+const PaddedTss = extern struct {
+    tss_val: tss.Tss,
+    padding: [8]u8 = [_]u8{0} ** 8,
+};
+
+var ap_gdts: [64]GdtArray align(16) = undefined;
+var ap_tsses: [64]PaddedTss align(16) = undefined;
 var ap_ist_stacks: [64][16384]u8 align(16) = undefined;
 
 pub fn init_ap(cpu_id: usize, rsp0: u64) void {
+    @import("cpu.zig").outb(0x3f8, 'a');
+    @import("cpu.zig").outb(0x3f8, ':');
+    @import("cpu.zig").outb(0x3f8, @as(u8, @intCast(cpu_id)) + '0');
+    @import("cpu.zig").outb(0x3f8, ' ');
+
+    var temp1 = @intFromPtr(&ap_gdts[cpu_id]);
+    var i: usize = 0;
+    @import("cpu.zig").outb(0x3f8, 'G');
+    @import("cpu.zig").outb(0x3f8, ':');
+    while (i < 16) : (i += 1) {
+        const nybble = @as(u8, @truncate((temp1 >> 60) & 0xF));
+        const char = if (nybble < 10) nybble + '0' else nybble - 10 + 'A';
+        @import("cpu.zig").outb(0x3f8, char);
+        temp1 <<= 4;
+    }
+    @import("cpu.zig").outb(0x3f8, ' ');
+
+    var temp2 = @intFromPtr(&ap_tsses[cpu_id]);
+    i = 0;
+    @import("cpu.zig").outb(0x3f8, 'T');
+    @import("cpu.zig").outb(0x3f8, ':');
+    while (i < 16) : (i += 1) {
+        const nybble = @as(u8, @truncate((temp2 >> 60) & 0xF));
+        const char = if (nybble < 10) nybble + '0' else nybble - 10 + 'A';
+        @import("cpu.zig").outb(0x3f8, char);
+        temp2 <<= 4;
+    }
+    @import("cpu.zig").outb(0x3f8, '\n');
+
     ap_gdts[cpu_id] = gdt;
     
-    const cur_tss = &ap_tsses[cpu_id];
+    const cur_tss = &ap_tsses[cpu_id].tss_val;
     cur_tss.* = .{};
     cur_tss.rsp0 = rsp0;
     cur_tss.ist1 = @intFromPtr(&ap_ist_stacks[cpu_id]) + 16384;
@@ -229,6 +263,7 @@ pub fn init_ap(cpu_id: usize, rsp0: u64) void {
     ap_gdts[cpu_id].tss_desc.limit_low = @truncate(tss_limit & 0xFFFF);
     ap_gdts[cpu_id].tss_desc.base_low = @truncate(tss_base & 0xFFFF);
     ap_gdts[cpu_id].tss_desc.base_mid1 = @truncate((tss_base >> 16) & 0xFF);
+    ap_gdts[cpu_id].tss_desc.access = 0x89; // Force Available TSS type (0x89), not Busy (0x8B)
     ap_gdts[cpu_id].tss_desc.limit_hi_flags = @truncate(((tss_limit >> 16) & 0x0F) | 0x00);
     ap_gdts[cpu_id].tss_desc.base_mid2 = @truncate((tss_base >> 24) & 0xFF);
     ap_gdts[cpu_id].tss_desc.base_upper = @truncate((tss_base >> 32) & 0xFFFFFFFF);
@@ -237,7 +272,15 @@ pub fn init_ap(cpu_id: usize, rsp0: u64) void {
         .limit = @sizeOf(GdtArray) - 1,
         .base = @intFromPtr(&ap_gdts[cpu_id]),
     };
+    @import("cpu.zig").outb(0x3f8, 'b');
     asm volatile ("lgdt (%[gdtr])" : : [gdtr] "r" (&gdtr) : .{ .memory = true });
+    @import("cpu.zig").outb(0x3f8, 'c');
     reloadSegments();
+    @import("cpu.zig").outb(0x3f8, 'd');
     asm volatile ("ltr %[sel]" : : [sel] "r" (@as(u16, TSS_SEL)) : .{ .memory = true });
+    @import("cpu.zig").outb(0x3f8, 'e');
+}
+
+pub fn get_ap_tss(cpu_id: usize) *tss.Tss {
+    return &ap_tsses[cpu_id].tss_val;
 }
