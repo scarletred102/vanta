@@ -243,6 +243,37 @@ pub const Port = struct {
         }
     }
 
+    /// Park on recv_waiters until at least one message is present, without consuming it.
+    /// Used by cap_poll to block without dequeuing.
+    pub fn waitReady(self: *Port) void {
+        while (true) {
+            const flags = self.lock.lock_irqsave();
+            if (self.count > 0 or self.state == .closed) {
+                self.lock.unlock_irqrestore(flags);
+                return;
+            }
+            const cur = @import("../arch/x86_64/cpu_local.zig").get_cpu_local().current_thread orelse {
+                self.lock.unlock_irqrestore(flags);
+                return;
+            };
+            var already_in = false;
+            var curr_w = self.recv_waiters;
+            while (curr_w) |w| {
+                if (w == cur) { already_in = true; break; }
+                curr_w = w.next;
+            }
+            if (!already_in) {
+                cur.next = self.recv_waiters;
+                self.recv_waiters = cur;
+            }
+            @atomicStore(bool, &cur.yielded, false, .release);
+            self.lock.unlock_irqrestore(flags);
+            sched.block();
+            // Woken by a send — return so cap_poll can re-check readiness.
+            return;
+        }
+    }
+
     /// Check if the port has pending messages.
     pub fn hasPending(self: *const Port) bool {
         return self.count > 0;

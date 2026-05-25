@@ -73,6 +73,7 @@ pub const Error = enum(u64) {
     bad_syscall = 10,
     interrupted = 11,
     not_implemented = 12,
+    timeout = 13,
 };
 
 // ── Syscall Result ──────────────────────────────────────────────
