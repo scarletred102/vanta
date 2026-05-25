@@ -10,6 +10,7 @@ const std = @import("std");
 const table_orig = @import("../syscall/table.zig");
 const port_mod = @import("../ipc/port.zig");
 const notif_mod = @import("../ipc/notification.zig");
+const shm_mod = @import("../ipc/shm.zig");
 const Thread = @import("../sched/thread.zig").Thread;
 
 // ── Handle ──────────────────────────────────────────────────────
@@ -30,6 +31,7 @@ pub const CapType = enum(u4) {
     Notification = 4,
     DeviceIRQ = 5,
     PageTable = 6,
+    SharedMemory = 7,
 };
 
 // ── Rights ──────────────────────────────────────────────────────
@@ -62,6 +64,10 @@ pub const Rights = struct {
     // PageTable
     pub const PageTableMap: u8 = 1 << 0;
     pub const PageTableUnmap: u8 = 1 << 1;
+
+    // SharedMemory
+    pub const ShmRead: u8 = 1 << 0;
+    pub const ShmWrite: u8 = 1 << 1;
 };
 
 // ── CapEntry (Embedded Tree Links) ──────────────────────────────
@@ -190,6 +196,10 @@ fn getCapListHead(cap_type: u4, obj_ptr: u48) ?*CapListHead {
         .Notification => {
             const notif = @as(*notif_mod.Notification, @ptrFromInt(obj_u64));
             return &notif.cap_list;
+        },
+        .SharedMemory => {
+            const shm = @as(*shm_mod.ShmObject, @ptrFromInt(obj_u64));
+            return &shm.cap_list;
         },
         else => null,
     };

@@ -80,6 +80,25 @@ pub fn vanta_irq_bind(irq_cap: u64, notif_cap: u64) u64 {
     return syscall(15, irq_cap, notif_cap, 0, 0, 0, 0).err;
 }
 
+pub fn vanta_shm_create(n_pages: u64) struct { handle: u64, err: u64 } {
+    const res = syscall(16, n_pages, 0, 0, 0, 0, 0);
+    return .{ .handle = res.val, .err = res.err };
+}
+
+pub fn vanta_shm_map(shm_cap: u64, vaddr: u64) u64 {
+    return syscall(17, shm_cap, vaddr, 0, 0, 0, 0).err;
+}
+
+pub fn vanta_cap_send_nb(port: u64, msg_ptr: u64) u64 {
+    return syscall(18, port, msg_ptr, 0, 0, 0, 0).err;
+}
+
+// Returns index of first ready handle, or ~0 on timeout.
+pub fn vanta_cap_poll(handles_ptr: u64, n_handles: u64, timeout_ms: i64) struct { idx: u64, err: u64 } {
+    const res = syscall(19, handles_ptr, n_handles, @bitCast(timeout_ms), 0, 0, 0);
+    return .{ .idx = res.val, .err = res.err };
+}
+
 pub fn vanta_thread_spawn(mem_cap: u64) struct { handle: u64, err: u64 } {
     const res = syscall(9, mem_cap, 0, 0, 0, 0, 0);
     return .{ .handle = res.val, .err = res.err };
