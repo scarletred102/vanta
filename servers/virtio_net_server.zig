@@ -15,6 +15,8 @@
 
 const std = @import("std");
 const libvanta = @import("../libvanta/libvanta.zig");
+const net = @import("net_ethernet_arp.zig");
+const ip = @import("net_ipv4_icmp.zig");
 
 // ── Startup Capability Handles ─────────────────────────────────────────────
 pub const PCI_CAP_HANDLE: u64      = 0x0001000000000001;
@@ -130,6 +132,9 @@ const Message = struct {
 var mac_addr: [6]u8 = [_]u8{0} ** 6;
 var irq_notif_handle: u64 = 0;
 var dry_run: bool = false;
+var net_stack: net.Stack = undefined;
+var ipv4_stack: ip.Stack = undefined;
+var net_send_ctx: u8 = 0;
 
 // RX queue physical base (PFN written to device) and per-slot buffer addrs
 var rx_queue_phys: u64 = 0;
@@ -332,177 +337,53 @@ fn rearmRxDesc(desc_idx: usize) void {
 }
 
 // ── Ethernet & ARP Implementation ──────────────────────────────────────────
-const OUR_IP: [4]u8 = .{ 10, 0, 2, 15 };
+const OUR_IP: net.Ip4 = .{ 10, 0, 2, 15 };
 
-const EthernetHeader = extern struct {
-    dst_mac: [6]u8,
-    src_mac: [6]u8,
-    ethertype: u16,
-};
-
-const ArpPacket = extern struct {
-    htype: u16,
-    ptype: u16,
-    hlen: u8,
-    plen: u8,
-    op: u16,
-    sha: [6]u8,
-    spa: [4]u8,
-    tha: [6]u8,
-    tpa: [4]u8,
-};
-
-const ArpEntry = struct {
-    ip: [4]u8 = .{0, 0, 0, 0},
-    mac: [6]u8 = .{0, 0, 0, 0, 0, 0},
-    expiry_tsc: u64 = 0,
-    valid: bool = false,
-};
-
-var arp_cache: [32]ArpEntry = [_]ArpEntry{.{}} ** 32;
-const ARP_TTL_CYCLES: u64 = 60 * 2_000_000_000; // 60 seconds at ~2 GHz
-
-fn getTsc() u64 {
+fn getTimeNs() u64 {
     var low: u32 = 0;
     var high: u32 = 0;
     asm volatile ("rdtsc" : [low] "={eax}" (low), [high] "={edx}" (high));
-    return (@as(u64, high) << 32) | low;
+    // Temporary calibration: existing P8 code assumes a ~2 GHz TSC.
+    return (((@as(u64, high) << 32) | low) / 2);
 }
 
-fn arpCacheGet(ip: [4]u8) ?[6]u8 {
-    const current_tsc = getTsc();
-    for (&arp_cache) |*entry| {
-        if (entry.valid) {
-            if (current_tsc > entry.expiry_tsc) {
-                entry.valid = false;
-                continue;
-            }
-            if (std.mem.eql(u8, &entry.ip, &ip)) {
-                return entry.mac;
-            }
-        }
-    }
-    return null;
+fn sendRawEthernetFrame(_: *anyopaque, frame: []const u8) bool {
+    return sendFrameInternal(frame);
 }
 
-fn arpCachePut(ip: [4]u8, mac: [6]u8) void {
-    const current_tsc = getTsc();
-    const expiry = current_tsc +% ARP_TTL_CYCLES;
-
-    // Update existing entry if present
-    for (&arp_cache) |*entry| {
-        if (entry.valid and std.mem.eql(u8, &entry.ip, &ip)) {
-            entry.mac = mac;
-            entry.expiry_tsc = expiry;
-            return;
-        }
+fn sendRawIpv4Packet(_: *anyopaque, dst_ip: net.Ip4, packet: []const u8) bool {
+    const next_hop = routeIpv4(dst_ip);
+    if (arpCacheGet(next_hop)) |dst_mac| {
+        return send_ethernet_frame(dst_mac, net.ETHERTYPE_IPV4, packet);
     }
-
-    // Otherwise, find an invalid or oldest entry to evict
-    var best_idx: ?usize = null;
-    for (&arp_cache, 0..) |*entry, idx| {
-        if (!entry.valid) {
-            best_idx = idx;
-            break;
-        }
-    }
-
-    if (best_idx == null) {
-        best_idx = 0;
-    }
-
-    if (best_idx) |idx| {
-        arp_cache[idx] = ArpEntry{
-            .ip = ip,
-            .mac = mac,
-            .expiry_tsc = expiry,
-            .valid = true,
-        };
-    }
+    sendArpRequest(next_hop);
+    return false;
 }
 
-fn send_ethernet_frame(dst_mac: [6]u8, ethertype: u16, payload: []const u8) bool {
-    var eth_frame: [1518]u8 = undefined;
-    if (payload.len > 1500) return false;
-
-    @memcpy(eth_frame[0..6], &dst_mac);
-    @memcpy(eth_frame[6..12], &mac_addr);
-    std.mem.writeInt(u16, eth_frame[12..14][0..2], ethertype, .big);
-    @memcpy(eth_frame[14 .. 14 + payload.len], payload);
-
-    return sendFrameInternal(eth_frame[0 .. 14 + payload.len]);
+fn routeIpv4(dst_ip: net.Ip4) net.Ip4 {
+    if (dst_ip[0] == OUR_IP[0] and dst_ip[1] == OUR_IP[1] and dst_ip[2] == OUR_IP[2]) {
+        return dst_ip;
+    }
+    return .{ 10, 0, 2, 2 };
 }
 
-fn sendArpRequest(target_ip: [4]u8) void {
-    var arp = ArpPacket{
-        .htype = std.mem.nativeToBig(u16, 1),
-        .ptype = std.mem.nativeToBig(u16, 0x0800),
-        .hlen = 6,
-        .plen = 4,
-        .op = std.mem.nativeToBig(u16, 1),
-        .sha = mac_addr,
-        .spa = OUR_IP,
-        .tha = .{ 0, 0, 0, 0, 0, 0 },
-        .tpa = target_ip,
-    };
-    
-    const broadcast_mac: [6]u8 = .{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-    const arp_slice = @as([*]const u8, @ptrCast(&arp))[0..@sizeOf(ArpPacket)];
-    _ = send_ethernet_frame(broadcast_mac, 0x0806, arp_slice);
+fn arpCacheGet(addr: net.Ip4) ?net.Mac {
+    return net_stack.cache.get(addr, getTimeNs());
 }
 
-fn sendArpReply(target_mac: [6]u8, target_ip: [4]u8) void {
-    var arp = ArpPacket{
-        .htype = std.mem.nativeToBig(u16, 1),
-        .ptype = std.mem.nativeToBig(u16, 0x0800),
-        .hlen = 6,
-        .plen = 4,
-        .op = std.mem.nativeToBig(u16, 2),
-        .sha = mac_addr,
-        .spa = OUR_IP,
-        .tha = target_mac,
-        .tpa = target_ip,
-    };
-    
-    const arp_slice = @as([*]const u8, @ptrCast(&arp))[0..@sizeOf(ArpPacket)];
-    _ = send_ethernet_frame(target_mac, 0x0806, arp_slice);
+fn send_ethernet_frame(dst_mac: net.Mac, ethertype: u16, payload: []const u8) bool {
+    return net_stack.sendEthernetFrame(dst_mac, ethertype, payload);
+}
+
+fn sendArpRequest(target_ip: net.Ip4) void {
+    _ = net_stack.sendArpRequest(target_ip);
 }
 
 fn handleReceivedFrame(frame: []const u8) ?[]const u8 {
-    if (frame.len < 14) return null;
-
-    const eth_hdr = @as(*align(1) const EthernetHeader, @ptrCast(frame.ptr));
-    const ethertype = std.mem.bigToNative(u16, eth_hdr.ethertype);
-
-    switch (ethertype) {
-        0x0806 => {
-            if (frame.len < 14 + @sizeOf(ArpPacket)) return null;
-            const arp = @as(*align(1) const ArpPacket, @ptrCast(frame[14..].ptr));
-            const op = std.mem.bigToNative(u16, arp.op);
-            
-            arpCachePut(arp.spa, arp.sha);
-
-            if (op == 1) {
-                if (std.mem.eql(u8, &arp.tpa, &OUR_IP)) {
-                    libvanta.vanta_debug_print("virtio-net: Received ARP request for our IP, replying...");
-                    sendArpReply(arp.sha, arp.spa);
-                }
-            } else if (op == 2) {
-                libvanta.vanta_debug_print("virtio-net: Received ARP reply, cached.");
-            }
-            return null;
-        },
-        0x0800 => {
-            return frame[14..];
-        },
-        0x86DD => {
-            libvanta.vanta_debug_print("virtio-net: Received IPv6 frame, dropping (stub).");
-            return null;
-        },
-        else => {
-            return null;
-        }
-    }
+    const now_ns = getTimeNs();
+    const ipv4_packet = net_stack.handleReceivedFrame(frame, now_ns) orelse return null;
+    const datagram = ipv4_stack.handleIpv4Packet(ipv4_packet, now_ns) orelse return null;
+    return datagram.payload;
 }
 
 // ── IPC Error Reply ────────────────────────────────────────────────────────
@@ -694,6 +575,8 @@ pub export fn main() void {
         mac_addr = .{ 0x52, 0x54, 0x00, 0x0A, 0x0A, 0x01 };
         libvanta.vanta_debug_print("virtio-net: F_MAC not negotiated or dry-run; using default MAC.");
     }
+    net_stack = net.Stack.init(mac_addr, OUR_IP, sendRawEthernetFrame, &net_send_ctx);
+    ipv4_stack = ip.Stack.init(OUR_IP, sendRawIpv4Packet, &net_send_ctx);
 
     // ── 13. Register as 'hw.net.0' in the Service Registry ────────────
     libvanta.vanta_debug_print("virtio-net: Registering as 'hw.net.0'...");
