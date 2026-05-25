@@ -85,6 +85,7 @@ pub fn init() void {
 }
 
 pub fn init_ap(self: *cpu_local.CpuLocal) void {
+    self.self_ptr = @intFromPtr(self);
     // Enable SCE (System Call Extensions) in EFER
     const efer = rdmsr(MSR_EFER);
     wrmsr(MSR_EFER, efer | 1);
@@ -99,6 +100,7 @@ pub fn init_ap(self: *cpu_local.CpuLocal) void {
     // FMASK: clear RFLAGS.IF on syscall entry
     wrmsr(MSR_FMASK, 0x200);
 
+    writeMsrGsBase(@intFromPtr(self));
     wrmsr(MSR_KERNEL_GS_BASE, @intFromPtr(self));
 }
 

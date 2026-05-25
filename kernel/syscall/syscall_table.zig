@@ -25,6 +25,8 @@ pub const SyscallNumber = enum(u64) {
     MemCreate = 11,      // allocate physical pages → MemoryCap
     CapNotify = 12,      // notify (OR bits into Notification)
     NotifCreate = 13,    // create a Notification object → NotificationCap
+    MemPhys = 14,        // get physical base address of Memory capability
+    IrqBind = 15,        // bind DeviceIRQ capability to Notification
     _, // Allow others without compilation error
 };
 
@@ -60,6 +62,8 @@ pub fn dispatch(
         .CapWait     => handleCapWait(arg1, arg2),
         .CapNotify   => handleCapNotify(arg1, arg2),
         .NotifCreate => handleNotifCreate(),
+        .MemPhys     => handleMemPhys(arg1),
+        .IrqBind     => handleIrqBind(arg1, arg2),
         else => .{ .err = .bad_syscall },
     };
 }
@@ -379,5 +383,37 @@ fn handleThreadSpawn(mem_cap_handle: u64) Result {
     ) orelse return .{ .err = .out_of_memory };
 
     return .{ .value = th_handle, .err = .success };
+}
+
+fn handleMemPhys(mem_cap_handle: u64) Result {
+    const current_proc = table_orig.getCurrentProcess();
+    const entry = cap_mod.cap_table_lookup(&current_proc.cap_table, mem_cap_handle) orelse return .{ .err = .invalid_handle };
+    if (entry.type != @intFromEnum(cap_mod.CapType.Memory)) return .{ .err = .permission_denied };
+    const base_phys = cap_mod.getObjectPtr(entry);
+    return .{ .value = base_phys, .err = .success };
+}
+
+fn handleIrqBind(irq_cap_handle: u64, notif_cap_handle: u64) Result {
+    const current_proc = table_orig.getCurrentProcess();
+
+    // 1. Lookup DeviceIRQ capability
+    const irq_entry = cap_mod.cap_table_lookup(&current_proc.cap_table, irq_cap_handle) orelse return .{ .err = .invalid_handle };
+    if (irq_entry.type != @intFromEnum(cap_mod.CapType.DeviceIRQ)) return .{ .err = .permission_denied };
+    if ((irq_entry.rights & cap_mod.Rights.DeviceIRQBind) == 0) return .{ .err = .permission_denied };
+
+    // 2. Lookup Notification capability
+    const notif_entry = cap_mod.cap_table_lookup(&current_proc.cap_table, notif_cap_handle) orelse return .{ .err = .invalid_handle };
+    if (notif_entry.type != @intFromEnum(cap_mod.CapType.Notification)) return .{ .err = .permission_denied };
+    if ((notif_entry.rights & cap_mod.Rights.NotificationSignal) == 0) return .{ .err = .permission_denied };
+
+    const irq_num = cap_mod.getObjectPtr(irq_entry);
+    const notif = @as(*notif_mod.Notification, @ptrFromInt(cap_mod.getObjectPtr(notif_entry)));
+
+    if (irq_num >= 16) return .{ .err = .invalid_argument };
+
+    // Bind them!
+    @import("../arch/x86_64/idt.zig").irq_notification_bindings[irq_num] = notif;
+
+    return .{ .value = 0, .err = .success };
 }
 

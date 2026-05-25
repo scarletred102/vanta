@@ -9,6 +9,9 @@ const serial = @import("../arch/x86_64/serial.zig");
 const PCI_CONFIG_ADDRESS: u16 = 0xCF8;
 const PCI_CONFIG_DATA: u16 = 0xCFC;
 
+pub var ahci_bar5_phys: u64 = 0;
+pub var virtio_net_bar0_phys: u64 = 0;
+
 /// Read a 32-bit register from the PCI configuration space.
 pub fn configRead32(bus: u8, slot: u8, func: u8, offset: u8) u32 {
     const address = (@as(u32, bus) << 16) |
@@ -52,6 +55,20 @@ pub fn init() void {
                 const class_code = @as(u8, @truncate((val2 >> 24) & 0xFF));
                 const subclass = @as(u8, @truncate((val2 >> 16) & 0xFF));
 
+                // Detect virtio-net (vendor=0x1AF4, device=0x1000, class=0x02)
+                if (func_vendor == 0x1AF4 and func_device == 0x1000) {
+                    serial.puts("[PCI]   Found virtio-net at ");
+                    serial.putDec(bus);
+                    serial.puts(":");
+                    serial.putDec(slot);
+                    serial.puts(".");
+                    serial.putDec(func);
+                    serial.puts("\n");
+                    const bar0_val = configRead32(@truncate(bus), slot, func, 0x10);
+                    // BAR0 may be I/O (bit 0 set) or MMIO; strip flag bits
+                    virtio_net_bar0_phys = bar0_val & ~@as(u32, 0x3);
+                }
+
                 // Standard device logging for mass storage
                 if (class_code == 0x01) {
                     serial.puts("[PCI]   Found Mass Storage Controller at ");
@@ -68,6 +85,9 @@ pub fn init() void {
 
                     if (subclass == 0x06) {
                         serial.puts("(AHCI / SATA)\n");
+                        // Capture BAR5 physical address (offset 0x24)
+                        const bar5_val = configRead32(@truncate(bus), slot, func, 0x24);
+                        ahci_bar5_phys = bar5_val & ~@as(u32, 0xF);
                     } else if (subclass == 0x08) {
                         serial.puts("(NVMe Controller)\n");
                     } else {

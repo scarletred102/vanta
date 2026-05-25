@@ -10,6 +10,7 @@ const limine = @import("../limine.zig");
 const serial = @import("../arch/x86_64/serial.zig");
 const cpu_local = @import("../arch/x86_64/cpu_local.zig");
 const interrupts = @import("../arch/x86_64/interrupts.zig");
+const Thread = @import("../sched/thread.zig").Thread;
 
 pub const PAGE_SIZE: u64 = 4096;
 
@@ -30,7 +31,7 @@ pub fn tlb_shootdown(pml4_phys: u64, va: u64) void {
     var targets: u32 = 0;
     var i: usize = 0;
     while (i < n) : (i += 1) {
-        const t = cpu_local.cpus[i].current_thread orelse continue;
+        const t = @atomicLoad(?*Thread, &cpu_local.cpus[i].current_thread, .acquire) orelse continue;
         if (t.page_table == pml4_phys) targets += 1;
     }
     if (targets == 0) return;

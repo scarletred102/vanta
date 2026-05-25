@@ -398,6 +398,7 @@ fn boot_aps() void {
 
 pub export fn ap_startup(self: *cpu_local.CpuLocal) callconv(.c) noreturn {
     asm volatile ("cli");
+    @import("cpu.zig").enableSse();
     @import("cpu.zig").outb(0x3f8, '1');
 
     var temp = @intFromPtr(self);

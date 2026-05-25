@@ -36,6 +36,7 @@ pub const Thread = struct {
     user_entry: u64 = 0,
     user_stack: u64 = 0,
     yielded: bool = true,
+    user_rsp_scratch: u64 = 0,
 };
 
 var next_tid: u32 = 1;
@@ -61,7 +62,7 @@ fn kernelThreadTrampoline() callconv(.c) noreturn {
         cpu.prev_thread = null;
     }
     const current_t = cpu.current_thread.?;
-    const entry_fn = @as(fn () callconv(.c) noreturn, @ptrFromInt(current_t.entry));
+    const entry_fn = @as(*const fn () callconv(.c) noreturn, @ptrFromInt(current_t.entry));
     entry_fn();
 }
 
@@ -108,6 +109,7 @@ pub fn create(entry: fn () callconv(.c) noreturn) ?*Thread {
     const stack_base_virt = vmm.phys2virt(phys);
     const kstack_top = stack_base_virt + KSTACK_SIZE;
 
+    const func_ptr: *const fn () callconv(.c) noreturn = entry;
     slot.* = .{
         .id = next_tid,
         .state = .ready,
@@ -115,7 +117,7 @@ pub fn create(entry: fn () callconv(.c) noreturn) ?*Thread {
         .kstack_top = kstack_top,
         .kstack_pages = phys,
         .kstack_virt = stack_base_virt,
-        .entry = @intFromPtr(&entry),
+        .entry = @intFromPtr(func_ptr),
         .page_table = vmm.AddressSpace.current().pml4_phys,
     };
     next_tid += 1;

@@ -71,6 +71,15 @@ pub fn vanta_mem_unmap(target_vaddr: u64) u64 {
     return syscall(8, target_vaddr, 0, 0, 0, 0, 0).err;
 }
 
+pub fn vanta_mem_phys(mem_cap: u64) struct { phys: u64, err: u64 } {
+    const res = syscall(14, mem_cap, 0, 0, 0, 0, 0);
+    return .{ .phys = res.val, .err = res.err };
+}
+
+pub fn vanta_irq_bind(irq_cap: u64, notif_cap: u64) u64 {
+    return syscall(15, irq_cap, notif_cap, 0, 0, 0, 0).err;
+}
+
 pub fn vanta_thread_spawn(mem_cap: u64) struct { handle: u64, err: u64 } {
     const res = syscall(9, mem_cap, 0, 0, 0, 0, 0);
     return .{ .handle = res.val, .err = res.err };
@@ -136,4 +145,10 @@ pub export fn _start() callconv(.naked) noreturn {
 pub export fn libvanta_main() callconv(.c) noreturn {
     main();
     vanta_exit(0);
+}
+
+pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
+    vanta_debug_print("!!! USERSPACE PANIC !!!");
+    vanta_debug_print(msg);
+    vanta_exit(0xDEADBEEF);
 }

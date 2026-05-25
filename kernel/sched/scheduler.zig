@@ -157,6 +157,7 @@ pub fn yield() void {
 
     const prev = cpu.current_thread;
     if (prev) |p| {
+        p.user_rsp_scratch = cpu.user_rsp_scratch;
         if (p.state == .running) {
             p.state = .ready;
             enqueueLocal(&cpu.run_queue, p);
@@ -166,6 +167,7 @@ pub fn yield() void {
     next_t.state = .running;
     cpu.current_thread = next_t;
     current = next_t;
+    cpu.user_rsp_scratch = next_t.user_rsp_scratch;
 
     if (prev) |p| {
         if (p.page_table != next_t.page_table) {
@@ -232,6 +234,7 @@ pub fn start() noreturn {
     first.state = .running;
     cpu.current_thread = first;
     current = first;
+    cpu.user_rsp_scratch = first.user_rsp_scratch;
 
     @import("../mm/vmm.zig").writeCr3(first.page_table);
     cpu.tss_ptr.?.rsp0 = first.kstack_top;
@@ -276,6 +279,7 @@ pub fn exitCurrentThread() noreturn {
     next_t.state = .running;
     cpu.current_thread = next_t;
     current = next_t;
+    cpu.user_rsp_scratch = next_t.user_rsp_scratch;
 
     @import("../mm/vmm.zig").writeCr3(next_t.page_table);
     cpu.tss_ptr.?.rsp0 = next_t.kstack_top;

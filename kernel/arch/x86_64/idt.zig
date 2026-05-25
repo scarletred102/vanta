@@ -66,6 +66,8 @@ fn currentCs() u16 {
 
 var idt: [256]IdtEntry = [_]IdtEntry{.{}} ** 256;
 
+pub var irq_notification_bindings: [16]?*@import("../../ipc/notification.zig").Notification = [_]?*@import("../../ipc/notification.zig").Notification{null} ** 16;
+
 const EXCEPTION_NAMES = [32][]const u8{
     "Divide Error",  "Debug",         "NMI",                 "Breakpoint",
     "Overflow",      "Bound Range",   "Invalid Opcode",      "Device NA",
@@ -248,6 +250,11 @@ comptime {
         \\pushq $33
         \\jmp common_isr_handler
         \\.balign 16
+        \\// Vector 34 — AHCI IRQ
+        \\pushq $0
+        \\pushq $34
+        \\jmp common_isr_handler
+        \\.balign 16
         \\
         \\// ── Common ISR Handler ──
         \\.global common_isr_handler
@@ -404,6 +411,15 @@ export fn handleException(frame: *InterruptFrame) callconv(.c) void {
         return;
     }
 
+    if (vec == 34) {
+        const interrupts = @import("interrupts.zig");
+        if (irq_notification_bindings[11]) |notif| {
+            notif.notify(1);
+        }
+        interrupts.eoi();
+        return;
+    }
+
     if (vec == 14) {
         var cr2: u64 = 0;
         asm volatile ("mov %%cr2, %[cr2]" : [cr2] "=r" (cr2));
@@ -532,8 +548,8 @@ pub fn init() void {
     serial.puts("\n");
     serial.puts("[IDT]   Building table\n");
 
-    // Install gates for vectors 0-33 (with IST for NMI/DF/MC)
-    inline for (0..34) |i| {
+    // Install gates for vectors 0-34 (with IST for NMI/DF/MC)
+    inline for (0..35) |i| {
         idt[i] = makeGate(stub_base + i * STUB_SIZE, selector, istForVector(i));
     }
 
