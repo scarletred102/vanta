@@ -28,6 +28,18 @@ if (-not $SkipBuild) {
     Move-Item -Force -Path producer -Destination kernel/bin/producer
     & $ZIG build-exe consumer_stub.zig -T user.ld -fno-stack-check --name consumer -O ReleaseSafe -target x86_64-freestanding-none
     Move-Item -Force -Path consumer -Destination kernel/bin/consumer
+    & $ZIG build-exe ahci_stub.zig -T user.ld -fno-stack-check --name ahci -O ReleaseSafe -target x86_64-freestanding-none
+    Move-Item -Force -Path ahci -Destination kernel/bin/ahci
+    & $ZIG build-exe ns_stub.zig -T user.ld -fno-stack-check --name ns -O ReleaseSafe -target x86_64-freestanding-none
+    Move-Item -Force -Path ns -Destination kernel/bin/ns
+    & $ZIG build-exe tmpfs_stub.zig -T user.ld -fno-stack-check --name tmpfs -O ReleaseSafe -target x86_64-freestanding-none
+    Move-Item -Force -Path tmpfs -Destination kernel/bin/tmpfs
+    & $ZIG build-exe vantafs_stub.zig -T user.ld -fno-stack-check --name vantafs -O ReleaseSafe -target x86_64-freestanding-none
+    Move-Item -Force -Path vantafs -Destination kernel/bin/vantafs
+    & $ZIG build-exe fs_test_stub.zig -T user.ld -fno-stack-check --name fs_test -O ReleaseSafe -target x86_64-freestanding-none
+    Move-Item -Force -Path fs_test -Destination kernel/bin/fs_test
+    & $ZIG build-exe virtio_net_stub.zig -T user.ld -fno-stack-check --name virtio_net -O ReleaseSafe -target x86_64-freestanding-none
+    Move-Item -Force -Path virtio_net -Destination kernel/bin/virtio_net
     Write-Host "      Userspace compiled successfully!" -ForegroundColor Green
 
     Write-Host "[1/3] Building kernel..." -ForegroundColor Yellow
@@ -61,7 +73,9 @@ $qemuArgs = @(
     "-m", "256M",
     "-smp", "4",
     "-no-reboot",
-    "-no-shutdown"
+    "-no-shutdown",
+    "-device", "virtio-net-pci,netdev=n0",
+    "-netdev", "user,id=n0"
 )
 
 if ($NoDisplay) {

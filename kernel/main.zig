@@ -191,6 +191,8 @@ fn kmain() void {
     }
     interrupts.routeIrq(1, 33, 0);
     serial.puts("[KBD]   PS/2 Keyboard routed (IRQ 1 -> Vector 33)\n");
+    interrupts.routeIrq(11, 34, 0);
+    serial.puts("[AHCI]  AHCI IRQ routed (IRQ 11 -> Vector 34)\n");
 
     // PCI Bus Scanner
     pci.init();
@@ -215,11 +217,18 @@ fn kmain() void {
     // Scheduler
     sched.init();
 
-    // Run Phase 4 userspace end-to-end IPC integration test!
-    runPhase4Test();
+    // Spawn Registry Thread
+    const reg_th = thread.create(registryThread) orelse {
+        serial.puts("[FATAL] Failed to create service registry thread\n");
+        halt();
+    };
+    sched.enqueue(reg_th);
+
+    // Run Phase 7 userspace filesystem acceptance test!
+    runPhase7Test();
 
     serial.puts("══════════════════════════════════════════════\n");
-    serial.puts("  VantaOS Phase 4 complete. Starting scheduler.\n");
+    serial.puts("  VantaOS Phase 7 complete. Starting scheduler.\n");
     serial.puts("══════════════════════════════════════════════\n");
 
     // Hand off to scheduler — does not return
@@ -277,71 +286,260 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, return_address: ?usiz
     halt();
 }
 
-const producer_elf = @embedFile("bin/producer");
-const consumer_elf = @embedFile("bin/consumer");
-var shared_port: port_mod.Port = .{};
+const ns_elf = @embedFile("bin/ns");
+const tmpfs_elf = @embedFile("bin/tmpfs");
+const vantafs_elf = @embedFile("bin/vantafs");
+const ahci_elf = @embedFile("bin/ahci");
+const fs_test_elf = @embedFile("bin/fs_test");
+const virtio_net_elf = @embedFile("bin/virtio_net");
 
-pub fn runPhase4Test() void {
-    serial.puts("[P4-TEST] Spawning userspace producer and consumer...\n");
+var ns_port: port_mod.Port = .{};
+var tmpfs_port: port_mod.Port = .{};
+var vantafs_port: port_mod.Port = .{};
+var ahci_port: port_mod.Port = .{};
+var registry_port: port_mod.Port = .{};
+var virtio_net_port: port_mod.Port = .{};
+
+const RegistryEntry = struct {
+    name: [32]u8,
+    name_len: usize,
+    entry: cap.CapEntry,
+};
+
+var registry_table: [64]RegistryEntry = undefined;
+var registry_count: usize = 0;
+
+pub fn registryThread() callconv(.c) noreturn {
+    serial.puts("[REGISTRY] Service registry thread online.\n");
+    while (true) {
+        if (registry_port.recvBlocking()) |*msg| {
+            if (msg.msg_type == 0x10) { // RegistryRegister
+                const name = std.mem.sliceTo(msg.payload[0..32], 0);
+                if (name.len > 0 and msg.transferred_caps[0].type != 0) {
+                    if (registry_count < 64) {
+                        var reg_entry = &registry_table[registry_count];
+                        @memset(&reg_entry.name, 0);
+                        @memcpy(reg_entry.name[0..name.len], name);
+                        reg_entry.name_len = name.len;
+                        reg_entry.entry = msg.transferred_caps[0];
+                        // Clear recipient table metadata so duplicate derivations link cleanly
+                        reg_entry.entry.old_table = null;
+                        reg_entry.entry.old_index = 0;
+                        registry_count += 1;
+                        
+                        serial.puts("[REGISTRY] Registered service '");
+                        serial.puts(name);
+                        serial.puts("'\n");
+                    }
+                }
+            } else if (msg.msg_type == 0x11) { // RegistryLookup
+                const name = std.mem.sliceTo(msg.payload[0..32], 0);
+                var found = false;
+                var found_idx: usize = 0;
+                for (0..registry_count) |i| {
+                    const reg_name = registry_table[i].name[0..registry_table[i].name_len];
+                    if (std.mem.eql(u8, reg_name, name)) {
+                        found = true;
+                        found_idx = i;
+                        break;
+                    }
+                }
+                
+                if (found) {
+                    var reply = port_mod.Message{};
+                    reply.msg_type = 0x11;
+                    reply.flags.is_reply = true;
+                    var cap_entry = registry_table[found_idx].entry;
+                    cap_entry.rights = cap.Rights.EndpointSend; // Send only!
+                    reply.transferred_caps[0] = cap_entry;
+                    
+                    _ = registry_port.send(&reply);
+                } else {
+                    var reply = port_mod.Message{};
+                    reply.msg_type = 0x0003; // MSG_ERROR
+                    reply.flags.is_reply = true;
+                    @memcpy(reply.payload[0..4], "FAIL");
+                    _ = registry_port.send(&reply);
+                }
+            }
+        }
+    }
+}
+
+pub fn runPhase7Test() void {
+    serial.puts("[P7-TEST] Spawning userspace filesystem stacks...\n");
 
     // 1. Create processes
-    const prod_proc = proc.create("producer", 0) orelse {
-        serial.puts("[FATAL] prod proc create failed\n");
+    const ns_proc = proc.create("ns", 0) orelse {
+        serial.puts("[FATAL] ns proc create failed\n");
         halt();
     };
-    const cons_proc = proc.create("consumer", 0) orelse {
-        serial.puts("[FATAL] cons proc create failed\n");
+    const tmpfs_proc = proc.create("tmpfs", 0) orelse {
+        serial.puts("[FATAL] tmpfs proc create failed\n");
+        halt();
+    };
+    const vantafs_proc = proc.create("vantafs", 0) orelse {
+        serial.puts("[FATAL] vantafs proc create failed\n");
+        halt();
+    };
+    const ahci_proc = proc.create("ahci", 0) orelse {
+        serial.puts("[FATAL] ahci proc create failed\n");
+        halt();
+    };
+    const fs_test_proc = proc.create("fs_test", 0) orelse {
+        serial.puts("[FATAL] fs_test proc create failed\n");
+        halt();
+    };
+    const virtio_net_proc = proc.create("virtio_net", 0) orelse {
+        serial.puts("[FATAL] virtio_net proc create failed\n");
         halt();
     };
 
-    // 2. Setup shared port in slot 1 of both processes
-    const port_addr = @intFromPtr(&shared_port);
-    _ = cap.cap_table_insert(&prod_proc.cap_table, port_addr, @intFromEnum(cap.CapType.Endpoint), 1); // Send=1
-    _ = cap.cap_table_insert(&cons_proc.cap_table, port_addr, @intFromEnum(cap.CapType.Endpoint), 2); // Recv=2
+    // 2. Setup capabilities
+    // Setup NS
+    _ = cap.cap_table_insert(&ns_proc.cap_table, @intFromPtr(&ns_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant);
+    _ = cap.cap_table_insert(&ns_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend);
+
+    // Setup tmpfs
+    _ = cap.cap_table_insert(&tmpfs_proc.cap_table, @intFromPtr(&tmpfs_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant);
+    _ = cap.cap_table_insert(&tmpfs_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend);
+
+    // Setup VantaFS
+    _ = cap.cap_table_insert(&vantafs_proc.cap_table, @intFromPtr(&vantafs_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant);
+    _ = cap.cap_table_insert(&vantafs_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend);
+
+    // Setup AHCI
+    const bar5_phys = if (pci.ahci_bar5_phys != 0) pci.ahci_bar5_phys else b: {
+        const p = pmm.allocPage().?;
+        @memset(@as([*]u8, @ptrFromInt(vmm.phys2virt(p)))[0..4096], 0);
+        break :b p;
+    };
+    _ = cap.cap_table_insert(&ahci_proc.cap_table, bar5_phys, @intFromEnum(cap.CapType.Memory), cap.Rights.MemoryRead | cap.Rights.MemoryWrite | cap.Rights.MemoryMap);
+    _ = cap.cap_table_insert(&ahci_proc.cap_table, @intFromPtr(&ahci_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant);
+    _ = cap.cap_table_insert(&ahci_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend);
+    _ = cap.cap_table_insert(&ahci_proc.cap_table, 11, @intFromEnum(cap.CapType.DeviceIRQ), cap.Rights.DeviceIRQBind);
+
+    // Setup fs_test
+    _ = cap.cap_table_insert(&fs_test_proc.cap_table, @intFromPtr(&ns_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend);
+    _ = cap.cap_table_insert(&fs_test_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend);
+
+    // Setup virtio-net
+    const virtio_net_bar0 = if (pci.virtio_net_bar0_phys != 0) pci.virtio_net_bar0_phys else b: {
+        const p = pmm.allocPage().?;
+        @memset(@as([*]u8, @ptrFromInt(vmm.phys2virt(p)))[0..4096], 0);
+        break :b p;
+    };
+    _ = cap.cap_table_insert(&virtio_net_proc.cap_table, virtio_net_bar0, @intFromEnum(cap.CapType.Memory), cap.Rights.MemoryRead | cap.Rights.MemoryWrite | cap.Rights.MemoryMap);
+    _ = cap.cap_table_insert(&virtio_net_proc.cap_table, @intFromPtr(&virtio_net_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant);
+    _ = cap.cap_table_insert(&virtio_net_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend);
+    _ = cap.cap_table_insert(&virtio_net_proc.cap_table, 11, @intFromEnum(cap.CapType.DeviceIRQ), cap.Rights.DeviceIRQBind);
 
     // 3. Parse ELFs
-    const prod_elf_info = @import("elf.zig").parse_elf64(producer_elf) catch |err| {
-        serial.puts("[FATAL] prod ELF parse failed: ");
+    const ns_elf_info = @import("elf.zig").parse_elf64(ns_elf) catch |err| {
+        serial.puts("[FATAL] ns ELF parse failed: ");
         serial.puts(@errorName(err));
         serial.puts("\n");
         halt();
     };
-    const cons_elf_info = @import("elf.zig").parse_elf64(consumer_elf) catch |err| {
-        serial.puts("[FATAL] cons ELF parse failed: ");
+    const tmpfs_elf_info = @import("elf.zig").parse_elf64(tmpfs_elf) catch |err| {
+        serial.puts("[FATAL] tmpfs ELF parse failed: ");
+        serial.puts(@errorName(err));
+        serial.puts("\n");
+        halt();
+    };
+    const vantafs_elf_info = @import("elf.zig").parse_elf64(vantafs_elf) catch |err| {
+        serial.puts("[FATAL] vantafs ELF parse failed: ");
+        serial.puts(@errorName(err));
+        serial.puts("\n");
+        halt();
+    };
+    const ahci_elf_info = @import("elf.zig").parse_elf64(ahci_elf) catch |err| {
+        serial.puts("[FATAL] ahci ELF parse failed: ");
+        serial.puts(@errorName(err));
+        serial.puts("\n");
+        halt();
+    };
+    const fs_test_elf_info = @import("elf.zig").parse_elf64(fs_test_elf) catch |err| {
+        serial.puts("[FATAL] fs_test ELF parse failed: ");
+        serial.puts(@errorName(err));
+        serial.puts("\n");
+        halt();
+    };
+    const virtio_net_elf_info = @import("elf.zig").parse_elf64(virtio_net_elf) catch |err| {
+        serial.puts("[FATAL] virtio_net ELF parse failed: ");
         serial.puts(@errorName(err));
         serial.puts("\n");
         halt();
     };
 
     // 4. Load ELFs
-    const prod_entry = @import("elf.zig").load_elf(prod_elf_info, producer_elf, prod_proc.space.pml4_phys) catch unreachable;
-    const cons_entry = @import("elf.zig").load_elf(cons_elf_info, consumer_elf, cons_proc.space.pml4_phys) catch unreachable;
+    const ns_entry = @import("elf.zig").load_elf(ns_elf_info, ns_elf, ns_proc.space.pml4_phys) catch unreachable;
+    const tmpfs_entry = @import("elf.zig").load_elf(tmpfs_elf_info, tmpfs_elf, tmpfs_proc.space.pml4_phys) catch unreachable;
+    const vantafs_entry = @import("elf.zig").load_elf(vantafs_elf_info, vantafs_elf, vantafs_proc.space.pml4_phys) catch unreachable;
+    const ahci_entry = @import("elf.zig").load_elf(ahci_elf_info, ahci_elf, ahci_proc.space.pml4_phys) catch unreachable;
+    const fs_test_entry = @import("elf.zig").load_elf(fs_test_elf_info, fs_test_elf, fs_test_proc.space.pml4_phys) catch unreachable;
+    const virtio_net_entry = @import("elf.zig").load_elf(virtio_net_elf_info, virtio_net_elf, virtio_net_proc.space.pml4_phys) catch unreachable;
 
     // 5. Alloc stacks
-    const prod_rsp = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = prod_proc.space.pml4_phys }, 4).?;
-    _ = prod_rsp;
-    const cons_rsp = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = cons_proc.space.pml4_phys }, 4).?;
-    _ = cons_rsp;
+    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = ns_proc.space.pml4_phys }, 16).?;
+    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = tmpfs_proc.space.pml4_phys }, 16).?;
+    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = vantafs_proc.space.pml4_phys }, 16).?;
+    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = ahci_proc.space.pml4_phys }, 16).?;
+    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = fs_test_proc.space.pml4_phys }, 16).?;
+    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = virtio_net_proc.space.pml4_phys }, 16).?;
 
-    // 6. Push auxv/argc/envp/argv
-    const prod_stack_top = @import("elf.zig").setupUserStack(prod_proc.space.pml4_phys, prod_entry, prod_elf_info);
-    const cons_stack_top = @import("elf.zig").setupUserStack(cons_proc.space.pml4_phys, cons_entry, cons_elf_info);
+    // 6. Setup stacks
+    const ns_stack_top = @import("elf.zig").setupUserStack(ns_proc.space.pml4_phys, ns_entry, ns_elf_info);
+    const tmpfs_stack_top = @import("elf.zig").setupUserStack(tmpfs_proc.space.pml4_phys, tmpfs_entry, tmpfs_elf_info);
+    const vantafs_stack_top = @import("elf.zig").setupUserStack(vantafs_proc.space.pml4_phys, vantafs_entry, vantafs_elf_info);
+    const ahci_stack_top = @import("elf.zig").setupUserStack(ahci_proc.space.pml4_phys, ahci_entry, ahci_elf_info);
+    const fs_test_stack_top = @import("elf.zig").setupUserStack(fs_test_proc.space.pml4_phys, fs_test_entry, fs_test_elf_info);
+    const virtio_net_stack_top = @import("elf.zig").setupUserStack(virtio_net_proc.space.pml4_phys, virtio_net_entry, virtio_net_elf_info);
 
     // 7. Create threads
-    const ut_prod = thread.create_user(prod_entry, prod_stack_top, prod_proc.space.pml4_phys, prod_proc.pid) orelse {
-        serial.puts("[FATAL] ut_prod create failed\n");
+    const ut_ns = thread.create_user(ns_entry, ns_stack_top, ns_proc.space.pml4_phys, ns_proc.pid) orelse {
+        serial.puts("[FATAL] ut_ns create failed\n");
         halt();
     };
-    const ut_cons = thread.create_user(cons_entry, cons_stack_top, cons_proc.space.pml4_phys, cons_proc.pid) orelse {
-        serial.puts("[FATAL] ut_cons create failed\n");
+    const ut_tmpfs = thread.create_user(tmpfs_entry, tmpfs_stack_top, tmpfs_proc.space.pml4_phys, tmpfs_proc.pid) orelse {
+        serial.puts("[FATAL] ut_tmpfs create failed\n");
+        halt();
+    };
+    const ut_vantafs = thread.create_user(vantafs_entry, vantafs_stack_top, vantafs_proc.space.pml4_phys, vantafs_proc.pid) orelse {
+        serial.puts("[FATAL] ut_vantafs create failed\n");
+        halt();
+    };
+    const ut_ahci = thread.create_user(ahci_entry, ahci_stack_top, ahci_proc.space.pml4_phys, ahci_proc.pid) orelse {
+        serial.puts("[FATAL] ut_ahci create failed\n");
+        halt();
+    };
+    const ut_fs_test = thread.create_user(fs_test_entry, fs_test_stack_top, fs_test_proc.space.pml4_phys, fs_test_proc.pid) orelse {
+        serial.puts("[FATAL] ut_fs_test create failed\n");
+        halt();
+    };
+    const ut_virtio_net = thread.create_user(virtio_net_entry, virtio_net_stack_top, virtio_net_proc.space.pml4_phys, virtio_net_proc.pid) orelse {
+        serial.puts("[FATAL] ut_virtio_net create failed\n");
         halt();
     };
 
-    sched.enqueue(ut_prod);
-    prod_proc.thread_count += 1;
+    sched.enqueue(ut_ns);
+    ns_proc.thread_count += 1;
 
-    sched.enqueue(ut_cons);
-    cons_proc.thread_count += 1;
+    sched.enqueue(ut_tmpfs);
+    tmpfs_proc.thread_count += 1;
 
-    serial.puts("[P4-TEST] Spawning complete. Running scheduler...\n");
+    sched.enqueue(ut_vantafs);
+    vantafs_proc.thread_count += 1;
+
+    sched.enqueue(ut_ahci);
+    ahci_proc.thread_count += 1;
+
+    sched.enqueue(ut_fs_test);
+    fs_test_proc.thread_count += 1;
+
+    sched.enqueue(ut_virtio_net);
+    virtio_net_proc.thread_count += 1;
+
+    serial.puts("[P7-TEST] Spawning complete. Running scheduler...\n");
 }
+

@@ -197,12 +197,13 @@ fn reloadSegments() void {
         \\push %%rax
         \\lretq
         \\1:
-        \\mov $0x10, %%ax        // new DS/ES/FS/GS/SS = kernel data selector
+        \\mov $0x10, %%ax        // new DS/ES/SS = kernel data selector
         \\mov %%ax, %%ds
         \\mov %%ax, %%es
+        \\mov %%ax, %%ss
+        \\xor %%ax, %%ax         // new FS/GS = NULL selector (0)
         \\mov %%ax, %%fs
         \\mov %%ax, %%gs
-        \\mov %%ax, %%ss
         :
         :
         : .{ .rax = true, .memory = true }
