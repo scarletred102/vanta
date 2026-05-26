@@ -37,6 +37,10 @@ pub const Thread = struct {
     user_stack: u64 = 0,
     yielded: bool = true,
     user_rsp_scratch: u64 = 0,
+    personality_shm_phys: u64 = 0,     // phys addr of SHM page (0 = not a Linux thread)
+    personality_ping: ?*@import("../ipc/notification.zig").Notification = null,
+    personality_pong: ?*@import("../ipc/notification.zig").Notification = null,
+    fs_base: u64 = 0,
 };
 
 var next_tid: u32 = 1;
@@ -75,8 +79,21 @@ pub fn create_user(entry_addr: u64, stack_addr: u64, page_table: PhysAddr, proc_
         return null;
     };
 
-    const stack_base_virt = vmm.phys2virt(phys);
-    const kstack_top = stack_base_virt + KSTACK_SIZE;
+    // Map kernel stack at dedicated VA with guard page below.
+    // Layout: [next_kstack_virt + 0 = guard (non-present)] [+PAGE_SIZE..+KSTACK_SIZE = stack pages]
+    const base_virt = next_kstack_virt;
+    next_kstack_virt += (KSTACK_PAGES + 1) * pmm.PAGE_SIZE;
+    const kern_space = vmm.AddressSpace.current();
+    // Guard page — allocates intermediate tables but leaves PTE non-present
+    _ = vmm.map_non_present(kern_space, base_virt);
+    // Actual stack pages above the guard
+    var ki: usize = 0;
+    while (ki < KSTACK_PAGES) : (ki += 1) {
+        _ = vmm.map(kern_space, base_virt + (ki + 1) * pmm.PAGE_SIZE,
+                    phys + ki * pmm.PAGE_SIZE,
+                    vmm.PTE_PRESENT | vmm.PTE_WRITE);
+    }
+    const kstack_top = base_virt + (KSTACK_PAGES + 1) * pmm.PAGE_SIZE;
 
     slot.* = .{
         .id = next_tid,
@@ -84,7 +101,7 @@ pub fn create_user(entry_addr: u64, stack_addr: u64, page_table: PhysAddr, proc_
         .rsp = ctx.initStack(kstack_top, @intFromPtr(&userThreadTrampoline)),
         .kstack_top = kstack_top,
         .kstack_pages = phys,
-        .kstack_virt = stack_base_virt,
+        .kstack_virt = base_virt + pmm.PAGE_SIZE, // first mapped stack page
         .entry = @intFromPtr(&userThreadTrampoline),
         .proc_id = proc_id,
         .page_table = page_table,
@@ -97,17 +114,25 @@ pub fn create_user(entry_addr: u64, stack_addr: u64, page_table: PhysAddr, proc_
 
 /// Create a kernel thread that runs `entry` on first dispatch.
 pub fn create(entry: fn () callconv(.c) noreturn) ?*Thread {
-    // Allocate Thread struct itself from a tiny static pool (Phase 1 simple)
     const slot = allocSlot() orelse return null;
 
-    // Allocate kernel stack (contiguous physical pages)
     const phys = pmm.allocContiguous(KSTACK_PAGES) orelse {
         freeSlot(slot);
         return null;
     };
 
-    const stack_base_virt = vmm.phys2virt(phys);
-    const kstack_top = stack_base_virt + KSTACK_SIZE;
+    // Same guard-page layout as create_user
+    const base_virt = next_kstack_virt;
+    next_kstack_virt += (KSTACK_PAGES + 1) * pmm.PAGE_SIZE;
+    const kern_space = vmm.AddressSpace.current();
+    _ = vmm.map_non_present(kern_space, base_virt);
+    var ki: usize = 0;
+    while (ki < KSTACK_PAGES) : (ki += 1) {
+        _ = vmm.map(kern_space, base_virt + (ki + 1) * pmm.PAGE_SIZE,
+                    phys + ki * pmm.PAGE_SIZE,
+                    vmm.PTE_PRESENT | vmm.PTE_WRITE);
+    }
+    const kstack_top = base_virt + (KSTACK_PAGES + 1) * pmm.PAGE_SIZE;
 
     const func_ptr: *const fn () callconv(.c) noreturn = entry;
     slot.* = .{
@@ -116,18 +141,25 @@ pub fn create(entry: fn () callconv(.c) noreturn) ?*Thread {
         .rsp = ctx.initStack(kstack_top, @intFromPtr(&kernelThreadTrampoline)),
         .kstack_top = kstack_top,
         .kstack_pages = phys,
-        .kstack_virt = stack_base_virt,
+        .kstack_virt = base_virt + pmm.PAGE_SIZE,
         .entry = @intFromPtr(func_ptr),
-        .page_table = vmm.AddressSpace.current().pml4_phys,
+        .page_table = kern_space.pml4_phys,
     };
     next_tid += 1;
     return slot;
 }
 
 pub fn destroy(t: *Thread) void {
-    // Free kstack physical pages
-    var p: u64 = t.kstack_pages;
+    const kern_space = vmm.AddressSpace.current();
+    // Unmap guard page and stack pages from dedicated VA range
+    vmm.unmap(kern_space, t.kstack_virt - pmm.PAGE_SIZE); // guard
     var j: usize = 0;
+    while (j < KSTACK_PAGES) : (j += 1) {
+        vmm.unmap(kern_space, t.kstack_virt + j * pmm.PAGE_SIZE);
+    }
+    // Free physical pages
+    var p: u64 = t.kstack_pages;
+    j = 0;
     while (j < KSTACK_PAGES) : (j += 1) {
         pmm.freePage(p);
         p += pmm.PAGE_SIZE;

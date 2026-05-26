@@ -7,6 +7,36 @@ const std = @import("std");
 pub const Handle = u64;
 pub const NULL_HANDLE: Handle = 0;
 
+pub const CapEntry = struct {
+    type: u4 = 0,
+    rights: u8 = 0,
+    generation: u16 = 1,
+    kernel_object_ptr: u48 = 0,
+    next_derived_table: ?*anyopaque = null,
+    next_derived_index: u16 = 0,
+    parent_table: ?*anyopaque = null,
+    parent_index: u16 = 0,
+    parent_generation: u16 = 0,
+    old_table: ?*anyopaque = null,
+    old_index: u16 = 0,
+};
+
+pub const Message = struct {
+    msg_type: u32 = 0,
+    flags: packed struct(u32) {
+        expects_reply: bool = false,
+        is_reply: bool = false,
+        has_buffer: bool = false,
+        urgent: bool = false,
+        _reserved: u28 = 0,
+    } = .{},
+    payload: [64]u8 = [_]u8{0} ** 64,
+    caps: [4]u64 = [_]u64{0} ** 4,
+    buffer_cap: u64 = 0,
+    transferred_caps: [4]CapEntry = [_]CapEntry{.{}} ** 4,
+    transferred_buffer_cap: CapEntry = .{},
+};
+
 pub export var global_auxv: [*]const struct { ty: u64, val: u64 } = undefined;
 var heap_cursor: u64 = 0x10000000;
 
@@ -164,6 +194,32 @@ pub export fn _start() callconv(.naked) noreturn {
 pub export fn libvanta_main() callconv(.c) noreturn {
     main();
     vanta_exit(0);
+}
+
+pub fn vanta_personality_spawn(elf_mem_cap: u64, personality_ep_cap: u64) struct { handle: u64, err: u64 } {
+    const res = syscall(20, elf_mem_cap, personality_ep_cap, 0, 0, 0, 0);
+    return .{ .handle = res.val, .err = res.err };
+}
+
+pub fn vanta_process_mmap(pid: u64, hint_vaddr: u64, n_pages: u64, prot: u64) struct { vaddr: u64, err: u64 } {
+    const res = syscall(21, pid, hint_vaddr, n_pages, prot, 0, 0);
+    return .{ .vaddr = res.val, .err = res.err };
+}
+
+pub fn vanta_process_munmap(pid: u64, vaddr: u64, n_pages: u64) u64 {
+    return syscall(22, pid, vaddr, n_pages, 0, 0, 0).err;
+}
+
+/// Read one byte from the kernel IRQ ring buffer for irq_cap.
+/// Returns err=5 (would_block) when the buffer is empty — caller should
+/// wait on the IRQ notification first, then drain with this call.
+pub fn vanta_irq_readbyte(irq_cap: u64) struct { byte: u8, err: u64 } {
+    const res = syscall(24, irq_cap, 0, 0, 0, 0, 0);
+    return .{ .byte = @truncate(res.val), .err = res.err };
+}
+
+pub fn vanta_thread_set_fs_base(thread_cap: u64, base: u64) u64 {
+    return syscall(23, thread_cap, base, 0, 0, 0, 0).err;
 }
 
 pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {

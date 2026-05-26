@@ -183,6 +183,31 @@ fn calibrateTimer() void {
     serial.puts("[SCHED] Periodic preemption timer enabled (100Hz)\n");
 }
 
+/// Initialize the PS/2 auxiliary (mouse) port and enable IRQ 12.
+/// Call before scheduling userspace so the input_server can bind IRQ 12.
+pub fn initPs2Mouse() void {
+    // Flush any stale data in the PS/2 data port.
+    _ = cpu.inb(0x60);
+
+    // Enable the auxiliary device (PS/2 mouse port).
+    cpu.outb(0x64, 0xA8);
+
+    // Read current controller config byte, OR in bit 1 (enable IRQ 12).
+    cpu.outb(0x64, 0x20);
+    var cfg = cpu.inb(0x60);
+    cfg |= 0x02;
+    cpu.outb(0x64, 0x60);
+    cpu.outb(0x60, cfg);
+
+    // Send "Enable Data Reporting" command to the mouse.
+    cpu.outb(0x64, 0xD4);
+    cpu.outb(0x60, 0xF4);
+    // Discard the ACK byte.
+    _ = cpu.inb(0x60);
+
+    serial.puts("[PS2]   Mouse auxiliary port enabled (IRQ 12)\n");
+}
+
 pub fn setupApTimer() void {
     // Configure LAPIC Timer for periodic interrupts on Vector 32 (Timer IRQ)
     lapicWrite(LAPIC_LVT_TMR, 0x20000 | 32);

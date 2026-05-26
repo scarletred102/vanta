@@ -22,6 +22,8 @@ pub const Process = struct {
     parent_pid: u32 = 0,
     vmas: [16]Vma = [_]Vma{.{ .start = 0, .end = 0, .flags = 0, .lazy = false, .cow = false }} ** 16,
     vma_count: usize = 0,
+    next_mmap_virt: u64 = 0x2000_0000,
+    user_stack_top: u64 = 0x7FFF_0000_0000,
 
     pub fn addVma(self: *Process, start: u64, end: u64, flags: u64, lazy: bool) bool {
         if (self.vma_count >= 16) return false;
@@ -68,6 +70,8 @@ pub fn create(name: []const u8, parent_pid: u32) ?*Process {
             pool[i].parent_pid = parent_pid;
             pool[i].thread_count = 0;
             pool[i].vma_count = 0;
+            pool[i].next_mmap_virt = 0x2000_0000;
+            pool[i].user_stack_top = 0x7FFF_0000_0000;
             pool[i].cap_table.count = 0;
             var c: usize = 0;
             while (c < cap.MAX_CAPS) : (c += 1) {

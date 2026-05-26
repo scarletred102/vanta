@@ -72,6 +72,8 @@ pub fn parse_elf64(data: []const u8) ElfError!ElfInfo {
 
             if (p_vaddr & 0xFFF != 0) return ElfError.SegmentNotPageAligned;
             if ((p_flags & 2 != 0) and (p_flags & 1 != 0)) return ElfError.SecurityViolation;
+            if (p_offset + p_filesz > data.len) return ElfError.SecurityViolation;
+            if (p_vaddr >= 0x0000_8000_0000_0000) return ElfError.SecurityViolation;
 
             info.segments[info.segment_count] = .{
                 .vaddr = p_vaddr,
@@ -101,9 +103,34 @@ pub fn parse_elf64(data: []const u8) ElfError!ElfInfo {
     return info;
 }
 
+/// Returns true if the ELF is a Linux binary (OSABI=3 or has PT_INTERP segment).
+pub fn detect_linux_elf(data: []const u8) bool {
+    if (data.len < 64) return false;
+    if (!std.mem.eql(u8, data[0..4], "\x7fELF")) return false;
+    // EI_OSABI at byte 7: 0x03 = Linux
+    if (data[7] == 3) return true;
+    // Scan for PT_INTERP (type=3) which indicates dynamic Linux ELF
+    const phoff = std.mem.readInt(u64, data[32..40], .little);
+    const phnum = std.mem.readInt(u16, data[56..58], .little);
+    var i: usize = 0;
+    while (i < phnum) : (i += 1) {
+        const off = phoff + i * 56;
+        if (off + 4 > data.len) break;
+        const p_type = std.mem.readInt(u32, data[off..][0..4], .little);
+        if (p_type == 3) return true; // PT_INTERP
+    }
+    return false;
+}
+
 pub fn load_elf(elf: ElfInfo, data: []const u8, page_table: u64) ElfError!u64 {
     const space = vmm.AddressSpace{ .pml4_phys = page_table };
-    
+
+    // Track allocated pages for rollback on error
+    const MAX_TRACKED = 512;
+    var tracked_phys: [MAX_TRACKED]u64 = undefined;
+    var tracked_virt_space: [MAX_TRACKED]struct { vaddr: u64, space: vmm.AddressSpace } = undefined;
+    var n_tracked: usize = 0;
+
     var seg_idx: usize = 0;
     while (seg_idx < elf.segment_count) : (seg_idx += 1) {
         const seg = &elf.segments[seg_idx];
@@ -113,8 +140,20 @@ pub fn load_elf(elf: ElfInfo, data: []const u8, page_table: u64) ElfError!u64 {
         while (page_idx < num_pages) : (page_idx += 1) {
             const page_vaddr = seg.vaddr + page_idx * 4096;
             const paddr = pmm.allocPage() orelse {
+                // Rollback all allocated pages
+                var ri: usize = 0;
+                while (ri < n_tracked) : (ri += 1) {
+                    vmm.unmap(tracked_virt_space[ri].space, tracked_virt_space[ri].vaddr);
+                    pmm.freePage(tracked_phys[ri]);
+                }
                 return ElfError.OutOfMemory;
             };
+
+            if (n_tracked < MAX_TRACKED) {
+                tracked_phys[n_tracked] = paddr;
+                tracked_virt_space[n_tracked] = .{ .vaddr = page_vaddr, .space = space };
+                n_tracked += 1;
+            }
 
             const page_virt = vmm.phys2virt(paddr);
             @memset(@as([*]u8, @ptrFromInt(page_virt))[0..4096], 0);
@@ -133,7 +172,12 @@ pub fn load_elf(elf: ElfInfo, data: []const u8, page_table: u64) ElfError!u64 {
             if (seg.flags & 1 == 0) pte_flags |= vmm.PTE_NX;
 
             if (!vmm.map(space, page_vaddr, paddr, pte_flags)) {
-                pmm.freePage(paddr);
+                // Rollback all allocated pages
+                var ri: usize = 0;
+                while (ri < n_tracked) : (ri += 1) {
+                    vmm.unmap(tracked_virt_space[ri].space, tracked_virt_space[ri].vaddr);
+                    pmm.freePage(tracked_phys[ri]);
+                }
                 return ElfError.OutOfMemory;
             }
         }
@@ -157,8 +201,8 @@ pub fn writeUserStackBytes(new_pml4: u64, vaddr: u64, bytes: []const u8) void {
     }
 }
 
-pub fn setupUserStack(new_pml4: u64, user_entry: u64, elf_info: ElfInfo) u64 {
-    const rand_addr = 0x7FFF00000000 - 16;
+pub fn setupUserStack(new_pml4: u64, user_entry: u64, elf_info: ElfInfo, stack_top: u64) u64 {
+    const rand_addr = stack_top - 16;
     var rand_bytes: [16]u8 = undefined;
     var r: u64 = 0x123456789ABCDEF0;
     for (0..16) |idx| {
@@ -167,7 +211,7 @@ pub fn setupUserStack(new_pml4: u64, user_entry: u64, elf_info: ElfInfo) u64 {
     }
     writeUserStackBytes(new_pml4, rand_addr, &rand_bytes);
 
-    const aux_start = 0x7FFF00000000 - 112;
+    const aux_start = stack_top - 112;
     writeUserStackU64(new_pml4, aux_start + 0, 25); // AT_RANDOM
     writeUserStackU64(new_pml4, aux_start + 8, rand_addr);
     writeUserStackU64(new_pml4, aux_start + 16, 9); // AT_ENTRY
@@ -182,13 +226,13 @@ pub fn setupUserStack(new_pml4: u64, user_entry: u64, elf_info: ElfInfo) u64 {
     writeUserStackU64(new_pml4, aux_start + 80, 0); // AT_NULL
     writeUserStackU64(new_pml4, aux_start + 88, 0);
 
-    const envp_start = aux_start - 8; // 0x7FFF00000000 - 120
+    const envp_start = aux_start - 8;
     writeUserStackU64(new_pml4, envp_start, 0);
 
-    const argv_start = envp_start - 8; // 0x7FFF00000000 - 128
+    const argv_start = envp_start - 8;
     writeUserStackU64(new_pml4, argv_start, 0);
 
-    const argc_start = argv_start - 8; // 0x7FFF00000000 - 136
+    const argc_start = argv_start - 8;
     writeUserStackU64(new_pml4, argc_start, 0);
 
     return argc_start;

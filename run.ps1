@@ -40,6 +40,18 @@ if (-not $SkipBuild) {
     Move-Item -Force -Path fs_test -Destination kernel/bin/fs_test
     & $ZIG build-exe virtio_net_stub.zig -T user.ld -fno-stack-check --name virtio_net -O ReleaseSafe -target x86_64-freestanding-none
     Move-Item -Force -Path virtio_net -Destination kernel/bin/virtio_net
+    & $ZIG build-exe timer_stub.zig -T user.ld -fno-stack-check --name timer -O ReleaseSafe -target x86_64-freestanding-none
+    Move-Item -Force -Path timer -Destination kernel/bin/timer
+    & $ZIG build-exe virtio_gpu_stub.zig -T user.ld -fno-stack-check --name virtio_gpu -O ReleaseSafe -target x86_64-freestanding-none
+    Move-Item -Force -Path virtio_gpu -Destination kernel/bin/virtio_gpu
+    & $ZIG build-exe compositor_stub.zig -T user.ld -fno-stack-check --name compositor -O ReleaseSafe -target x86_64-freestanding-none
+    Move-Item -Force -Path compositor -Destination kernel/bin/compositor
+    & $ZIG build-exe input_stub.zig -T user.ld -fno-stack-check --name input -O ReleaseSafe -target x86_64-freestanding-none
+    Move-Item -Force -Path input -Destination kernel/bin/input
+    & $ZIG build-exe terminal_stub.zig -T user.ld -fno-stack-check --name terminal -O ReleaseSafe -target x86_64-freestanding-none
+    Move-Item -Force -Path terminal -Destination kernel/bin/terminal
+    & $ZIG build-exe pty_stub.zig -T user.ld -fno-stack-check --name pty -O ReleaseSafe -target x86_64-freestanding-none
+    Move-Item -Force -Path pty -Destination kernel/bin/pty
     Write-Host "      Userspace compiled successfully!" -ForegroundColor Green
 
     Write-Host "[1/3] Building kernel..." -ForegroundColor Yellow
@@ -75,7 +87,8 @@ $qemuArgs = @(
     "-no-reboot",
     "-no-shutdown",
     "-device", "virtio-net-pci,netdev=n0",
-    "-netdev", "user,id=n0"
+    "-netdev", "user,id=n0",
+    "-device", "virtio-gpu-pci"
 )
 
 if ($NoDisplay) {

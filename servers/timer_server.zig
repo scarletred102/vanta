@@ -22,8 +22,9 @@ const libvanta = @import("../libvanta/libvanta.zig");
 
 // ── Cap handles ──────────────────────────────────────────────────────────────
 
-pub const PORT_CAP_HANDLE: u64     = 0x0001000000000003; // Slot 3, Gen 1 – timer listener port
+pub const IRQ_CAP_HANDLE:      u64 = 0x0001000000000001; // Slot 1, Gen 1 – LAPIC timer DeviceIRQ
 pub const REGISTRY_CAP_HANDLE: u64 = 0x0001000000000002; // Slot 2, Gen 1 – registry port
+pub const PORT_CAP_HANDLE:     u64 = 0x0001000000000003; // Slot 3, Gen 1 – timer listener port
 
 // ── Message codes ─────────────────────────────────────────────────────────────
 
@@ -223,16 +224,7 @@ fn spawnTickRelay() void {
 pub export fn main() void {
     libvanta.vanta_debug_print("timer: starting timer server...");
 
-    // ── 1. Receive init message containing the DeviceIRQ cap ──────────────
-    var init_msg = Message{};
-    const recv_err = libvanta.vanta_cap_recv(PORT_CAP_HANDLE, @intFromPtr(&init_msg));
-    if (recv_err != 0) {
-        libvanta.vanta_debug_print("timer: failed to receive init message");
-        libvanta.vanta_exit(1);
-    }
-    const irq_cap: u64 = init_msg.caps[0];
-
-    // ── 2. Create a Notification for the IRQ ──────────────────────────────
+    // ── 1. Create a Notification for the IRQ ──────────────────────────────
     const notif_res = libvanta.vanta_notif_create();
     if (notif_res.err != 0) {
         libvanta.vanta_debug_print("timer: failed to create IRQ notification");
@@ -240,8 +232,8 @@ pub export fn main() void {
     }
     irq_notif_handle = notif_res.handle;
 
-    // ── 3. Bind the DeviceIRQ cap to our Notification ─────────────────────
-    const bind_err = libvanta.vanta_irq_bind(irq_cap, irq_notif_handle);
+    // ── 2. Bind the DeviceIRQ cap (slot 1) to our Notification ───────────
+    const bind_err = libvanta.vanta_irq_bind(IRQ_CAP_HANDLE, irq_notif_handle);
     if (bind_err != 0) {
         libvanta.vanta_debug_print("timer: failed to bind IRQ to notification");
         libvanta.vanta_exit(1);
