@@ -169,6 +169,17 @@ pub fn yield() void {
     current = next_t;
     cpu.user_rsp_scratch = next_t.user_rsp_scratch;
 
+    // Restore FS base for Linux threads (TLS support)
+    if (next_t.fs_base != 0) {
+        asm volatile (
+            \\ wrmsr
+            :
+            : [ecx] "{ecx}" (@as(u32, 0xC000_0100)),
+              [eax] "{eax}" (@as(u32, @truncate(next_t.fs_base))),
+              [edx] "{edx}" (@as(u32, @truncate(next_t.fs_base >> 32))),
+        );
+    }
+
     if (prev) |p| {
         if (p.page_table != next_t.page_table) {
             @import("../mm/vmm.zig").writeCr3(next_t.page_table);
@@ -202,7 +213,11 @@ pub fn block() void {
 
 pub fn wake(t: *Thread) void {
     if (t.state == .ready or t.state == .running) return;
-    while (!@atomicLoad(bool, &t.yielded, .acquire)) {
+    // Bounded spin: wait for the thread to finish its yield() critical section.
+    // Falls through after timeout to avoid livelock — the scheduler handles
+    // re-enqueue of a thread that hasn't fully context-switched yet.
+    var spins: usize = 0;
+    while (!@atomicLoad(bool, &t.yielded, .acquire) and spins < 1000) : (spins += 1) {
         asm volatile ("pause");
     }
     enqueue(t);

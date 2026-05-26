@@ -75,8 +75,10 @@ pub fn init() void {
     // LSTAR: address of syscall_entry (defined in inline asm below via wrapper)
     wrmsr(MSR_LSTAR, @intFromPtr(&syscall_entry_wrapper));
 
-    // FMASK: clear RFLAGS.IF on syscall entry
-    wrmsr(MSR_FMASK, 0x200);
+    // FMASK: clear RFLAGS.IF (bit 9) and TF (bit 8) on syscall entry.
+    // TF must be cleared to prevent userspace single-step mode from leaking
+    // into the kernel (FMASK is ANDed into RFLAGS; Intel SDM Vol.2 SYSCALL).
+    wrmsr(MSR_FMASK, 0x300);
 
     serial.puts("[SYSCALL] MSRs configured (STAR/LSTAR/FMASK/SCE)\n");
     serial.puts("[SYSCALL] Entry at 0x");
@@ -97,8 +99,8 @@ pub fn init_ap(self: *cpu_local.CpuLocal) void {
     // LSTAR: address of syscall_entry (defined in inline asm below via wrapper)
     wrmsr(MSR_LSTAR, @intFromPtr(&syscall_entry_wrapper));
 
-    // FMASK: clear RFLAGS.IF on syscall entry
-    wrmsr(MSR_FMASK, 0x200);
+    // FMASK: clear RFLAGS.IF (bit 9) and TF (bit 8) on syscall entry
+    wrmsr(MSR_FMASK, 0x300);
 
     writeMsrGsBase(@intFromPtr(self));
     wrmsr(MSR_KERNEL_GS_BASE, @intFromPtr(self));

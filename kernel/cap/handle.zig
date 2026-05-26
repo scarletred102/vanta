@@ -32,6 +32,7 @@ pub const CapType = enum(u4) {
     DeviceIRQ = 5,
     PageTable = 6,
     SharedMemory = 7,
+    PersonalityCap = 8,
 };
 
 // ── Rights ──────────────────────────────────────────────────────
@@ -258,10 +259,22 @@ fn invalidateDescendants(start_table: *CapTable, start_idx: u16, start_generatio
     const start_entry = &start_table.entries[start_idx];
     const obj_ptr = start_entry.kernel_object_ptr;
 
-    // Unlink the start entry first
+    // Unlink the start entry from the cap list first.
     unlinkEntry(start_table, start_idx);
 
-    // Walk the specific kernel object's capability list to invalidate all descendants
+    // Two-phase revocation to avoid breaking grandchild detection.
+    //
+    // Phase 1: identify all descendants and unlink them from the cap list,
+    //          but DO NOT zero their parent_table/parent_index fields yet.
+    //          isDescendantOf follows those links — zeroing them during the
+    //          walk prevents grandchildren from being detected.
+    //
+    // Phase 2: zero all collected entries once the walk is done.
+    const MAX_REVOKE = 64;
+    var revoke_tables: [MAX_REVOKE]*CapTable = undefined;
+    var revoke_indices: [MAX_REVOKE]u16 = undefined;
+    var n_revoke: usize = 0;
+
     if (getCapListHead(start_entry.type, obj_ptr)) |head| {
         var curr_table = head.table;
         var curr_idx = head.index;
@@ -272,19 +285,12 @@ fn invalidateDescendants(start_table: *CapTable, start_idx: u16, start_generatio
             const next_idx = entry.next_derived_index;
 
             if (isDescendantOf(c_tab, curr_idx, start_table, start_idx, start_generation)) {
-                // Unlink first before invalidating to preserve list traversal integrity
                 unlinkEntry(c_tab, curr_idx);
-
-                // Invalidate slot
-                entry.type = 0;
-                entry.rights = 0;
-                entry.kernel_object_ptr = 0;
-                entry.generation +%= 1; // Prevent handle reuse
-                entry.parent_table = null;
-                entry.parent_index = 0;
-                entry.parent_generation = 0;
-
-                c_tab.count -= 1;
+                if (n_revoke < MAX_REVOKE) {
+                    revoke_tables[n_revoke] = c_tab;
+                    revoke_indices[n_revoke] = curr_idx;
+                    n_revoke += 1;
+                }
             }
 
             curr_table = next_tab;
@@ -292,7 +298,21 @@ fn invalidateDescendants(start_table: *CapTable, start_idx: u16, start_generatio
         }
     }
 
-    // Invalidate the start entry itself
+    // Phase 2: zero all collected descendants.
+    var i: usize = 0;
+    while (i < n_revoke) : (i += 1) {
+        const entry = &revoke_tables[i].entries[revoke_indices[i]];
+        entry.type = 0;
+        entry.rights = 0;
+        entry.kernel_object_ptr = 0;
+        entry.generation +%= 1;
+        entry.parent_table = null;
+        entry.parent_index = 0;
+        entry.parent_generation = 0;
+        revoke_tables[i].count -= 1;
+    }
+
+    // Invalidate the start entry itself last.
     start_entry.type = 0;
     start_entry.rights = 0;
     start_entry.kernel_object_ptr = 0;

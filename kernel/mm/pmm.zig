@@ -171,7 +171,9 @@ fn allocBlockInternal(order: usize) ?u64 {
                 setOrder(left_idx, @intCast(cur_order));
                 setAllocated(right_idx, false);
                 setOrder(right_idx, @intCast(cur_order));
-                free_pages += split_size * 2;
+                // Only add the right buddy half — left half continues to be split.
+                // The initial subtraction at line 157 already removed the whole block.
+                free_pages += split_size;
 
                 // Push right block (buddy) into its free list
                 const right_block = @as(*Block, @ptrFromInt(vmm.phys2virt(right_phys)));
@@ -179,10 +181,9 @@ fn allocBlockInternal(order: usize) ?u64 {
                 free_lists[cur_order] = right_block;
             }
 
-            // Allocate the final left block
+            // Allocate the final left block (already subtracted from free_pages above).
             const idx = phys / PAGE_SIZE;
             setAllocated(idx, true);
-            free_pages -= @as(usize, 1) << @as(u6, @intCast(order));
             
             // Initialize refcounts
             const size = @as(usize, 1) << @as(u6, @intCast(order));

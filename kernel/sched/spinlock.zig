@@ -29,7 +29,7 @@ pub fn lock_irqsave(self: *TicketLock) u64 {
         \\ cli
         : [flags] "=r" (flags),
         :
-        : "memory"
+        : .{ .memory = true }
     );
     self.lock();
     return flags;
@@ -42,6 +42,6 @@ pub fn unlock_irqrestore(self: *TicketLock, flags: u64) void {
         \\ popfq
         :
         : [flags] "r" (flags),
-        : "memory", "cc"
+        : .{ .memory = true }
     );
 }

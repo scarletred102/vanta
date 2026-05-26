@@ -68,6 +68,31 @@ var idt: [256]IdtEntry = [_]IdtEntry{.{}} ** 256;
 
 pub var irq_notification_bindings: [16]?*@import("../../ipc/notification.zig").Notification = [_]?*@import("../../ipc/notification.zig").Notification{null} ** 16;
 
+/// Per-IRQ byte ring buffer so userspace drivers can read raw data via vanta_irq_readbyte.
+pub const IRQ_RING_SIZE: usize = 64;
+pub const IrqRingBuffer = struct {
+    data: [IRQ_RING_SIZE]u8 = [_]u8{0} ** IRQ_RING_SIZE,
+    head: u8 = 0,
+    tail: u8 = 0,
+
+    pub fn push(self: *IrqRingBuffer, b: u8) void {
+        const next: u8 = @truncate((@as(usize, self.tail) + 1) % IRQ_RING_SIZE);
+        if (next != self.head) {
+            self.data[self.tail] = b;
+            self.tail = next;
+        }
+        // If full, silently drop — keyboard repeat events are not critical.
+    }
+
+    pub fn pop(self: *IrqRingBuffer) ?u8 {
+        if (self.head == self.tail) return null;
+        const b = self.data[self.head];
+        self.head = @truncate((@as(usize, self.head) + 1) % IRQ_RING_SIZE);
+        return b;
+    }
+};
+pub var irq_data_buffers: [16]IrqRingBuffer = [_]IrqRingBuffer{.{}} ** 16;
+
 const EXCEPTION_NAMES = [32][]const u8{
     "Divide Error",  "Debug",         "NMI",                 "Breakpoint",
     "Overflow",      "Bound Range",   "Invalid Opcode",      "Device NA",
@@ -250,9 +275,14 @@ comptime {
         \\pushq $33
         \\jmp common_isr_handler
         \\.balign 16
-        \\// Vector 34 — AHCI IRQ
+        \\// Vector 34 — AHCI/virtio-net IRQ
         \\pushq $0
         \\pushq $34
+        \\jmp common_isr_handler
+        \\.balign 16
+        \\// Vector 35 — PS/2 Mouse IRQ
+        \\pushq $0
+        \\pushq $35
         \\jmp common_isr_handler
         \\.balign 16
         \\
@@ -399,24 +429,43 @@ export fn handleException(frame: *InterruptFrame) callconv(.c) void {
         }
 
         sched.tick();
+        // Fire timer notification for the timer_server (IRQ 0 = LAPIC timer pseudo-IRQ).
+        if (irq_notification_bindings[0]) |notif| {
+            notif.notify(1);
+        }
         interrupts.eoi();
         return;
     }
 
     if (vec == 33) {
-        const interrupts = @import("interrupts.zig");
-        const keyboard = @import("../../drivers/keyboard.zig");
-        keyboard.handleInterrupt();
-        interrupts.eoi();
+        // PS/2 keyboard: read scancode, push to ring buffer, wake input_server.
+        const cpu_io = @import("cpu.zig");
+        const scancode = cpu_io.inb(0x60);
+        irq_data_buffers[1].push(scancode);
+        if (irq_notification_bindings[1]) |notif| {
+            notif.notify(1);
+        }
+        interrupts_mod.eoi();
         return;
     }
 
     if (vec == 34) {
-        const interrupts = @import("interrupts.zig");
         if (irq_notification_bindings[11]) |notif| {
             notif.notify(1);
         }
-        interrupts.eoi();
+        interrupts_mod.eoi();
+        return;
+    }
+
+    if (vec == 35) {
+        // PS/2 mouse: read byte, push to ring buffer, wake input_server.
+        const cpu_io = @import("cpu.zig");
+        const mouse_byte = cpu_io.inb(0x60);
+        irq_data_buffers[12].push(mouse_byte);
+        if (irq_notification_bindings[12]) |notif| {
+            notif.notify(1);
+        }
+        interrupts_mod.eoi();
         return;
     }
 
@@ -532,6 +581,38 @@ export fn handleException(frame: *InterruptFrame) callconv(.c) void {
     serial.putHex(frame.cs);
     serial.puts("\n    ERR=0x");
     serial.putHex(frame.error_code);
+    serial.puts("\n    RFLAGS=0x");
+    serial.putHex(frame.rflags);
+    serial.puts("\n    RAX=0x");
+    serial.putHex(frame.rax);
+    serial.puts("  RBX=0x");
+    serial.putHex(frame.rbx);
+    serial.puts("  RCX=0x");
+    serial.putHex(frame.rcx);
+    serial.puts("\n    RDX=0x");
+    serial.putHex(frame.rdx);
+    serial.puts("  RSI=0x");
+    serial.putHex(frame.rsi);
+    serial.puts("  RDI=0x");
+    serial.putHex(frame.rdi);
+    serial.puts("\n    R8=0x");
+    serial.putHex(frame.r8);
+    serial.puts("  R9=0x");
+    serial.putHex(frame.r9);
+    serial.puts("  R10=0x");
+    serial.putHex(frame.r10);
+    serial.puts("\n    R11=0x");
+    serial.putHex(frame.r11);
+    serial.puts("  R12=0x");
+    serial.putHex(frame.r12);
+    serial.puts("  R13=0x");
+    serial.putHex(frame.r13);
+    serial.puts("\n    R14=0x");
+    serial.putHex(frame.r14);
+    serial.puts("  R15=0x");
+    serial.putHex(frame.r15);
+    serial.puts("\n    RBP=0x");
+    serial.putHex(frame.rbp);
     serial.puts("\nSystem halted.\n");
     while (true) {
         asm volatile ("cli; hlt");
@@ -548,8 +629,8 @@ pub fn init() void {
     serial.puts("\n");
     serial.puts("[IDT]   Building table\n");
 
-    // Install gates for vectors 0-34 (with IST for NMI/DF/MC)
-    inline for (0..35) |i| {
+    // Install gates for vectors 0-35 (with IST for NMI/DF/MC)
+    inline for (0..36) |i| {
         idt[i] = makeGate(stub_base + i * STUB_SIZE, selector, istForVector(i));
     }
 

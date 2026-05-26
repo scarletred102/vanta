@@ -199,12 +199,11 @@ pub fn map_non_present(space: AddressSpace, v: u64) bool {
     return true;
 }
 
-/// Allocate n_pages from buddy, map them top-down at a fixed virtual range (0x7FFF00000000 downward),
-/// map one additional unmapped guard page below the bottom. Return top-of-stack virtual address.
-pub fn alloc_user_stack(n_pages: usize) ?u64 {
+/// Allocate n_pages from buddy, map them top-down below `top_addr`,
+/// map one additional unmapped guard page below the bottom. Return top_addr (stack grows down).
+pub fn alloc_user_stack(n_pages: usize, top_addr: u64) ?u64 {
     if (n_pages == 0) return null;
     const space = AddressSpace.current();
-    const top_addr: u64 = 0x7FFF00000000;
 
     var i: usize = 0;
     while (i < n_pages) : (i += 1) {
@@ -255,9 +254,8 @@ pub fn alloc_user_stack(n_pages: usize) ?u64 {
     return top_addr;
 }
 
-pub fn alloc_user_stack_in_space(space: AddressSpace, n_pages: usize) ?u64 {
+pub fn alloc_user_stack_in_space(space: AddressSpace, n_pages: usize, top_addr: u64) ?u64 {
     if (n_pages == 0) return null;
-    const top_addr: u64 = 0x7FFF00000000;
 
     var i: usize = 0;
     while (i < n_pages) : (i += 1) {

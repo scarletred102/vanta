@@ -11,6 +11,7 @@ const PCI_CONFIG_DATA: u16 = 0xCFC;
 
 pub var ahci_bar5_phys: u64 = 0;
 pub var virtio_net_bar0_phys: u64 = 0;
+pub var virtio_gpu_bar0_phys: u64 = 0;
 
 /// Read a 32-bit register from the PCI configuration space.
 pub fn configRead32(bus: u8, slot: u8, func: u8, offset: u8) u32 {
@@ -54,6 +55,19 @@ pub fn init() void {
                 const val2 = configRead32(@truncate(bus), slot, func, 0x08);
                 const class_code = @as(u8, @truncate((val2 >> 24) & 0xFF));
                 const subclass = @as(u8, @truncate((val2 >> 16) & 0xFF));
+
+                // Detect virtio-gpu (vendor=0x1AF4, device=0x1050)
+                if (func_vendor == 0x1AF4 and func_device == 0x1050) {
+                    serial.puts("[PCI]   Found virtio-gpu at ");
+                    serial.putDec(bus);
+                    serial.puts(":");
+                    serial.putDec(slot);
+                    serial.puts(".");
+                    serial.putDec(func);
+                    serial.puts("\n");
+                    const bar0_val = configRead32(@truncate(bus), slot, func, 0x10);
+                    virtio_gpu_bar0_phys = bar0_val & ~@as(u32, 0xF);
+                }
 
                 // Detect virtio-net (vendor=0x1AF4, device=0x1000, class=0x02)
                 if (func_vendor == 0x1AF4 and func_device == 0x1000) {

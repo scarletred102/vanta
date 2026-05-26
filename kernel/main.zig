@@ -46,6 +46,10 @@ var test_port: port_mod.Port = .{};
 var root_handle: cap.Handle = 0;
 var write_handle: cap.Handle = 0;
 
+// Limine framebuffer physical address — saved during kmain, used by compositor/gpu caps
+var limine_fb_phys: u64 = 0;
+var limine_fb_stride: u32 = 4096; // bytes/row; default covers 1024-wide display
+
 fn consumerThread() callconv(.c) noreturn {
     var msg: port_mod.Message = undefined;
     var msg_count: u64 = 0;
@@ -193,6 +197,9 @@ fn kmain() void {
     serial.puts("[KBD]   PS/2 Keyboard routed (IRQ 1 -> Vector 33)\n");
     interrupts.routeIrq(11, 34, 0);
     serial.puts("[AHCI]  AHCI IRQ routed (IRQ 11 -> Vector 34)\n");
+    interrupts.routeIrq(12, 35, 0);
+    serial.puts("[MOUSE] PS/2 Mouse routed (IRQ 12 -> Vector 35)\n");
+    interrupts.initPs2Mouse();
 
     // PCI Bus Scanner
     pci.init();
@@ -210,6 +217,9 @@ fn kmain() void {
             serial.puts("x");
             serial.putDec(fb.bpp);
             serial.puts("bpp\n");
+            // Save physical address for compositor/virtio-gpu caps
+            limine_fb_phys = vmm.virt2phys_hhdm(@intFromPtr(fb.address));
+            limine_fb_stride = @intCast(fb.pitch);
             drawBootScreen(fb);
         }
     }
@@ -292,6 +302,12 @@ const vantafs_elf = @embedFile("bin/vantafs");
 const ahci_elf = @embedFile("bin/ahci");
 const fs_test_elf = @embedFile("bin/fs_test");
 const virtio_net_elf = @embedFile("bin/virtio_net");
+const timer_elf = @embedFile("bin/timer");
+const virtio_gpu_elf = @embedFile("bin/virtio_gpu");
+const compositor_elf = @embedFile("bin/compositor");
+const input_elf = @embedFile("bin/input");
+const terminal_elf = @embedFile("bin/terminal");
+const pty_elf = @embedFile("bin/pty");
 
 var ns_port: port_mod.Port = .{};
 var tmpfs_port: port_mod.Port = .{};
@@ -299,6 +315,12 @@ var vantafs_port: port_mod.Port = .{};
 var ahci_port: port_mod.Port = .{};
 var registry_port: port_mod.Port = .{};
 var virtio_net_port: port_mod.Port = .{};
+var timer_port: port_mod.Port = .{};
+var virtio_gpu_port: port_mod.Port = .{};
+var compositor_port: port_mod.Port = .{};
+var input_port: port_mod.Port = .{};
+var terminal_port: port_mod.Port = .{};
+var pty_port: port_mod.Port = .{};
 
 const RegistryEntry = struct {
     name: [32]u8,
@@ -322,9 +344,14 @@ pub fn registryThread() callconv(.c) noreturn {
                         @memcpy(reg_entry.name[0..name.len], name);
                         reg_entry.name_len = name.len;
                         reg_entry.entry = msg.transferred_caps[0];
-                        // Clear recipient table metadata so duplicate derivations link cleanly
+                        // Orphan the cap from the registrant's table so parent checks pass later
                         reg_entry.entry.old_table = null;
                         reg_entry.entry.old_index = 0;
+                        reg_entry.entry.parent_table = null;
+                        reg_entry.entry.parent_index = 0;
+                        reg_entry.entry.parent_generation = 0;
+                        reg_entry.entry.next_derived_table = null;
+                        reg_entry.entry.next_derived_index = 0;
                         registry_count += 1;
                         
                         serial.puts("[REGISTRY] Registered service '");
@@ -333,6 +360,7 @@ pub fn registryThread() callconv(.c) noreturn {
                     }
                 }
             } else if (msg.msg_type == 0x11) { // RegistryLookup
+                serial.puts("[REGISTRY] Got NS_LOOKUP\n");
                 const name = std.mem.sliceTo(msg.payload[0..32], 0);
                 var found = false;
                 var found_idx: usize = 0;
@@ -346,14 +374,18 @@ pub fn registryThread() callconv(.c) noreturn {
                 }
                 
                 if (found) {
+                    serial.puts("[REGISTRY] Found '");
+                    serial.puts(name);
+                    serial.puts("', sending reply\n");
                     var reply = port_mod.Message{};
                     reply.msg_type = 0x11;
                     reply.flags.is_reply = true;
                     var cap_entry = registry_table[found_idx].entry;
-                    cap_entry.rights = cap.Rights.EndpointSend; // Send only!
+                    cap_entry.rights = cap.Rights.EndpointSend | cap.Rights.EndpointRecv;
                     reply.transferred_caps[0] = cap_entry;
-                    
+
                     _ = registry_port.send(&reply);
+                    serial.puts("[REGISTRY] Reply sent\n");
                 } else {
                     var reply = port_mod.Message{};
                     reply.msg_type = 0x0003; // MSG_ERROR
@@ -481,20 +513,20 @@ pub fn runPhase7Test() void {
     const virtio_net_entry = @import("elf.zig").load_elf(virtio_net_elf_info, virtio_net_elf, virtio_net_proc.space.pml4_phys) catch unreachable;
 
     // 5. Alloc stacks
-    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = ns_proc.space.pml4_phys }, 16).?;
-    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = tmpfs_proc.space.pml4_phys }, 16).?;
-    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = vantafs_proc.space.pml4_phys }, 16).?;
-    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = ahci_proc.space.pml4_phys }, 16).?;
-    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = fs_test_proc.space.pml4_phys }, 16).?;
-    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = virtio_net_proc.space.pml4_phys }, 16).?;
+    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = ns_proc.space.pml4_phys }, 16, ns_proc.user_stack_top).?;
+    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = tmpfs_proc.space.pml4_phys }, 16, tmpfs_proc.user_stack_top).?;
+    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = vantafs_proc.space.pml4_phys }, 16, vantafs_proc.user_stack_top).?;
+    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = ahci_proc.space.pml4_phys }, 16, ahci_proc.user_stack_top).?;
+    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = fs_test_proc.space.pml4_phys }, 16, fs_test_proc.user_stack_top).?;
+    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = virtio_net_proc.space.pml4_phys }, 16, virtio_net_proc.user_stack_top).?;
 
     // 6. Setup stacks
-    const ns_stack_top = @import("elf.zig").setupUserStack(ns_proc.space.pml4_phys, ns_entry, ns_elf_info);
-    const tmpfs_stack_top = @import("elf.zig").setupUserStack(tmpfs_proc.space.pml4_phys, tmpfs_entry, tmpfs_elf_info);
-    const vantafs_stack_top = @import("elf.zig").setupUserStack(vantafs_proc.space.pml4_phys, vantafs_entry, vantafs_elf_info);
-    const ahci_stack_top = @import("elf.zig").setupUserStack(ahci_proc.space.pml4_phys, ahci_entry, ahci_elf_info);
-    const fs_test_stack_top = @import("elf.zig").setupUserStack(fs_test_proc.space.pml4_phys, fs_test_entry, fs_test_elf_info);
-    const virtio_net_stack_top = @import("elf.zig").setupUserStack(virtio_net_proc.space.pml4_phys, virtio_net_entry, virtio_net_elf_info);
+    const ns_stack_top = @import("elf.zig").setupUserStack(ns_proc.space.pml4_phys, ns_entry, ns_elf_info, ns_proc.user_stack_top);
+    const tmpfs_stack_top = @import("elf.zig").setupUserStack(tmpfs_proc.space.pml4_phys, tmpfs_entry, tmpfs_elf_info, tmpfs_proc.user_stack_top);
+    const vantafs_stack_top = @import("elf.zig").setupUserStack(vantafs_proc.space.pml4_phys, vantafs_entry, vantafs_elf_info, vantafs_proc.user_stack_top);
+    const ahci_stack_top = @import("elf.zig").setupUserStack(ahci_proc.space.pml4_phys, ahci_entry, ahci_elf_info, ahci_proc.user_stack_top);
+    const fs_test_stack_top = @import("elf.zig").setupUserStack(fs_test_proc.space.pml4_phys, fs_test_entry, fs_test_elf_info, fs_test_proc.user_stack_top);
+    const virtio_net_stack_top = @import("elf.zig").setupUserStack(virtio_net_proc.space.pml4_phys, virtio_net_entry, virtio_net_elf_info, virtio_net_proc.user_stack_top);
 
     // 7. Create threads
     const ut_ns = thread.create_user(ns_entry, ns_stack_top, ns_proc.space.pml4_phys, ns_proc.pid) orelse {
@@ -539,6 +571,110 @@ pub fn runPhase7Test() void {
 
     sched.enqueue(ut_virtio_net);
     virtio_net_proc.thread_count += 1;
+
+    // ── Phase 11: Graphics servers ────────────────────────────────────────
+
+    // ── timer_server ──────────────────────────────────────────────────────
+    const timer_proc = proc.create("timer", 0) orelse { serial.puts("[WARN] timer proc failed\n"); return; };
+    _ = cap.cap_table_insert(&timer_proc.cap_table, 0, @intFromEnum(cap.CapType.DeviceIRQ), cap.Rights.DeviceIRQBind); // slot 1: IRQ 0 (LAPIC timer)
+    _ = cap.cap_table_insert(&timer_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv); // slot 2
+    _ = cap.cap_table_insert(&timer_proc.cap_table, @intFromPtr(&timer_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant); // slot 3
+
+    const timer_elf_info = @import("elf.zig").parse_elf64(timer_elf) catch { serial.puts("[WARN] timer ELF parse failed\n"); return; };
+    const timer_entry = @import("elf.zig").load_elf(timer_elf_info, timer_elf, timer_proc.space.pml4_phys) catch { serial.puts("[WARN] timer ELF load failed\n"); return; };
+    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = timer_proc.space.pml4_phys }, 16, timer_proc.user_stack_top).?;
+    const timer_stack_top = @import("elf.zig").setupUserStack(timer_proc.space.pml4_phys, timer_entry, timer_elf_info, timer_proc.user_stack_top);
+    const ut_timer = thread.create_user(timer_entry, timer_stack_top, timer_proc.space.pml4_phys, timer_proc.pid) orelse { serial.puts("[WARN] ut_timer failed\n"); return; };
+    sched.enqueue(ut_timer);
+    timer_proc.thread_count += 1;
+    serial.puts("[P11] timer_server spawned\n");
+
+    // ── virtio_gpu_server ─────────────────────────────────────────────────
+    const virtio_gpu_proc = proc.create("virtio_gpu", 0) orelse { serial.puts("[WARN] virtio_gpu proc failed\n"); return; };
+    const gpu_bar0 = if (pci.virtio_gpu_bar0_phys != 0) pci.virtio_gpu_bar0_phys else b: {
+        const p = pmm.allocPage().?;
+        @memset(@as([*]u8, @ptrFromInt(vmm.phys2virt(p)))[0..4096], 0);
+        break :b p;
+    };
+    _ = cap.cap_table_insert(&virtio_gpu_proc.cap_table, gpu_bar0, @intFromEnum(cap.CapType.Memory), cap.Rights.MemoryRead | cap.Rights.MemoryWrite | cap.Rights.MemoryMap); // slot 1: BAR0
+    const fb_phys_for_gpu = if (limine_fb_phys != 0) limine_fb_phys else b: {
+        const p = pmm.allocPage().?;
+        break :b p;
+    };
+    _ = cap.cap_table_insert(&virtio_gpu_proc.cap_table, fb_phys_for_gpu, @intFromEnum(cap.CapType.Memory), cap.Rights.MemoryRead | cap.Rights.MemoryWrite | cap.Rights.MemoryMap); // slot 2: Limine FB
+    _ = cap.cap_table_insert(&virtio_gpu_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv); // slot 3
+    _ = cap.cap_table_insert(&virtio_gpu_proc.cap_table, @intFromPtr(&virtio_gpu_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant); // slot 4
+
+    const virtio_gpu_elf_info = @import("elf.zig").parse_elf64(virtio_gpu_elf) catch { serial.puts("[WARN] virtio_gpu ELF parse failed\n"); return; };
+    const virtio_gpu_entry = @import("elf.zig").load_elf(virtio_gpu_elf_info, virtio_gpu_elf, virtio_gpu_proc.space.pml4_phys) catch { serial.puts("[WARN] virtio_gpu ELF load failed\n"); return; };
+    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = virtio_gpu_proc.space.pml4_phys }, 16, virtio_gpu_proc.user_stack_top).?;
+    const virtio_gpu_stack_top = @import("elf.zig").setupUserStack(virtio_gpu_proc.space.pml4_phys, virtio_gpu_entry, virtio_gpu_elf_info, virtio_gpu_proc.user_stack_top);
+    const ut_virtio_gpu = thread.create_user(virtio_gpu_entry, virtio_gpu_stack_top, virtio_gpu_proc.space.pml4_phys, virtio_gpu_proc.pid) orelse { serial.puts("[WARN] ut_virtio_gpu failed\n"); return; };
+    sched.enqueue(ut_virtio_gpu);
+    virtio_gpu_proc.thread_count += 1;
+    serial.puts("[P11] virtio_gpu_server spawned\n");
+
+    // ── compositor_server ─────────────────────────────────────────────────
+    const compositor_proc = proc.create("compositor", 0) orelse { serial.puts("[WARN] compositor proc failed\n"); return; };
+    const fb_phys_for_comp = if (limine_fb_phys != 0) limine_fb_phys else b: {
+        const p = pmm.allocPage().?;
+        break :b p;
+    };
+    _ = cap.cap_table_insert(&compositor_proc.cap_table, fb_phys_for_comp, @intFromEnum(cap.CapType.Memory), cap.Rights.MemoryRead | cap.Rights.MemoryWrite | cap.Rights.MemoryMap); // slot 1: Limine FB
+    _ = cap.cap_table_insert(&compositor_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv); // slot 2
+    _ = cap.cap_table_insert(&compositor_proc.cap_table, @intFromPtr(&compositor_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant); // slot 3
+
+    const compositor_elf_info = @import("elf.zig").parse_elf64(compositor_elf) catch { serial.puts("[WARN] compositor ELF parse failed\n"); return; };
+    const compositor_entry = @import("elf.zig").load_elf(compositor_elf_info, compositor_elf, compositor_proc.space.pml4_phys) catch { serial.puts("[WARN] compositor ELF load failed\n"); return; };
+    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = compositor_proc.space.pml4_phys }, 16, compositor_proc.user_stack_top).?;
+    const compositor_stack_top = @import("elf.zig").setupUserStack(compositor_proc.space.pml4_phys, compositor_entry, compositor_elf_info, compositor_proc.user_stack_top);
+    const ut_compositor = thread.create_user(compositor_entry, compositor_stack_top, compositor_proc.space.pml4_phys, compositor_proc.pid) orelse { serial.puts("[WARN] ut_compositor failed\n"); return; };
+    sched.enqueue(ut_compositor);
+    compositor_proc.thread_count += 1;
+    serial.puts("[P11] compositor_server spawned\n");
+
+    // ── input_server ──────────────────────────────────────────────────────
+    const input_proc = proc.create("input", 0) orelse { serial.puts("[WARN] input proc failed\n"); return; };
+    _ = cap.cap_table_insert(&input_proc.cap_table, 1, @intFromEnum(cap.CapType.DeviceIRQ), cap.Rights.DeviceIRQBind); // slot 1: IRQ 1 (keyboard)
+    _ = cap.cap_table_insert(&input_proc.cap_table, 12, @intFromEnum(cap.CapType.DeviceIRQ), cap.Rights.DeviceIRQBind); // slot 2: IRQ 12 (mouse)
+    _ = cap.cap_table_insert(&input_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv); // slot 3
+    _ = cap.cap_table_insert(&input_proc.cap_table, @intFromPtr(&input_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant); // slot 4
+
+    const input_elf_info = @import("elf.zig").parse_elf64(input_elf) catch { serial.puts("[WARN] input ELF parse failed\n"); return; };
+    const input_entry = @import("elf.zig").load_elf(input_elf_info, input_elf, input_proc.space.pml4_phys) catch { serial.puts("[WARN] input ELF load failed\n"); return; };
+    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = input_proc.space.pml4_phys }, 16, input_proc.user_stack_top).?;
+    const input_stack_top = @import("elf.zig").setupUserStack(input_proc.space.pml4_phys, input_entry, input_elf_info, input_proc.user_stack_top);
+    const ut_input = thread.create_user(input_entry, input_stack_top, input_proc.space.pml4_phys, input_proc.pid) orelse { serial.puts("[WARN] ut_input failed\n"); return; };
+    sched.enqueue(ut_input);
+    input_proc.thread_count += 1;
+    serial.puts("[P11] input_server spawned\n");
+
+    // ── pty_server ────────────────────────────────────────────────────────
+    const pty_proc = proc.create("pty", 0) orelse { serial.puts("[WARN] pty proc failed\n"); return; };
+    _ = cap.cap_table_insert(&pty_proc.cap_table, @intFromPtr(&pty_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant); // slot 1
+    _ = cap.cap_table_insert(&pty_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv); // slot 2
+
+    const pty_elf_info = @import("elf.zig").parse_elf64(pty_elf) catch { serial.puts("[WARN] pty ELF parse failed\n"); return; };
+    const pty_entry = @import("elf.zig").load_elf(pty_elf_info, pty_elf, pty_proc.space.pml4_phys) catch { serial.puts("[WARN] pty ELF load failed\n"); return; };
+    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = pty_proc.space.pml4_phys }, 16, pty_proc.user_stack_top).?;
+    const pty_stack_top = @import("elf.zig").setupUserStack(pty_proc.space.pml4_phys, pty_entry, pty_elf_info, pty_proc.user_stack_top);
+    const ut_pty = thread.create_user(pty_entry, pty_stack_top, pty_proc.space.pml4_phys, pty_proc.pid) orelse { serial.puts("[WARN] ut_pty failed\n"); return; };
+    sched.enqueue(ut_pty);
+    pty_proc.thread_count += 1;
+    serial.puts("[P11] pty_server spawned\n");
+
+    // ── terminal_emulator ─────────────────────────────────────────────────
+    const terminal_proc = proc.create("terminal", 0) orelse { serial.puts("[WARN] terminal proc failed\n"); return; };
+    _ = cap.cap_table_insert(&terminal_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv); // slot 1: registry
+
+    const terminal_elf_info = @import("elf.zig").parse_elf64(terminal_elf) catch { serial.puts("[WARN] terminal ELF parse failed\n"); return; };
+    const terminal_entry = @import("elf.zig").load_elf(terminal_elf_info, terminal_elf, terminal_proc.space.pml4_phys) catch { serial.puts("[WARN] terminal ELF load failed\n"); return; };
+    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = terminal_proc.space.pml4_phys }, 16, terminal_proc.user_stack_top).?;
+    const terminal_stack_top = @import("elf.zig").setupUserStack(terminal_proc.space.pml4_phys, terminal_entry, terminal_elf_info, terminal_proc.user_stack_top);
+    const ut_terminal = thread.create_user(terminal_entry, terminal_stack_top, terminal_proc.space.pml4_phys, terminal_proc.pid) orelse { serial.puts("[WARN] ut_terminal failed\n"); return; };
+    sched.enqueue(ut_terminal);
+    terminal_proc.thread_count += 1;
+    serial.puts("[P11] terminal_emulator spawned\n");
 
     serial.puts("[P7-TEST] Spawning complete. Running scheduler...\n");
 }

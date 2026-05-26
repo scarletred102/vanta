@@ -271,7 +271,14 @@ fn boot_aps() void {
     serial.putHex(pml4_mailbox.*);
     serial.puts("\n");
 
-    // Clear the NX bit at all page table levels for 0x7000 and 0x8000 to allow AP trampoline execution
+    // Explicitly identity map trampoline and mailbox pages (0x7000 and 0x8000).
+    // Flags: PTE_PRESENT | PTE_WRITE, no PTE_USER, no PTE_NX — kernel executable pages.
+    _ = vmm.map(vmm.AddressSpace.current(), 0x7000, 0x7000, vmm.PTE_WRITE);
+    _ = vmm.map(vmm.AddressSpace.current(), 0x8000, 0x8000, vmm.PTE_WRITE);
+    serial.puts("[SMP]   Explicit identity map of 0x7000 and 0x8000 created\n");
+
+    // Clear the NX bit at all page table levels for 0x7000 and 0x8000 after mapping,
+    // so SMEP does not fault on AP trampoline execution.
     const pml4_phys_val = vmm.AddressSpace.current().pml4_phys;
     const pml4 = @as([*]volatile u64, @ptrFromInt(vmm.phys2virt(pml4_phys_val)));
     pml4[0] &= ~(@as(u64, 1) << 63);
@@ -291,11 +298,6 @@ fn boot_aps() void {
             }
         }
     }
-
-    // Explicitly identity map trampoline and mailbox pages (0x7000 and 0x8000)
-    _ = vmm.map(vmm.AddressSpace.current(), 0x7000, 0x7000, vmm.PTE_WRITE);
-    _ = vmm.map(vmm.AddressSpace.current(), 0x8000, 0x8000, vmm.PTE_WRITE);
-    serial.puts("[SMP]   Explicit identity map of 0x7000 and 0x8000 created\n");
 
     var i: usize = 0;
     while (i < topology.count) : (i += 1) {
