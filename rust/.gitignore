@@ -1,0 +1,4 @@
+target/
+**/target/
+esp/boot/vanta-kernel
+esp/NvVars
