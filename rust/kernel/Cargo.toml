@@ -1,0 +1,27 @@
+[package]
+name = "vanta-kernel"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "vanta-kernel"
+path = "src/main.rs"
+
+[dependencies]
+limine = "0.6"
+x86_64 = "0.15"
+uart_16550 = "0.3"
+pic8259 = "0.11"
+pc-keyboard = "0.7"
+spin = "0.9"
+heapless = "0.8"
+lazy_static = { version = "1.5", features = ["spin_no_std"] }
+noto-sans-mono-bitmap = { version = "0.3", default-features = false, features = ["regular", "size_16", "unicode-basic-latin"] }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+lto = "thin"
