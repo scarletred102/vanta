@@ -52,6 +52,8 @@ rust/
       main.rs                # _start, request statics, init order
       elf.rs                 # ELF64 parser + embedded CPL3 test image
       fs.rs                  # read-only CPIO newc initramfs
+      storage.rs             # sector block-device trait + RAM block driver
+      vfs.rs                 # writable VantaFS volume + root mount
       serial.rs              # COM1 logger
       gdt.rs                 # GDT + TSS + ring-3 entry + double-fault IST
       interrupts.rs          # IDT, PIC, exception + IRQ handlers
@@ -88,6 +90,8 @@ rust/
 - User process exit switches back to the kernel address space and reclaims it
 - Read-only CPIO `newc` initramfs with `/bin/init` and `/etc/motd` lookup
 - Filesystem-backed `/bin/init` loading through the ELF/process path
+- Sector block-device abstraction with a writable RAM-disk implementation
+- Writable VantaFS root mount with remount/persistence self-checks
 - In-kernel shell: prompt, echo, backspace, newline
 
 ## What does not (yet)
