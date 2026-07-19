@@ -50,13 +50,17 @@ rust/
     .cargo/config.toml       # x86_64-unknown-none target + link flags
     src/
       main.rs                # _start, request statics, init order
+      elf.rs                 # ELF64 parser + embedded CPL3 test image
+      fs.rs                  # read-only CPIO newc initramfs
       serial.rs              # COM1 logger
-      gdt.rs                 # GDT + TSS + double-fault IST
+      gdt.rs                 # GDT + TSS + ring-3 entry + double-fault IST
       interrupts.rs          # IDT, PIC, exception + IRQ handlers
       framebuffer.rs         # Limine framebuffer + bitmap font
       memory.rs              # memory-map accounting + physical frames
       paging.rs              # HHDM translation + mutable page-table manager
       heap.rs                # mapped free-list + global Rust allocator
+      process.rs              # ELF PT_LOAD mapping + user stack lifecycle
+      syscall.rs              # syscall/sysret entry + write/exit ABI
       keyboard.rs            # IRQ1 scancode queue
       shell.rs               # decoder + echo loop
   esp/
@@ -77,13 +81,20 @@ rust/
 - Limine memory-map accounting and bounded physical-frame allocator
 - HHDM translation and page-table inspection of Limine's active mappings
 - Mapped reclaiming Rust kernel heap with `Vec`/`Box` allocation self-checks
+- ELF64 PT_LOAD loading into an isolated address space with user/NX flags
+- Reclaimable process mappings and a four-page user stack
+- Ring-3 entry through `iretq`, with a TSS privilege stack and syscall test
+- Single-CPU `syscall`/`sysretq` ABI with user `write` and `exit` calls
+- User process exit switches back to the kernel address space and reclaims it
+- Read-only CPIO `newc` initramfs with `/bin/init` and `/etc/motd` lookup
+- Filesystem-backed `/bin/init` loading through the ELF/process path
 - In-kernel shell: prompt, echo, backspace, newline
 
 ## What does not (yet)
 
-- No userspace, no syscalls, no ELF loader
+- No scheduler, fork/exec, or broader syscall surface yet
 - No slab allocator yet; the bootstrap free-list has fixed metadata capacity
-- No filesystem, no networking
+- No writable filesystem, VFS mounts, block storage, or networking
 - No mouse, no windowing — terminal only
 - Single-CPU only; SMP/APIC come later
 
