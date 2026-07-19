@@ -55,6 +55,8 @@ rust/
       interrupts.rs          # IDT, PIC, exception + IRQ handlers
       framebuffer.rs         # Limine framebuffer + bitmap font
       memory.rs              # memory-map accounting + physical frames
+      paging.rs              # HHDM translation + mutable page-table manager
+      heap.rs                # mapped free-list + global Rust allocator
       keyboard.rs            # IRQ1 scancode queue
       shell.rs               # decoder + echo loop
   esp/
@@ -73,12 +75,14 @@ rust/
 - PIC 8259 remap, IRQ0 + IRQ1 unmasked
 - PS/2 keyboard via `pc-keyboard` scancode decoder
 - Limine memory-map accounting and bounded physical-frame allocator
+- HHDM translation and page-table inspection of Limine's active mappings
+- Mapped reclaiming Rust kernel heap with `Vec`/`Box` allocation self-checks
 - In-kernel shell: prompt, echo, backspace, newline
 
 ## What does not (yet)
 
 - No userspace, no syscalls, no ELF loader
-- No general heap or page-table manager yet; the early frame allocator is static
+- No slab allocator yet; the bootstrap free-list has fixed metadata capacity
 - No filesystem, no networking
 - No mouse, no windowing — terminal only
 - Single-CPU only; SMP/APIC come later
