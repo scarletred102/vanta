@@ -1,9 +1,11 @@
+use core::arch::global_asm;
+
 use crate::{gdt, serial_println};
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use spin::Mutex;
-use x86_64::PrivilegeLevel;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+use x86_64::{PrivilegeLevel, VirtAddr};
 
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
@@ -16,8 +18,9 @@ pub enum HwIrq {
 }
 
 impl HwIrq {
-    fn as_u8(self) -> u8 { self as u8 }
-    fn as_usize(self) -> usize { self as usize }
+    fn as_u8(self) -> u8 {
+        self as u8
+    }
 }
 
 pub static PICS: Mutex<ChainedPics> =
@@ -36,11 +39,61 @@ lazy_static! {
                 .set_handler_fn(double_fault_handler)
                 .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
         }
-        idt[HwIrq::Timer.as_u8()].set_handler_fn(timer_handler);
+        unsafe {
+            idt[HwIrq::Timer.as_u8()].set_handler_addr(VirtAddr::new(
+                vanta_timer_entry as *const () as usize as u64,
+            ));
+        }
         idt[HwIrq::Keyboard.as_u8()].set_handler_fn(keyboard_handler);
         idt
     };
 }
+
+extern "C" {
+    fn vanta_timer_entry();
+}
+
+global_asm!(
+    r#"
+    .global vanta_timer_entry
+    .extern vanta_timer_tick
+vanta_timer_entry:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rdi, rsp
+    call vanta_timer_tick
+    mov rsp, rax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    iretq
+"#
+);
 
 pub fn init_idt() {
     IDT.load();
@@ -60,13 +113,37 @@ extern "x86-interrupt" fn gp_handler(frame: InterruptStackFrame, code: u64) {
 
 extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: PageFaultErrorCode) {
     let addr = x86_64::registers::control::Cr2::read();
-    panic!("PAGE FAULT addr={:?} code={:?} frame={:#?}", addr, code, frame);
+    panic!(
+        "PAGE FAULT addr={:?} code={:?} frame={:#?}",
+        addr, code, frame
+    );
 }
 
-extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
+pub fn initialize_timer(frequency_hz: u32) -> bool {
+    const PIT_INPUT_HZ: u32 = 1_193_182;
+    if frequency_hz == 0 || frequency_hz > PIT_INPUT_HZ {
+        return false;
+    }
+    let divisor = (PIT_INPUT_HZ / frequency_hz).clamp(1, u16::MAX as u32) as u16;
+    use x86_64::instructions::port::Port;
+    let mut command: Port<u8> = Port::new(0x43);
+    let mut channel_zero: Port<u8> = Port::new(0x40);
+    unsafe {
+        command.write(0x36);
+        channel_zero.write(divisor as u8);
+        channel_zero.write((divisor >> 8) as u8);
+    }
+    true
+}
+
+#[no_mangle]
+extern "C" fn vanta_timer_tick(
+    context: *mut crate::scheduler::InterruptContext,
+) -> *const crate::scheduler::InterruptContext {
     unsafe {
         PICS.lock().notify_end_of_interrupt(HwIrq::Timer.as_u8());
     }
+    crate::scheduler::timer_tick(context)
 }
 
 extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {

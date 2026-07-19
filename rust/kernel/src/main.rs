@@ -318,6 +318,11 @@ pub extern "C" fn _start() -> ! {
         // unmask IRQ0 (timer) and IRQ1 (keyboard); mask the rest
         pics.write_masks(0b1111_1100, 0b1111_1111);
     }
+    if interrupts::initialize_timer(100) {
+        serial_println!("[boot] PIT configured: 100 Hz");
+    } else {
+        serial_println!("[boot] WARNING: PIT configuration failed");
+    }
     x86_64::instructions::interrupts::enable();
     kprintln!("[ok] pic + sti");
     serial_println!("[boot] interrupts enabled");

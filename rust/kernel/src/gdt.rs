@@ -77,6 +77,10 @@ pub fn syscall_selectors() -> (
     (GDT.1.user_code, GDT.1.user_data, GDT.1.code, GDT.1.data)
 }
 
+pub fn user_interrupt_selectors() -> (u64, u64) {
+    (GDT.1.user_code.0 as u64, GDT.1.user_data.0 as u64)
+}
+
 pub unsafe fn enter_user(entry: u64, stack: u64) -> ! {
     let user_code = GDT.1.user_code.0 as u64;
     let user_data = GDT.1.user_data.0 as u64;
