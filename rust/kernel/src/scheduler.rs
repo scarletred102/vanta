@@ -9,8 +9,15 @@ use crate::process::Process;
 use crate::syscall::UserContext;
 
 struct Task {
+    pid: u64,
     process: Option<Box<Process>>,
     context: UserContext,
+    descriptors: Vec<Option<FileDescriptor>>,
+}
+
+struct FileDescriptor {
+    contents: Vec<u8>,
+    offset: usize,
 }
 
 struct Scheduler {
@@ -28,13 +35,16 @@ pub unsafe fn start(processes: Vec<Box<Process>>) -> ! {
     }
     let tasks = processes
         .into_iter()
-        .map(|process| Task {
+        .enumerate()
+        .map(|(index, process)| Task {
+            pid: (index + 1) as u64,
             context: UserContext {
                 instruction_pointer: process.entry(),
                 flags: 0x202,
                 stack_pointer: process.user_stack_top(),
             },
             process: Some(process),
+            descriptors: Vec::new(),
         })
         .collect();
     *SCHEDULER.lock() = Some(Scheduler {
@@ -65,7 +75,11 @@ pub fn yield_current(context: UserContext) -> *const UserContext {
         (task.context, process.address_space(), previous, next)
     };
     if previous != next {
-        crate::serial_println!("[sched] yield task={} -> {}", previous, next);
+        crate::serial_println!(
+            "[sched] yield pid={} -> {}",
+            scheduler_pid(previous),
+            scheduler_pid(next)
+        );
     }
     crate::syscall::prepare_user_return(next_context, next_space)
 }
@@ -107,7 +121,7 @@ pub fn exit_current(code: u64) -> *const UserContext {
         x86_64::instructions::interrupts::enable();
         crate::shell::run()
     };
-    crate::serial_println!("[sched] continue task={}", next);
+    crate::serial_println!("[sched] continue pid={}", scheduler_pid(next));
     crate::syscall::prepare_user_return(context, space)
 }
 
@@ -131,6 +145,81 @@ fn next_alive(scheduler: &Scheduler, current: usize) -> Option<usize> {
         }
     }
     None
+}
+
+pub fn current_pid() -> u64 {
+    let scheduler = SCHEDULER.lock();
+    scheduler
+        .as_ref()
+        .map(|scheduler| scheduler.tasks[scheduler.current].pid)
+        .unwrap_or(0)
+}
+
+pub fn open_current(contents: Vec<u8>) -> Result<u64, ()> {
+    const MAX_DESCRIPTORS: usize = 4;
+    let mut scheduler = SCHEDULER.lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let descriptors = &mut scheduler.tasks[scheduler.current].descriptors;
+    if let Some((index, descriptor)) = descriptors
+        .iter_mut()
+        .enumerate()
+        .find(|(_, descriptor)| descriptor.is_none())
+    {
+        *descriptor = Some(FileDescriptor {
+            contents,
+            offset: 0,
+        });
+        return Ok(index as u64);
+    }
+    if descriptors.len() == MAX_DESCRIPTORS {
+        return Err(());
+    }
+    descriptors.push(Some(FileDescriptor {
+        contents,
+        offset: 0,
+    }));
+    Ok((descriptors.len() - 1) as u64)
+}
+
+pub fn read_current(descriptor: u64, length: usize) -> Result<Vec<u8>, ()> {
+    let index: usize = descriptor.try_into().map_err(|_| ())?;
+    let mut scheduler = SCHEDULER.lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let descriptor = scheduler.tasks[scheduler.current]
+        .descriptors
+        .get_mut(index)
+        .and_then(Option::as_mut)
+        .ok_or(())?;
+    let end = descriptor
+        .offset
+        .saturating_add(length)
+        .min(descriptor.contents.len());
+    let bytes = descriptor.contents[descriptor.offset..end].to_vec();
+    descriptor.offset = end;
+    Ok(bytes)
+}
+
+pub fn close_current(descriptor: u64) -> Result<(), ()> {
+    let index: usize = descriptor.try_into().map_err(|_| ())?;
+    let mut scheduler = SCHEDULER.lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let descriptor = scheduler.tasks[scheduler.current]
+        .descriptors
+        .get_mut(index)
+        .ok_or(())?;
+    if descriptor.is_none() {
+        return Err(());
+    }
+    *descriptor = None;
+    Ok(())
+}
+
+fn scheduler_pid(index: usize) -> u64 {
+    SCHEDULER
+        .lock()
+        .as_ref()
+        .map(|scheduler| scheduler.tasks[index].pid)
+        .unwrap_or(0)
 }
 
 fn task_count() -> usize {

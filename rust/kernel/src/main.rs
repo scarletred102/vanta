@@ -227,36 +227,18 @@ pub extern "C" fn _start() -> ! {
         serial_println!("[vm] WARNING: no Limine HHDM response");
     }
 
-    match storage::RamDisk::new(128) {
-        Ok(disk) => match vfs::VantaFs::format(disk) {
-            Ok(filesystem) => {
-                let mut mounted = vfs::Vfs::new();
-                let mounted_ok = mounted.mount_root(filesystem).is_ok();
-                let write_ok = mounted.write("/etc/config", b"vanta-storage").is_ok();
-                let read_ok = mounted.read("/etc/config").ok().as_deref() == Some(b"vanta-storage");
-                let overwrite_ok = mounted.write("/etc/config", b"updated").is_ok();
-                let updated_ok = mounted.read("/etc/config").ok().as_deref() == Some(b"updated");
-                let remount_ok = mounted
-                    .unmount_root()
-                    .ok()
-                    .and_then(|filesystem| vfs::VantaFs::mount(filesystem.into_device()).ok())
-                    .and_then(|filesystem| {
-                        let mut remounted = vfs::Vfs::new();
-                        remounted.mount_root(filesystem).ok()?;
-                        Some(remounted.read("/etc/config").ok().as_deref() == Some(b"updated"))
-                    })
-                    .unwrap_or(false);
-                if mounted_ok && write_ok && read_ok && overwrite_ok && updated_ok && remount_ok {
-                    serial_println!("[storage] block device + VFS persistence self-check passed");
-                } else {
-                    serial_println!("[storage] WARNING: block device/VFS self-check failed");
-                }
-            }
-            Err(error) => {
-                serial_println!("[storage] WARNING: filesystem format failed: {:?}", error)
-            }
-        },
-        Err(error) => serial_println!("[storage] WARNING: RAM block device failed: {:?}", error),
+    let storage_ready = vfs::initialize_root(128)
+        .and_then(|()| vfs::write_root("/etc/config", b"vanta-storage"))
+        .and_then(|()| vfs::read_root("/etc/config"))
+        .map(|bytes| bytes == b"vanta-storage")
+        .unwrap_or(false)
+        && vfs::write_root("/etc/config", b"vanta-vfs-syscall\n").is_ok()
+        && vfs::remount_root().is_ok()
+        && vfs::read_root("/etc/config").ok().as_deref() == Some(b"vanta-vfs-syscall\n");
+    if storage_ready {
+        serial_println!("[storage] writable VFS root mounted and persistence self-check passed");
+    } else {
+        serial_println!("[storage] WARNING: block device/VFS self-check failed");
     }
 
     let init_image = match fs::FileSystem::new(&fs::INITRAMFS) {
@@ -359,8 +341,8 @@ pub extern "C" fn _start() -> ! {
             let data_user = data_flags & paging::MAP_USER != 0;
             let data_writable = data_flags & paging::MAP_WRITABLE != 0;
             let data_no_execute = data_flags & paging::MAP_NO_EXECUTE != 0;
-            let data_initialized = process.read_user_byte(elf::TEST_DATA_ADDRESS) == Some(b'[');
-            let data_bss_zero = process.read_user_byte(elf::TEST_DATA_ADDRESS + 28) == Some(0);
+            let data_initialized = process.read_user_byte(elf::TEST_DATA_ADDRESS) == Some(b'/');
+            let data_bss_zero = process.read_user_byte(elf::TEST_DATA_ADDRESS + 11) == Some(0);
             if entry_translation.is_some()
                 && user
                 && executable

@@ -2,8 +2,9 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use spin::Mutex;
 
-use crate::storage::{BlockDevice, StorageError, SECTOR_SIZE};
+use crate::storage::{BlockDevice, RamDisk, StorageError, SECTOR_SIZE};
 
 const MAGIC: &[u8; 8] = b"VANTA1FS";
 const SUPERBLOCK_SECTOR: u64 = 0;
@@ -12,6 +13,8 @@ const FIRST_DATA_SECTOR: u32 = 2;
 const MAX_DIRECTORY_ENTRIES: usize = 8;
 const DIRECTORY_ENTRY_SIZE: usize = 64;
 const MAX_PATH_LENGTH: usize = 48;
+
+static ROOT: Mutex<Vfs<RamDisk>> = Mutex::new(Vfs::new());
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VfsError {
@@ -271,6 +274,26 @@ impl<D: BlockDevice> Vfs<D> {
             .ok_or(VfsError::NotMounted)?
             .write_file(path, data)
     }
+}
+
+pub fn initialize_root(sectors: u64) -> Result<(), VfsError> {
+    let disk = RamDisk::new(sectors).map_err(VfsError::Storage)?;
+    let filesystem = VantaFs::format(disk)?;
+    ROOT.lock().mount_root(filesystem)
+}
+
+pub fn remount_root() -> Result<(), VfsError> {
+    let mut root = ROOT.lock();
+    let filesystem = root.unmount_root()?;
+    root.mount_root(VantaFs::mount(filesystem.into_device())?)
+}
+
+pub fn read_root(path: &str) -> Result<Vec<u8>, VfsError> {
+    ROOT.lock().read(path)
+}
+
+pub fn write_root(path: &str, data: &[u8]) -> Result<(), VfsError> {
+    ROOT.lock().write(path, data)
 }
 
 fn normalize_path(path: &str) -> Result<&[u8], VfsError> {
