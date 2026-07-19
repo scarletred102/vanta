@@ -5,6 +5,8 @@ iso_root/
 limine/
 vanta.iso
 qemu.log
+serial_*.log
+*.iso
 *.o
 *.elf
 AGENTS.md
@@ -13,3 +15,4 @@ zigux/
 pluto/
 third_party/linux-6.18.39/
 third_party/linux-6.18.39.tar.xz
+/.vanta-local/
