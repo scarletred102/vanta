@@ -1,5 +1,6 @@
-//! Single-CPU syscall ABI and dispatch path.
+//! Syscall ABI with GS-selected per-CPU entry state.
 
+use core::arch::asm;
 use core::arch::global_asm;
 
 use alloc::vec::Vec;
@@ -21,6 +22,7 @@ const SYSCALL_RETURN_YIELD: u64 = u64::MAX - 2;
 const SYSCALL_ERROR: u64 = u64::MAX - 1;
 const USER_ADDRESS_LIMIT: u64 = 0x0000_8000_0000_0000;
 const SYSCALL_STACK_SIZE: usize = 4096 * 2;
+const MAX_CPUS: usize = 8;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -30,14 +32,31 @@ pub struct UserContext {
     pub stack_pointer: u64,
 }
 
-#[no_mangle]
-static mut VANTA_SYSCALL_STACK: [u8; SYSCALL_STACK_SIZE] = [0; SYSCALL_STACK_SIZE];
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+struct CpuLocal {
+    self_pointer: u64,
+    syscall_stack: [u8; SYSCALL_STACK_SIZE],
+    syscall_stack_top: u64,
+    user_rsp: u64,
+    exit_code: u64,
+    next_context: UserContext,
+}
 
-#[no_mangle]
-static mut VANTA_SYSCALL_USER_RSP: u64 = 0;
+const EMPTY_CPU_LOCAL: CpuLocal = CpuLocal {
+    self_pointer: 0,
+    syscall_stack: [0; SYSCALL_STACK_SIZE],
+    syscall_stack_top: 0,
+    user_rsp: 0,
+    exit_code: 0,
+    next_context: UserContext {
+        instruction_pointer: 0,
+        flags: 0,
+        stack_pointer: 0,
+    },
+};
 
-#[no_mangle]
-static mut VANTA_SYSCALL_EXIT_CODE: u64 = 0;
+static mut CPU_LOCALS: [CpuLocal; MAX_CPUS] = [EMPTY_CPU_LOCAL; MAX_CPUS];
 
 global_asm!(
     r#"
@@ -46,9 +65,8 @@ global_asm!(
     .extern vanta_syscall_yield
     .extern vanta_syscall_exit
 vanta_syscall_entry:
-    mov [rip + VANTA_SYSCALL_USER_RSP], rsp
-    lea rsp, [rip + VANTA_SYSCALL_STACK]
-    add rsp, 8192
+    mov gs:[8208], rsp
+    mov rsp, gs:[8200]
     push r11
     push rcx
     push r10
@@ -69,19 +87,19 @@ vanta_syscall_entry:
     mov r11, [rsp + 48]
     mov rcx, [rsp + 40]
     add rsp, 56
-    mov rsp, [rip + VANTA_SYSCALL_USER_RSP]
+    mov rsp, gs:[8208]
     sysretq
 vanta_syscall_yield_path:
     mov rdi, [rsp + 40]
     mov rsi, [rsp + 48]
-    mov rdx, [rip + VANTA_SYSCALL_USER_RSP]
+    mov rdx, gs:[8208]
     call vanta_syscall_yield
     mov rcx, [rax]
     mov r11, [rax + 8]
     mov rsp, [rax + 16]
     sysretq
 vanta_syscall_exit_path:
-    mov rdi, [rip + VANTA_SYSCALL_EXIT_CODE]
+    mov rdi, gs:[8216]
     call vanta_syscall_exit
     mov rcx, [rax]
     mov r11, [rax + 8]
@@ -109,6 +127,28 @@ pub fn init() -> bool {
     true
 }
 
+pub fn initialize_cpu_local(index: usize) -> bool {
+    if index >= MAX_CPUS {
+        return false;
+    }
+    let local = unsafe {
+        core::ptr::addr_of_mut!(CPU_LOCALS)
+            .cast::<CpuLocal>()
+            .add(index)
+    };
+    unsafe {
+        (*local).self_pointer = local as u64;
+        (*local).syscall_stack_top = core::ptr::addr_of!((*local).syscall_stack)
+            .cast::<u8>()
+            .add(SYSCALL_STACK_SIZE) as u64;
+    }
+    let mut gs_base = x86_64::registers::model_specific::Msr::new(0xc000_0101);
+    unsafe {
+        gs_base.write(local as u64);
+    }
+    true
+}
+
 #[no_mangle]
 extern "C" fn vanta_syscall_dispatch(
     number: u64,
@@ -125,9 +165,7 @@ extern "C" fn vanta_syscall_dispatch(
         SYS_YIELD => SYSCALL_RETURN_YIELD,
         SYS_GETPID => crate::scheduler::current_pid(),
         SYS_EXIT => {
-            unsafe {
-                VANTA_SYSCALL_EXIT_CODE = arg1;
-            }
+            current_cpu_local().exit_code = arg1;
             SYSCALL_RETURN_EXIT
         }
         _ => SYSCALL_ERROR,
@@ -135,20 +173,20 @@ extern "C" fn vanta_syscall_dispatch(
 }
 
 pub fn prepare_user_return(context: UserContext, space: AddressSpace) -> *const UserContext {
-    unsafe {
-        NEXT_CONTEXT = context;
-    }
+    current_cpu_local().next_context = context;
     unsafe {
         paging::activate(space);
     }
-    core::ptr::addr_of!(NEXT_CONTEXT)
+    core::ptr::addr_of!(current_cpu_local().next_context)
 }
 
-static mut NEXT_CONTEXT: UserContext = UserContext {
-    instruction_pointer: 0,
-    flags: 0,
-    stack_pointer: 0,
-};
+fn current_cpu_local() -> &'static mut CpuLocal {
+    let pointer: u64;
+    unsafe {
+        asm!("mov {pointer}, gs:[0]", pointer = out(reg) pointer, options(nostack, preserves_flags));
+        &mut *(pointer as *mut CpuLocal)
+    }
+}
 
 fn write_user(pointer: u64, length: u64) -> u64 {
     let Ok(bytes) = copy_from_user(pointer, length, false) else {

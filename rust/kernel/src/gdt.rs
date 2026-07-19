@@ -108,7 +108,7 @@ fn load_cpu(index: usize) -> bool {
         SS::set_reg(state.selectors.data);
         load_tss(state.selectors.tss);
     }
-    true
+    crate::syscall::initialize_cpu_local(index)
 }
 
 fn bootstrap_selectors() -> Selectors {
