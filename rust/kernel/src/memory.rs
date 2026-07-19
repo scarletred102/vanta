@@ -11,6 +11,7 @@ use spin::Mutex;
 
 pub const PAGE_SIZE: u64 = 4096;
 const MAX_TRACKED_FRAMES: usize = 65_536;
+const FRAME_BITMAP_WORDS: usize = (MAX_TRACKED_FRAMES + 63) / 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PhysFrame(pub u64);
@@ -42,6 +43,7 @@ impl MemoryStats {
 
 struct FrameAllocator {
     frames: [u64; MAX_TRACKED_FRAMES],
+    used: [u64; FRAME_BITMAP_WORDS],
     next: usize,
     len: usize,
 }
@@ -50,6 +52,7 @@ impl FrameAllocator {
     const fn empty() -> Self {
         Self {
             frames: [0; MAX_TRACKED_FRAMES],
+            used: [0; FRAME_BITMAP_WORDS],
             next: 0,
             len: 0,
         }
@@ -79,12 +82,50 @@ impl FrameAllocator {
     }
 
     fn alloc(&mut self) -> Option<PhysFrame> {
-        if self.next >= self.len {
-            return None;
+        for attempt in 0..self.len {
+            let index = (self.next + attempt) % self.len;
+            if self.is_used(index) {
+                continue;
+            }
+
+            self.set_used(index, true);
+            self.next = (index + 1) % self.len;
+            return Some(PhysFrame(self.frames[index]));
         }
-        let frame = PhysFrame(self.frames[self.next]);
-        self.next += 1;
-        Some(frame)
+        None
+    }
+
+    fn free(&mut self, frame: PhysFrame) -> bool {
+        if frame.start_address() == 0 || frame.start_address() & (PAGE_SIZE - 1) != 0 {
+            return false;
+        }
+
+        for index in 0..self.len {
+            if self.frames[index] != frame.start_address() {
+                continue;
+            }
+            if !self.is_used(index) {
+                return false;
+            }
+            self.set_used(index, false);
+            self.next = index;
+            return true;
+        }
+        false
+    }
+
+    fn is_used(&self, index: usize) -> bool {
+        self.used[index / 64] & (1 << (index % 64)) != 0
+    }
+
+    fn set_used(&mut self, index: usize, used: bool) {
+        let word = &mut self.used[index / 64];
+        let bit = 1 << (index % 64);
+        if used {
+            *word |= bit;
+        } else {
+            *word &= !bit;
+        }
     }
 }
 
@@ -122,4 +163,8 @@ pub fn init(response: &MemmapResponse) -> MemoryStats {
 
 pub fn alloc_frame() -> Option<PhysFrame> {
     FRAME_ALLOCATOR.lock().alloc()
+}
+
+pub fn free_frame(frame: PhysFrame) -> bool {
+    FRAME_ALLOCATOR.lock().free(frame)
 }

@@ -1,18 +1,25 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
+#![feature(alloc_error_handler)]
 
+extern crate alloc;
+
+use alloc::{boxed::Box, vec::Vec};
+use core::alloc::Layout;
 use core::panic::PanicInfo;
-use limine::request::{FramebufferRequest, MemmapRequest};
+use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest};
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
-mod serial;
-mod gdt;
-mod interrupts;
 mod framebuffer;
+mod gdt;
+mod heap;
+mod interrupts;
 mod keyboard;
-mod shell;
 mod memory;
+mod paging;
+mod serial;
+mod shell;
 
 #[used]
 #[link_section = ".requests"]
@@ -25,6 +32,10 @@ static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 #[used]
 #[link_section = ".requests"]
 static MEMMAP_REQUEST: MemmapRequest = MemmapRequest::new();
+
+#[used]
+#[link_section = ".requests"]
+static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 
 #[used]
 #[link_section = ".requests_start_marker"]
@@ -48,7 +59,10 @@ pub extern "C" fn _start() -> ! {
         if let Some(fb) = fbs.first() {
             serial_println!(
                 "[boot] framebuffer {}x{} pitch={} bpp={}",
-                fb.width, fb.height, fb.pitch, fb.bpp
+                fb.width,
+                fb.height,
+                fb.pitch,
+                fb.bpp
             );
             framebuffer::init(fb);
         } else {
@@ -72,16 +86,138 @@ pub extern "C" fn _start() -> ! {
         let second = memory::alloc_frame();
         match (first, second) {
             (Some(first), Some(second)) if first != second => {
-                serial_println!(
-                    "[mm] frame allocator self-check passed: {:#x}, {:#x}",
-                    first.start_address(),
-                    second.start_address()
-                );
+                let first_freed = memory::free_frame(first);
+                let second_freed = memory::free_frame(second);
+                let recycled = memory::alloc_frame();
+                let reuse_ok = recycled.is_some_and(|frame| frame == first || frame == second);
+                if let Some(frame) = recycled {
+                    let _ = memory::free_frame(frame);
+                }
+                if first_freed && second_freed && reuse_ok {
+                    serial_println!(
+                        "[mm] allocate/free/reuse self-check passed: {:#x}, {:#x}",
+                        first.start_address(),
+                        second.start_address()
+                    );
+                } else {
+                    serial_println!("[mm] WARNING: frame allocator reuse self-check failed");
+                }
             }
             _ => serial_println!("[mm] WARNING: frame allocator self-check failed"),
         }
     } else {
         serial_println!("[mm] WARNING: no Limine memory-map response");
+    }
+
+    if let Some(hhdm_resp) = HHDM_REQUEST.response() {
+        paging::init(hhdm_resp.offset);
+        let summary = paging::inspect_current();
+        serial_println!(
+            "[vm] hhdm={:#x} cr3={:#x} pml4-present={}",
+            summary.hhdm_offset,
+            summary.cr3,
+            summary.present_pml4_entries
+        );
+
+        let hhdm_roundtrip = paging::phys_to_virt(0x2000)
+            .and_then(paging::virt_to_phys)
+            .is_some_and(|physical| physical == 0x2000);
+        serial_println!(
+            "[vm] HHDM round-trip self-check {}",
+            if hhdm_roundtrip { "passed" } else { "failed" }
+        );
+
+        match paging::translate(_start as *const () as usize as u64) {
+            Some(translation) => serial_println!(
+                "[vm] page-table self-check passed: _start -> {:#x} ({:#x} page)",
+                translation.physical_address,
+                translation.page_size
+            ),
+            None => serial_println!("[vm] WARNING: _start translation is unmapped"),
+        }
+
+        match paging::create_address_space() {
+            Ok(space) => match memory::alloc_frame() {
+                Some(frame) => {
+                    let test_virtual_address = 0x4000_0000;
+                    let flags = paging::MAP_USER | paging::MAP_WRITABLE;
+                    match paging::map(space, test_virtual_address, frame.start_address(), flags) {
+                        Ok(()) => match paging::translate_in(space, test_virtual_address) {
+                            Some(mapping) if mapping.physical_address == frame.start_address() => {
+                                let refused_live_destroy = matches!(
+                                    paging::destroy_address_space(space),
+                                    Err(paging::MapError::MappingsRemain)
+                                );
+                                match paging::unmap(space, test_virtual_address) {
+                                    Ok(Some(unmapped)) if unmapped == frame.start_address() => {
+                                        let frame_reused = memory::free_frame(frame);
+                                        let tables_freed = paging::destroy_address_space(space);
+                                        if refused_live_destroy
+                                            && frame_reused
+                                            && tables_freed.is_ok()
+                                        {
+                                            serial_println!(
+                                                "[vm] address-space lifecycle self-check passed: pml4={:#x} tables-freed={}",
+                                                space.pml4_phys,
+                                                tables_freed.unwrap_or(0)
+                                            );
+                                        } else {
+                                            serial_println!(
+                                                "[vm] WARNING: address-space cleanup self-check failed"
+                                            );
+                                        }
+                                    }
+                                    _ => serial_println!("[vm] WARNING: unmap self-check failed"),
+                                }
+                            }
+                            _ => serial_println!("[vm] WARNING: mapped address translation failed"),
+                        },
+                        Err(error) => {
+                            serial_println!("[vm] WARNING: map self-check failed: {:?}", error)
+                        }
+                    }
+                }
+                None => serial_println!("[vm] WARNING: no frame for map self-check"),
+            },
+            Err(error) => {
+                serial_println!("[vm] WARNING: address-space creation failed: {:?}", error)
+            }
+        }
+
+        match heap::init() {
+            Ok(heap_stats) => {
+                let mut values = Vec::with_capacity(256);
+                for index in 0..256u64 {
+                    values.push((index * 3) ^ 0x5a);
+                }
+                let boxed_value = Box::new(0xfeed_beef_u64);
+                let values_ok = values
+                    .iter()
+                    .enumerate()
+                    .all(|(index, value)| *value == (index as u64 * 3) ^ 0x5a);
+                let boxed_ok = *boxed_value == 0xfeed_beef_u64;
+                let peak_used = heap::stats().used;
+                drop(boxed_value);
+                drop(values);
+                let reclaimed = heap::stats().free == heap_stats.size;
+                if values_ok && boxed_ok && reclaimed {
+                    serial_println!(
+                        "[heap] allocation/reclaim self-check passed: base={:#x} size={} peak-used={} free={}",
+                        heap_stats.base,
+                        heap_stats.size,
+                        peak_used,
+                        heap::stats().free
+                    );
+                } else {
+                    serial_println!("[heap] WARNING: allocation/reclaim self-check failed");
+                }
+            }
+            Err(error) => {
+                serial_println!("[heap] WARNING: heap initialization failed: {:?}", error)
+            }
+        }
+    } else {
+        serial_println!("[vm] WARNING: no Limine HHDM response");
     }
 
     kprintln!("vanta os | kernel terminal");
@@ -106,6 +242,18 @@ pub extern "C" fn _start() -> ! {
     serial_println!("[boot] interrupts enabled");
 
     shell::run()
+}
+
+#[alloc_error_handler]
+fn alloc_error(layout: Layout) -> ! {
+    serial_println!(
+        "[heap] allocation failed: size={} align={}",
+        layout.size(),
+        layout.align()
+    );
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 #[panic_handler]
