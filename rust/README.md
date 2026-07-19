@@ -65,7 +65,7 @@ rust/
       heap.rs                # mapped free-list + global Rust allocator
       process.rs              # ELF PT_LOAD mapping + user stack lifecycle
       scheduler.rs           # timer-preemptive task table + round-robin switching
-      syscall.rs              # syscall/sysret entry + VFS/process ABI
+      syscall.rs              # per-CPU syscall/sysret entry + VFS/process ABI
       keyboard.rs            # IRQ1 scancode queue
       shell.rs               # decoder + echo loop
   esp/
@@ -94,6 +94,7 @@ rust/
 - Ring-3 entry through `iretq`, with a TSS privilege stack and syscall test
 - Single-CPU `syscall`/`sysretq` ABI with user `write` and `exit` calls
 - Timer-preemptive round-robin scheduler with full user interrupt contexts
+- Per-CPU syscall stacks and return state selected through the kernel GS base
 - Round-robin address-space switching and per-process exit reclamation
 - User process exit switches back to the kernel address space and reclaims it
 - Read-only CPIO `newc` initramfs with `/bin/init` and `/etc/motd` lookup
