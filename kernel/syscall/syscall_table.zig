@@ -145,7 +145,25 @@ fn handleCapSend(port_handle: u64, msg_ptr: u64) Result {
     const current_proc = table_orig.getCurrentProcess();
 
     const entry = cap_mod.cap_table_lookup(&current_proc.cap_table, port_handle) orelse return .{ .err = .invalid_handle };
-    if (entry.type != @intFromEnum(cap_mod.CapType.Endpoint)) return .{ .err = .permission_denied };
+    if (entry.type != @intFromEnum(cap_mod.CapType.Endpoint)) {
+        if (entry.type == @intFromEnum(cap_mod.CapType.Thread)) {
+            if ((entry.rights & cap_mod.Rights.ThreadControl) == 0) return .{ .err = .permission_denied };
+            const msg = @as(*port_mod.Message, @ptrFromInt(msg_ptr));
+            if (msg.msg_type == 0x01) { // ThreadStart
+                const target_thread = @as(*thread_mod.Thread, @ptrFromInt(cap_mod.getObjectPtr(entry)));
+                const entry_rip = std.mem.readInt(u64, msg.payload[0..8], .little);
+                const stack_top = std.mem.readInt(u64, msg.payload[8..16], .little);
+                
+                target_thread.user_entry = entry_rip;
+                target_thread.user_stack = stack_top;
+                
+                sched.enqueue(target_thread);
+                serial.puts("[ThreadSpawn] Thread started successfully\n");
+                return .{ .value = 0, .err = .success };
+            }
+        }
+        return .{ .err = .permission_denied };
+    }
     if ((entry.rights & cap_mod.Rights.EndpointSend) == 0) return .{ .err = .permission_denied };
 
     const msg = @as(*port_mod.Message, @ptrFromInt(msg_ptr));
@@ -171,7 +189,7 @@ fn handleCapRecv(port_handle: u64, msg_ptr: u64) Result {
     if ((entry.rights & cap_mod.Rights.EndpointRecv) == 0) return .{ .err = .permission_denied };
 
     const port = @as(*port_mod.Port, @ptrFromInt(cap_mod.getObjectPtr(entry)));
-    if (port.recvBlocking()) |*msg| {
+    if (port.recvBlockingFiltered(false)) |*msg| {
         var msg_copy = msg.*;
         cap_mod.receiveMessageCaps(&current_proc.cap_table, &msg_copy);
         const dest = @as(*port_mod.Message, @ptrFromInt(msg_ptr));
@@ -184,29 +202,67 @@ fn handleCapRecv(port_handle: u64, msg_ptr: u64) Result {
 
 fn handleCapCall(port_handle: u64, msg_ptr: u64, reply_ptr: u64) Result {
     if (!validateUserPtr(msg_ptr, @sizeOf(port_mod.Message)) or
-        !validateUserPtr(reply_ptr, @sizeOf(port_mod.Message))) return .{ .err = .invalid_argument };
+        !validateUserPtr(reply_ptr, @sizeOf(port_mod.Message))) {
+        serial.puts("[CAPCALL] validate fail\n");
+        return .{ .err = .invalid_argument };
+    }
     const current_proc = table_orig.getCurrentProcess();
 
-    const entry = cap_mod.cap_table_lookup(&current_proc.cap_table, port_handle) orelse return .{ .err = .invalid_handle };
-    if (entry.type != @intFromEnum(cap_mod.CapType.Endpoint)) return .{ .err = .permission_denied };
-    if ((entry.rights & cap_mod.Rights.EndpointSend) == 0 or (entry.rights & cap_mod.Rights.EndpointRecv) == 0) return .{ .err = .permission_denied };
+    const entry = cap_mod.cap_table_lookup(&current_proc.cap_table, port_handle) orelse {
+        serial.puts("[CAPCALL] lookup fail\n");
+        return .{ .err = .invalid_handle };
+    };
+    if (entry.type != @intFromEnum(cap_mod.CapType.Endpoint)) {
+        serial.puts("[CAPCALL] not endpoint\n");
+        return .{ .err = .permission_denied };
+    }
+    if ((entry.rights & cap_mod.Rights.EndpointSend) == 0 or (entry.rights & cap_mod.Rights.EndpointRecv) == 0) {
+        serial.puts("[CAPCALL] no rights h=");
+        serial.putHex(port_handle);
+        serial.puts(" r=");
+        serial.putHex(entry.rights);
+        serial.puts(" pid=");
+        serial.putHex(current_proc.pid);
+        serial.putc('\n');
+        return .{ .err = .permission_denied };
+    }
 
     const port = @as(*port_mod.Port, @ptrFromInt(cap_mod.getObjectPtr(entry)));
 
     const msg = @as(*port_mod.Message, @ptrFromInt(msg_ptr));
     var msg_copy = msg.*;
     const err = cap_mod.prepareMessageForSend(&current_proc.cap_table, &msg_copy);
-    if (err != .success) return .{ .err = err };
+    if (err != .success) {
+        serial.puts("[CAPCALL] prepSend fail\n");
+        return .{ .err = err };
+    }
 
-    if (!port.sendBlocking(&msg_copy)) return .{ .err = .permission_denied };
+    // Acquire the per-port RPC lock so that only one thread is in the
+    // send→recv cycle at a time.  This prevents reply-stealing on SMP
+    // when multiple processes share a port (e.g. the registry).
+    port.acquireRpcLock();
 
-    if (port.recvBlocking()) |*reply| {
+    if (!port.sendBlocking(&msg_copy)) {
+        port.releaseRpcLock();
+        serial.puts("[CAPCALL] sendBlocking fail\n");
+        return .{ .err = .permission_denied };
+    }
+
+    if (msg_copy.msg_type == 0x11) { // NS_LOOKUP trace
+        serial.puts("[CAPCALL] lookup sent, waiting for reply pid=");
+        serial.putHex(current_proc.pid);
+        serial.putc('\n');
+    }
+
+    if (port.recvBlockingFiltered(true)) |*reply| {
+        port.releaseRpcLock();
         var reply_copy = reply.*;
         cap_mod.receiveMessageCaps(&current_proc.cap_table, &reply_copy);
         const dest = @as(*port_mod.Message, @ptrFromInt(reply_ptr));
         dest.* = reply_copy;
         return .{ .value = 0, .err = .success };
     } else {
+        port.releaseRpcLock();
         return .{ .err = .permission_denied };
     }
 }
@@ -303,7 +359,7 @@ fn handleMemMap(mem_cap_handle: u64, target_vaddr: u64, n_pages: u64) Result {
     while (i < pages_to_map) : (i += 1) {
         const vaddr = target_vaddr + i * vmm.PAGE_SIZE;
         const paddr = base_phys + i * vmm.PAGE_SIZE;
-        if (!vmm.map(space, vaddr, paddr, pte_flags)) {
+        if (!vmm.mapNoFlush(space, vaddr, paddr, pte_flags)) {
             // Rollback
             var j: u64 = 0;
             while (j < i) : (j += 1) {
@@ -420,6 +476,24 @@ fn handleThreadSpawn(mem_cap_handle: u64) Result {
 
     const data = @as([*]const u8, @ptrFromInt(vmm.phys2virt(base_phys)))[0 .. 512 * 4096];
     const elf_info = @import("../elf.zig").parse_elf64(data) catch |err| {
+        if (err == error.InvalidMagic) {
+            // Treat as spawning a thread in the current process!
+            const ut = thread_mod.create_user(0, 0, current_proc.space.pml4_phys, current_proc.pid) orelse {
+                return .{ .err = .out_of_memory };
+            };
+            ut.state = .ready;
+            current_proc.thread_count += 1;
+
+            const th_handle = cap_mod.cap_table_insert(
+                &current_proc.cap_table,
+                @intFromPtr(ut),
+                @intFromEnum(cap_mod.CapType.Thread),
+                cap_mod.Rights.ThreadControl | cap_mod.Rights.ThreadInspect,
+            ) orelse return .{ .err = .out_of_memory };
+
+            serial.puts("[ThreadSpawn] Spawning thread in current process\n");
+            return .{ .value = th_handle, .err = .success };
+        }
         serial.puts("[ThreadSpawn] ELF parse failed: ");
         serial.puts(@errorName(err));
         serial.puts("\n");
@@ -568,81 +642,54 @@ fn handleCapSendNb(port_handle: u64, msg_ptr: u64) Result {
 
 // cap_poll(handles_ptr, n_handles, timeout_ms) → ready_index (u64) or ETIMEOUT
 // Scans all handles; if none ready, blocks on first Notification or Port.
-fn handleCapPoll(handles_ptr: u64, n_handles: u64, timeout_ms_raw: u64) Result {
-    if (n_handles == 0 or n_handles > 64) return .{ .err = .invalid_argument };
-    if (!validateUserPtr(handles_ptr, n_handles * @sizeOf(u64))) return .{ .err = .invalid_argument };
-    const current_proc = table_orig.getCurrentProcess();
-
-    const handles = @as([*]const u64, @ptrFromInt(handles_ptr))[0..@intCast(n_handles)];
-
-    // Fast scan: return immediately if any handle is ready.
+fn pollScan(current_proc: anytype, handles: []const u64) ?u64 {
     for (handles, 0..) |handle, i| {
         const e = cap_mod.cap_table_lookup(&current_proc.cap_table, handle) orelse continue;
         switch (@as(cap_mod.CapType, @enumFromInt(e.type))) {
             .Endpoint => {
                 const port = @as(*port_mod.Port, @ptrFromInt(cap_mod.getObjectPtr(e)));
-                if (port.hasPending()) return .{ .value = @intCast(i), .err = .success };
+                if (port.hasPending()) return @intCast(i);
             },
             .Notification => {
                 const notif = @as(*notif_mod.Notification, @ptrFromInt(cap_mod.getObjectPtr(e)));
-                if (@atomicLoad(u64, &notif.bitmask, .acquire) != 0) return .{ .value = @intCast(i), .err = .success };
+                if (@atomicLoad(u64, &notif.bitmask, .acquire) != 0) return @intCast(i);
             },
             else => {},
         }
     }
+    return null;
+}
+
+// Multi-object wait. A thread can only be parked on one wait queue at a time
+// (single Thread.next link), so instead of blocking on the first handle —
+// which silently ignores activity on the others — we re-scan every handle on
+// each iteration and yield the CPU between scans. This guarantees a message
+// arriving on any polled port (e.g. a focus-cap registration) is noticed even
+// while a notification (e.g. keyboard IRQ) has not yet fired.
+fn handleCapPoll(handles_ptr: u64, n_handles: u64, timeout_ms_raw: u64) Result {
+    if (n_handles == 0 or n_handles > 64) return .{ .err = .invalid_argument };
+    if (!validateUserPtr(handles_ptr, n_handles * @sizeOf(u64))) return .{ .err = .invalid_argument };
+    const current_proc = table_orig.getCurrentProcess();
+    const handles = @as([*]const u64, @ptrFromInt(handles_ptr))[0..@intCast(n_handles)];
 
     const timeout_ms: i64 = @bitCast(timeout_ms_raw);
-    if (timeout_ms == 0) return .{ .err = .timeout };
 
-    // Block on the first Notification or Port handle encountered.
-    for (handles, 0..) |handle, i| {
-        const e = cap_mod.cap_table_lookup(&current_proc.cap_table, handle) orelse continue;
-        switch (@as(cap_mod.CapType, @enumFromInt(e.type))) {
-            .Notification => {
-                const notif = @as(*notif_mod.Notification, @ptrFromInt(cap_mod.getObjectPtr(e)));
-                _ = notif.wait(0xFFFFFFFFFFFFFFFF);
-                // Re-scan after wake.
-                for (handles, 0..) |h2, j| {
-                    const e2 = cap_mod.cap_table_lookup(&current_proc.cap_table, h2) orelse continue;
-                    switch (@as(cap_mod.CapType, @enumFromInt(e2.type))) {
-                        .Endpoint => {
-                            const p2 = @as(*port_mod.Port, @ptrFromInt(cap_mod.getObjectPtr(e2)));
-                            if (p2.hasPending()) return .{ .value = @intCast(j), .err = .success };
-                        },
-                        .Notification => {
-                            const n2 = @as(*notif_mod.Notification, @ptrFromInt(cap_mod.getObjectPtr(e2)));
-                            if (@atomicLoad(u64, &n2.bitmask, .acquire) != 0) return .{ .value = @intCast(j), .err = .success };
-                        },
-                        else => {},
-                    }
-                }
-                // The handle we blocked on woke us — it was ready at index i.
-                return .{ .value = @intCast(i), .err = .success };
-            },
-            .Endpoint => {
-                const port = @as(*port_mod.Port, @ptrFromInt(cap_mod.getObjectPtr(e)));
-                port.waitReady();
-                for (handles, 0..) |h2, j| {
-                    const e2 = cap_mod.cap_table_lookup(&current_proc.cap_table, h2) orelse continue;
-                    switch (@as(cap_mod.CapType, @enumFromInt(e2.type))) {
-                        .Endpoint => {
-                            const p2 = @as(*port_mod.Port, @ptrFromInt(cap_mod.getObjectPtr(e2)));
-                            if (p2.hasPending()) return .{ .value = @intCast(j), .err = .success };
-                        },
-                        .Notification => {
-                            const n2 = @as(*notif_mod.Notification, @ptrFromInt(cap_mod.getObjectPtr(e2)));
-                            if (@atomicLoad(u64, &n2.bitmask, .acquire) != 0) return .{ .value = @intCast(j), .err = .success };
-                        },
-                        else => {},
-                    }
-                }
-                return .{ .value = @intCast(i), .err = .success };
-            },
-            else => continue,
+    const cpu0 = @import("../arch/x86_64/cpu_local.zig").get_cpu_local();
+    const start_ticks = @atomicLoad(u64, &cpu0.timer_ticks, .monotonic);
+
+    while (true) {
+        if (pollScan(current_proc, handles)) |idx| return .{ .value = idx, .err = .success };
+        if (timeout_ms == 0) return .{ .err = .timeout };
+        if (timeout_ms > 0) {
+            const cpu = @import("../arch/x86_64/cpu_local.zig").get_cpu_local();
+            const now = @atomicLoad(u64, &cpu.timer_ticks, .monotonic);
+            // LAPIC timer runs at 100Hz → 10ms per tick.
+            const elapsed_ms = (now -% start_ticks) *% 10;
+            if (elapsed_ms >= @as(u64, @intCast(timeout_ms))) return .{ .err = .timeout };
         }
+        // Nothing ready yet — give up the CPU and re-scan.
+        sched.yield();
     }
-
-    return .{ .err = .timeout };
 }
 
 // ── Phase 10: Linux Personality Syscalls ────────────────────────
@@ -767,7 +814,7 @@ fn handlePersonalitySpawn(elf_mem_cap_handle: u64, personality_ep_cap_handle: u6
     }
 
     // Wait for personality server to acknowledge (recv reply)
-    if (ep_port.recvBlocking()) |*reply| {
+    if (ep_port.recvBlockingFiltered(true)) |*reply| {
         var rc = reply.*;
         cap_mod.receiveMessageCaps(&current_proc.cap_table, &rc);
     } else {

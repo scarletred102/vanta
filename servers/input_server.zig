@@ -3,7 +3,7 @@
 // Translates scancode set 1 → Unicode codepoints.
 // Delivers KeyEvent / MouseEvent notifications to registered listeners.
 
-const lib = @import("../libvanta/libvanta.zig");
+const lib = @import("libvanta");
 
 // ── Cap slot constants ────────────────────────────────────────────────
 // slot 1: DeviceIRQ(1)  — PS/2 keyboard

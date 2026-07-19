@@ -19,6 +19,16 @@ ISO_OUT="vanta.iso"
 # ── Check prerequisites ──────────────────────────────────────────
 
 if ! command -v xorriso &>/dev/null; then
+    # Fallback: if an existing ISO exists, use the Python updater to hot-swap
+    # the kernel binary into it (works on Windows without xorriso).
+    if [ -f "$ISO_OUT" ] && command -v python3 &>/dev/null; then
+        echo "xorriso not found — updating kernel in existing ISO via Python..."
+        python3 "$SCRIPT_DIR/update_kernel_iso.py"
+        if [ -f limine-bin/limine.exe ]; then
+            ./limine-bin/limine.exe bios-install "$ISO_OUT" 2>/dev/null || true
+        fi
+        exit 0
+    fi
     echo "ERROR: xorriso not found. Install it:"
     echo "  Ubuntu/Debian: sudo apt install xorriso"
     echo "  Fedora:        sudo dnf install xorriso"

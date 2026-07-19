@@ -3,7 +3,7 @@
 // The compositor writes directly to the Limine linear framebuffer;
 // this server is the authoritative source of display dimensions.
 
-const lib = @import("../libvanta/libvanta.zig");
+const lib = @import("libvanta");
 
 // ── Cap slot constants ────────────────────────────────────────────────
 // slot 1: MemoryCap — virtio-gpu BAR0 MMIO (or dummy page if no GPU)
@@ -39,12 +39,26 @@ fn detectVirtioGpu() void {
     const map_err = lib.vanta_mem_map(MMIO_MEM_CAP, MMIO_VADDR, 1);
     if (map_err != 0) return;
     const magic = mmioRead32(VIRTIO_MMIO_MAGIC);
-    if (magic != 0x74726976) return; // "virt" LE
-    const dev_id = mmioRead32(VIRTIO_MMIO_DEVICE_ID);
-    if (dev_id != 16) return; // 16 = GPU
-    lib.vanta_debug_print("[GPU] virtio-gpu MMIO detected\n");
-    // QEMU default resolution for virtio-gpu is 1024x768.
-    // We keep the defaults; in a full driver we'd query DISPLAY_INFO.
+    if (magic == 0x74726976) { // "virt" LE
+        const dev_id = mmioRead32(VIRTIO_MMIO_DEVICE_ID);
+        if (dev_id == 16) {
+            lib.vanta_debug_print("[GPU] virtio-gpu MMIO detected\n");
+            return;
+        }
+    }
+    // No real virtio-gpu — check if kernel wrote Limine FB metadata
+    // into the dummy page.  Layout: [0]=0xFB01, [4]=w, [8]=h, [12]=stride
+    if (magic == 0xFB01) {
+        const w = mmioRead32(4);
+        const h = mmioRead32(8);
+        const s = mmioRead32(12);
+        if (w > 0 and w < 8192 and h > 0 and s > 0) {
+            display_w = w;
+            display_h = h;
+            display_stride = s;
+            lib.vanta_debug_print("[GPU] using Limine FB dimensions\n");
+        }
+    }
 }
 
 fn registerService() void {
@@ -74,6 +88,7 @@ pub export fn main() void {
             MSG_GET_FB_INFO => {
                 var reply: lib.Message = .{};
                 reply.msg_type = MSG_GET_FB_INFO | 0x8000;
+                reply.flags.is_reply = true;
                 const pw = @as(*align(1) u32, @ptrCast(&reply.payload[0]));
                 const ph = @as(*align(1) u32, @ptrCast(&reply.payload[4]));
                 const ps = @as(*align(1) u32, @ptrCast(&reply.payload[8]));

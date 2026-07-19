@@ -16,15 +16,15 @@ pub fn init() void {
     outb(COM1 + 2, 0xC7); // Enable FIFO, clear, 14-byte threshold
     outb(COM1 + 4, 0x0B); // IRQs enabled, RTS/DSR set
 
-    // Loopback test
-    outb(COM1 + 4, 0x1E); // Set loopback mode
-    outb(COM1 + 0, 0xAE); // Send test byte
-    if (inb(COM1 + 0) != 0xAE) {
-        // Serial port faulty — continue anyway, output will be lost
-        return;
-    }
+    // Optional loopback test — only as a diagnostic; we always end in normal
+    // mode below. VirtualBox's UART can fail this test even when COM1 works
+    // fine, so we MUST NOT leave the UART in loopback on failure or output
+    // would be silently dropped.
+    outb(COM1 + 4, 0x1E);
+    outb(COM1 + 0, 0xAE);
+    _ = inb(COM1 + 0);
 
-    // Normal operation mode
+    // Normal operation mode — always.
     outb(COM1 + 4, 0x0F);
 }
 

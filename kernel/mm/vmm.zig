@@ -182,6 +182,14 @@ pub fn map(space: AddressSpace, v: u64, p: u64, flags: u64) bool {
     return true;
 }
 
+/// Map without TLB flush — use for batch mappings of fresh pages.
+/// Caller must issue a full TLB flush afterwards if needed.
+pub fn mapNoFlush(space: AddressSpace, v: u64, p: u64, flags: u64) bool {
+    const pte = walk(space.pml4_phys, v, true, (flags & PTE_USER) != 0) orelse return false;
+    pte.* = (p & ADDR_MASK) | flags | PTE_PRESENT;
+    return true;
+}
+
 /// Unmap a single 4K page.
 pub fn unmap(space: AddressSpace, v: u64) void {
     const pte = walk(space.pml4_phys, v, false, false) orelse return;

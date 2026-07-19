@@ -41,6 +41,47 @@ pub fn build(b: *std.Build) void {
     // Install the kernel ELF to zig-out/bin/vanta
     b.installArtifact(kernel);
 
+    // ── Server builds ────────────────────────────────────────────
+    const server_names = .{
+        .{ "compositor", "servers/compositor_server.zig" },
+        .{ "virtio_gpu", "servers/virtio_gpu_server.zig" },
+        .{ "input", "servers/input_server.zig" },
+        .{ "terminal", "servers/terminal_emulator.zig" },
+        .{ "timer", "servers/timer_server.zig" },
+        .{ "pty", "servers/pty_server.zig" },
+        .{ "shell", "servers/shell_server.zig" },
+    };
+
+    const libvanta_mod = b.createModule(.{
+        .root_source_file = b.path("libvanta/libvanta.zig"),
+        .target = target,
+        .optimize = optimize,
+        .red_zone = false,
+        .stack_check = false,
+    });
+
+    const servers_step = b.step("servers", "Build userspace servers into kernel/bin/");
+    inline for (server_names) |srv| {
+        const srv_mod = b.createModule(.{
+            .root_source_file = b.path(srv[1]),
+            .target = target,
+            .optimize = optimize,
+            .red_zone = false,
+            .stack_check = false,
+        });
+        srv_mod.addImport("libvanta", libvanta_mod);
+
+        const srv_exe = b.addExecutable(.{
+            .name = srv[0],
+            .use_llvm = true,
+            .use_lld = true,
+            .root_module = srv_mod,
+        });
+        srv_exe.setLinkerScript(b.path("server_linker.ld"));
+        const install_artifact = b.addInstallArtifact(srv_exe, .{});
+        servers_step.dependOn(&install_artifact.step);
+    }
+
     // ── Convenience step: `zig build run` ────────────────────────
     // Builds kernel, creates ISO, runs QEMU (requires xorriso + qemu)
     const run_cmd = b.addSystemCommand(&.{

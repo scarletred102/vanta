@@ -3,7 +3,7 @@
 // Manages up to 16 surfaces; blits them in z-order to the framebuffer.
 // Protocol: see COMPOSITOR_PROTOCOL.md
 
-const lib = @import("../libvanta/libvanta.zig");
+const lib = @import("libvanta");
 
 // ── Cap slot constants (injected by kernel) ──────────────────────────
 // slot 1: MemoryCap — Limine linear framebuffer
@@ -67,19 +67,6 @@ fn allocSurface() ?*Surface {
     return null;
 }
 
-// Sort surfaces by z-order in place (simple insertion sort, 16 elements).
-fn sortByZ() void {
-    var i: usize = 1;
-    while (i < MAX_SURFACES) : (i += 1) {
-        const key = surfaces[i];
-        var j: usize = i;
-        while (j > 0 and surfaces[j - 1].z > key.z) : (j -= 1) {
-            surfaces[j] = surfaces[j - 1];
-        }
-        surfaces[j] = key;
-    }
-}
-
 // Blit one surface onto the framebuffer, clipping to screen bounds.
 fn blitSurface(s: *const Surface) void {
     if (!s.active or s.vaddr == 0) return;
@@ -112,13 +99,31 @@ fn clearFb() void {
     for (0..total) |i| fb_ptr[i] = 0xFF000000;
 }
 
-// Composite all active surfaces in z-order
+// Composite all active surfaces in z-order.
+// Sorts an index array so Surface structs never move — this is critical because
+// handleCreateSurface computes backing_vaddr from the slot's position in the array.
 fn composite() void {
-    sortByZ();
     clearFb();
-    for (&surfaces) |*s| {
-        if (s.active) blitSurface(s);
+    var order: [MAX_SURFACES]usize = undefined;
+    var n_active: usize = 0;
+    for (0..MAX_SURFACES) |i| {
+        if (surfaces[i].active) {
+            order[n_active] = i;
+            n_active += 1;
+        }
     }
+    // Insertion sort on the index array by z value
+    var i: usize = 1;
+    while (i < n_active) : (i += 1) {
+        const ki = order[i];
+        const kz = surfaces[ki].z;
+        var j: usize = i;
+        while (j > 0 and surfaces[order[j - 1]].z > kz) : (j -= 1) {
+            order[j] = order[j - 1];
+        }
+        order[j] = ki;
+    }
+    for (order[0..n_active]) |idx| blitSurface(&surfaces[idx]);
 }
 
 // ── Service registration ─────────────────────────────────────────────
@@ -141,6 +146,7 @@ fn handleCreateSurface(msg: *const lib.Message) lib.Message {
 
     var reply: lib.Message = .{};
     reply.msg_type = MSG_CREATE_SURFACE | 0x8000;
+    reply.flags.is_reply = true;
 
     const s = allocSurface() orelse {
         reply.payload[0] = 0xFF; // error: no free slots
@@ -221,6 +227,7 @@ fn handleDestroySurface(msg: *const lib.Message) void {
 fn handleQueryDisplay() lib.Message {
     var reply: lib.Message = .{};
     reply.msg_type = MSG_QUERY_DISPLAY | 0x8000;
+    reply.flags.is_reply = true;
     @as(*align(1) u32, @ptrCast(&reply.payload[0])).* = fb_width;
     @as(*align(1) u32, @ptrCast(&reply.payload[4])).* = fb_height;
     return reply;
@@ -230,8 +237,9 @@ pub export fn main() void {
     lib.vanta_debug_print("[COMP] compositor starting\n");
 
     // Map Limine framebuffer (up to 8 MB = 2048 pages covers 4K×4K BGRA8)
-    _ = lib.vanta_mem_map(FB_MEM_CAP, FB_VADDR, 512);
+    _ = lib.vanta_mem_map(FB_MEM_CAP, FB_VADDR, 2048);
     fb_ptr = @as([*]u32, @ptrFromInt(FB_VADDR));
+    lib.vanta_debug_print("[COMP] mem_map done, looking up display\n");
 
     // Discover display dimensions from hw.display.0 (retry loop)
     {

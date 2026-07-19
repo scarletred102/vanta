@@ -1,0 +1,9 @@
+# Linux source used as the architectural reference for the Rust rewrite.
+# The source is fetched outside git by scripts/fetch-linux.ps1.
+
+version = "6.18.39"
+source_url = "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.39.tar.xz"
+sha256 = "a7a7e3d2ae9d95e74197223a8d4eb5f6be7aac21b6e6de27e9685d001c1f8cb0"
+
+# Vanta remains its own kernel. Linux supplies the reference for subsystem
+# boundaries and x86_64 behavior; Linux source is not copied into this tree.

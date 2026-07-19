@@ -438,9 +438,16 @@ export fn handleException(frame: *InterruptFrame) callconv(.c) void {
     }
 
     if (vec == 33) {
-        // PS/2 keyboard: read scancode, push to ring buffer, wake input_server.
+        // PS/2 keyboard: read scancode, push to ring buffer, wake terminal.
         const cpu_io = @import("cpu.zig");
         const scancode = cpu_io.inb(0x60);
+        serial.puts("[K-IRQ] sc=0x");
+        serial.putHex(scancode);
+        if (irq_notification_bindings[1] != null) {
+            serial.puts(" bound\n");
+        } else {
+            serial.puts(" UNBOUND\n");
+        }
         irq_data_buffers[1].push(scancode);
         if (irq_notification_bindings[1]) |notif| {
             notif.notify(1);

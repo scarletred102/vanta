@@ -53,6 +53,9 @@ fn userThreadTrampoline() callconv(.c) noreturn {
     const cpu = @import("../arch/x86_64/cpu_local.zig").get_cpu_local();
     if (cpu.prev_thread) |p| {
         @atomicStore(bool, &p.yielded, true, .release);
+        if (p.state == .ready) {
+            @import("scheduler.zig").enqueueLocal(&cpu.run_queue, p);
+        }
         cpu.prev_thread = null;
     }
     const current_t = cpu.current_thread.?;
@@ -63,6 +66,9 @@ fn kernelThreadTrampoline() callconv(.c) noreturn {
     const cpu = @import("../arch/x86_64/cpu_local.zig").get_cpu_local();
     if (cpu.prev_thread) |p| {
         @atomicStore(bool, &p.yielded, true, .release);
+        if (p.state == .ready) {
+            @import("scheduler.zig").enqueueLocal(&cpu.run_queue, p);
+        }
         cpu.prev_thread = null;
     }
     const current_t = cpu.current_thread.?;
