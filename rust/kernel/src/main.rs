@@ -303,9 +303,13 @@ pub extern "C" fn _start() -> ! {
     kprintln!("vanta os | kernel terminal");
     kprintln!("-----------------------------------");
 
-    gdt::init();
+    let prepared_cpus = gdt::initialize_bootstrap(smp::reported_cpu_count(MP_REQUEST.response()));
     kprintln!("[ok] gdt");
-    serial_println!("[boot] gdt loaded");
+    serial_println!("[boot] gdt loaded: per-cpu-states={}", prepared_cpus);
+
+    interrupts::init_idt();
+    kprintln!("[ok] idt");
+    serial_println!("[boot] idt loaded");
 
     let apic = apic::initialize();
     serial_println!(
@@ -316,19 +320,17 @@ pub extern "C" fn _start() -> ! {
         apic.x2apic_supported
     );
 
-    let smp = smp::bootstrap(MP_REQUEST.response());
+    let smp = smp::bootstrap(MP_REQUEST.response(), prepared_cpus);
     serial_println!(
-        "[smp] reported-cpus={} bsp-lapic={} requested-aps={} online-aps={} x2apic={}",
+        "[smp] reported-cpus={} prepared-cpus={} bsp-lapic={} requested-aps={} online-aps={} work-completed={} x2apic={}",
         smp.reported_cpus,
+        smp.prepared_cpus,
         smp.bsp_lapic_id,
         smp.requested_aps,
         smp.online_aps,
+        smp.work_completed,
         smp.x2apic_enabled
     );
-
-    interrupts::init_idt();
-    kprintln!("[ok] idt");
-    serial_println!("[boot] idt loaded");
 
     let syscall_ready = syscall::init();
     if syscall_ready {
