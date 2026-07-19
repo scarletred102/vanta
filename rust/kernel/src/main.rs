@@ -8,9 +8,10 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 use core::alloc::Layout;
 use core::panic::PanicInfo;
-use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest};
+use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, MpRequest};
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
+mod apic;
 mod elf;
 mod framebuffer;
 mod fs;
@@ -24,6 +25,7 @@ mod process;
 mod scheduler;
 mod serial;
 mod shell;
+mod smp;
 mod storage;
 mod syscall;
 mod vfs;
@@ -43,6 +45,10 @@ static MEMMAP_REQUEST: MemmapRequest = MemmapRequest::new();
 #[used]
 #[link_section = ".requests"]
 static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
+
+#[used]
+#[link_section = ".requests"]
+static MP_REQUEST: MpRequest = MpRequest::new(limine::mp::MP_FLAG_X2APIC);
 
 #[used]
 #[link_section = ".requests_start_marker"]
@@ -300,6 +306,25 @@ pub extern "C" fn _start() -> ! {
     gdt::init();
     kprintln!("[ok] gdt");
     serial_println!("[boot] gdt loaded");
+
+    let apic = apic::initialize();
+    serial_println!(
+        "[apic] mode={:?} lapic-id={} base={:#x} x2apic-supported={}",
+        apic.mode,
+        apic.lapic_id,
+        apic.physical_base,
+        apic.x2apic_supported
+    );
+
+    let smp = smp::bootstrap(MP_REQUEST.response());
+    serial_println!(
+        "[smp] reported-cpus={} bsp-lapic={} requested-aps={} online-aps={} x2apic={}",
+        smp.reported_cpus,
+        smp.bsp_lapic_id,
+        smp.requested_aps,
+        smp.online_aps,
+        smp.x2apic_enabled
+    );
 
     interrupts::init_idt();
     kprintln!("[ok] idt");

@@ -56,14 +56,16 @@ rust/
       vfs.rs                 # writable VantaFS volume + root mount
       serial.rs              # COM1 logger
       gdt.rs                 # GDT + TSS + ring-3 entry + double-fault IST
-      interrupts.rs          # IDT, PIC, exception + IRQ handlers
+      interrupts.rs          # IDT, PIC/PIT, exception + IRQ handlers
+      apic.rs                # local-APIC discovery + MMIO/x2APIC setup
+      smp.rs                 # Limine application-processor handoff
       framebuffer.rs         # Limine framebuffer + bitmap font
       memory.rs              # memory-map accounting + physical frames
       paging.rs              # HHDM translation + mutable page-table manager
       heap.rs                # mapped free-list + global Rust allocator
       process.rs              # ELF PT_LOAD mapping + user stack lifecycle
-      scheduler.rs           # cooperative task table + round-robin switching
-      syscall.rs              # syscall/sysret entry + write/exit ABI
+      scheduler.rs           # timer-preemptive task table + round-robin switching
+      syscall.rs              # syscall/sysret entry + VFS/process ABI
       keyboard.rs            # IRQ1 scancode queue
       shell.rs               # decoder + echo loop
   esp/
@@ -79,7 +81,9 @@ rust/
 - Framebuffer init (verified 1280x800x32 in QEMU)
 - GDT + TSS with double-fault IST
 - IDT with CPU exception + timer + keyboard IRQ handlers
-- PIC 8259 remap, IRQ0 + IRQ1 unmasked
+- PIC 8259 remap, 100 Hz PIT, IRQ0 + IRQ1 unmasked
+- Local APIC discovery and uncached xAPIC MMIO / x2APIC software enable
+- Limine SMP handoff: AP discovery, bootstrap acknowledgement, and safe AP halt
 - PS/2 keyboard via `pc-keyboard` scancode decoder
 - Limine memory-map accounting and bounded physical-frame allocator
 - HHDM translation and page-table inspection of Limine's active mappings
@@ -88,7 +92,7 @@ rust/
 - Reclaimable process mappings and a four-page user stack
 - Ring-3 entry through `iretq`, with a TSS privilege stack and syscall test
 - Single-CPU `syscall`/`sysretq` ABI with user `write` and `exit` calls
-- Cooperative single-CPU scheduler with two user processes and `yield`
+- Timer-preemptive round-robin scheduler with full user interrupt contexts
 - Round-robin address-space switching and per-process exit reclamation
 - User process exit switches back to the kernel address space and reclaims it
 - Read-only CPIO `newc` initramfs with `/bin/init` and `/etc/motd` lookup
@@ -99,11 +103,12 @@ rust/
 
 ## What does not (yet)
 
-- No preemptive scheduling, fork/exec, or broader syscall surface yet
+- No fork/exec or process creation beyond the boot-time test workload yet
 - No slab allocator yet; the bootstrap free-list has fixed metadata capacity
 - No VirtIO/persistent block driver, filesystem journaling, or networking
 - No mouse, no windowing — terminal only
-- Single-CPU only; SMP/APIC come later
+- APs are discovered and brought online, but shared scheduling and per-CPU
+  runtime state are not implemented yet
 
 ## Verifying the keyboard pipeline without a GUI
 

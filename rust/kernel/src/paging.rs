@@ -48,6 +48,7 @@ pub enum MapError {
 
 pub const MAP_WRITABLE: u64 = 1 << 1;
 pub const MAP_USER: u64 = 1 << 2;
+pub const MAP_CACHE_DISABLE: u64 = 1 << 4;
 pub const MAP_NO_EXECUTE: u64 = 1 << 63;
 
 static HHDM_OFFSET: Mutex<Option<u64>> = Mutex::new(None);
