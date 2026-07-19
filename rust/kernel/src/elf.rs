@@ -216,8 +216,8 @@ const fn make_test_elf() -> [u8; 0x300] {
     put_u32(&mut image, ELF_HEADER_SIZE + 4, PF_X);
     put_u64(&mut image, ELF_HEADER_SIZE + 8, 0x100);
     put_u64(&mut image, ELF_HEADER_SIZE + 16, 0x0040_0000);
-    put_u64(&mut image, ELF_HEADER_SIZE + 32, 39);
-    put_u64(&mut image, ELF_HEADER_SIZE + 40, 39);
+    put_u64(&mut image, ELF_HEADER_SIZE + 32, 48);
+    put_u64(&mut image, ELF_HEADER_SIZE + 40, 48);
     put_u64(&mut image, ELF_HEADER_SIZE + 48, 0x1000);
 
     let second_header = ELF_HEADER_SIZE + PROGRAM_HEADER_SIZE;
@@ -243,17 +243,23 @@ const fn make_test_elf() -> [u8; 0x300] {
     put_u32(&mut image, 0x114, 28);
     image[0x118] = 0x0f;
     image[0x119] = 0x05;
-    // mov rax, 60; xor edi, edi; syscall; ud2
+    // mov rax, 24; syscall; mov rax, 60; xor edi, edi; syscall; ud2
     image[0x11a] = 0x48;
     image[0x11b] = 0xc7;
     image[0x11c] = 0xc0;
-    image[0x11d] = 60;
-    image[0x121] = 0x31;
-    image[0x122] = 0xff;
-    image[0x123] = 0x0f;
-    image[0x124] = 0x05;
-    image[0x125] = 0x0f;
-    image[0x126] = 0x0b;
+    image[0x11d] = 24;
+    image[0x121] = 0x0f;
+    image[0x122] = 0x05;
+    image[0x123] = 0x48;
+    image[0x124] = 0xc7;
+    image[0x125] = 0xc0;
+    image[0x126] = 60;
+    image[0x12a] = 0x31;
+    image[0x12b] = 0xff;
+    image[0x12c] = 0x0f;
+    image[0x12d] = 0x05;
+    image[0x12e] = 0x0f;
+    image[0x12f] = 0x0b;
     image[0x200] = b'[';
     image[0x201] = b'u';
     image[0x202] = b's';

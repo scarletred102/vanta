@@ -62,6 +62,7 @@ rust/
       paging.rs              # HHDM translation + mutable page-table manager
       heap.rs                # mapped free-list + global Rust allocator
       process.rs              # ELF PT_LOAD mapping + user stack lifecycle
+      scheduler.rs           # cooperative task table + round-robin switching
       syscall.rs              # syscall/sysret entry + write/exit ABI
       keyboard.rs            # IRQ1 scancode queue
       shell.rs               # decoder + echo loop
@@ -87,6 +88,8 @@ rust/
 - Reclaimable process mappings and a four-page user stack
 - Ring-3 entry through `iretq`, with a TSS privilege stack and syscall test
 - Single-CPU `syscall`/`sysretq` ABI with user `write` and `exit` calls
+- Cooperative single-CPU scheduler with two user processes and `yield`
+- Round-robin address-space switching and per-process exit reclamation
 - User process exit switches back to the kernel address space and reclaims it
 - Read-only CPIO `newc` initramfs with `/bin/init` and `/etc/motd` lookup
 - Filesystem-backed `/bin/init` loading through the ELF/process path
@@ -96,9 +99,9 @@ rust/
 
 ## What does not (yet)
 
-- No scheduler, fork/exec, or broader syscall surface yet
+- No preemptive scheduling, fork/exec, or broader syscall surface yet
 - No slab allocator yet; the bootstrap free-list has fixed metadata capacity
-- No writable filesystem, VFS mounts, block storage, or networking
+- No VirtIO/persistent block driver, filesystem journaling, or networking
 - No mouse, no windowing — terminal only
 - Single-CPU only; SMP/APIC come later
 

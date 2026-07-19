@@ -21,6 +21,7 @@ mod keyboard;
 mod memory;
 mod paging;
 mod process;
+mod scheduler;
 mod serial;
 mod shell;
 mod storage;
@@ -387,9 +388,16 @@ pub extern "C" fn _start() -> ! {
     }
 
     if syscall_ready {
-        match process::load_elf(init_image) {
-            Ok(process) => unsafe { alloc::boxed::Box::new(process).run() },
-            Err(error) => serial_println!("[proc] user-entry load failed: {:?}", error),
+        match (process::load_elf(init_image), process::load_elf(init_image)) {
+            (Ok(first), Ok(second)) => {
+                let mut tasks = Vec::with_capacity(2);
+                tasks.push(Box::new(first));
+                tasks.push(Box::new(second));
+                unsafe { scheduler::start(tasks) }
+            }
+            (Err(error), _) | (_, Err(error)) => {
+                serial_println!("[sched] user-task load failed: {:?}", error)
+            }
         }
     }
 

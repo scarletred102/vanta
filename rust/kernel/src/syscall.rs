@@ -2,7 +2,6 @@
 
 use core::arch::global_asm;
 
-use spin::Mutex;
 use x86_64::registers::model_specific::{Efer, EferFlags, LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;
 use x86_64::VirtAddr;
@@ -10,11 +9,21 @@ use x86_64::VirtAddr;
 use crate::paging::{self, AddressSpace};
 
 pub const SYS_WRITE: u64 = 1;
+pub const SYS_YIELD: u64 = 24;
 pub const SYS_EXIT: u64 = 60;
 const SYSCALL_RETURN_EXIT: u64 = u64::MAX;
+const SYSCALL_RETURN_YIELD: u64 = u64::MAX - 2;
 const SYSCALL_ERROR: u64 = u64::MAX - 1;
 const USER_ADDRESS_LIMIT: u64 = 0x0000_8000_0000_0000;
 const SYSCALL_STACK_SIZE: usize = 4096 * 2;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct UserContext {
+    pub instruction_pointer: u64,
+    pub flags: u64,
+    pub stack_pointer: u64,
+}
 
 #[no_mangle]
 static mut VANTA_SYSCALL_STACK: [u8; SYSCALL_STACK_SIZE] = [0; SYSCALL_STACK_SIZE];
@@ -25,17 +34,11 @@ static mut VANTA_SYSCALL_USER_RSP: u64 = 0;
 #[no_mangle]
 static mut VANTA_SYSCALL_EXIT_CODE: u64 = 0;
 
-struct CurrentProcess {
-    process: usize,
-    kernel_space: AddressSpace,
-}
-
-static CURRENT_PROCESS: Mutex<Option<CurrentProcess>> = Mutex::new(None);
-
 global_asm!(
     r#"
     .global vanta_syscall_entry
     .extern vanta_syscall_dispatch
+    .extern vanta_syscall_yield
     .extern vanta_syscall_exit
 vanta_syscall_entry:
     mov [rip + VANTA_SYSCALL_USER_RSP], rsp
@@ -56,15 +59,29 @@ vanta_syscall_entry:
     call vanta_syscall_dispatch
     cmp rax, -1
     je vanta_syscall_exit_path
+    cmp rax, -3
+    je vanta_syscall_yield_path
     mov r11, [rsp + 48]
     mov rcx, [rsp + 40]
     add rsp, 56
     mov rsp, [rip + VANTA_SYSCALL_USER_RSP]
     sysretq
+vanta_syscall_yield_path:
+    mov rdi, [rsp + 40]
+    mov rsi, [rsp + 48]
+    mov rdx, [rip + VANTA_SYSCALL_USER_RSP]
+    call vanta_syscall_yield
+    mov rcx, [rax]
+    mov r11, [rax + 8]
+    mov rsp, [rax + 16]
+    sysretq
 vanta_syscall_exit_path:
     mov rdi, [rip + VANTA_SYSCALL_EXIT_CODE]
     call vanta_syscall_exit
-    ud2
+    mov rcx, [rax]
+    mov r11, [rax + 8]
+    mov rsp, [rax + 16]
+    sysretq
 "#
 );
 
@@ -87,20 +104,6 @@ pub fn init() -> bool {
     true
 }
 
-pub fn register_process(process: *mut crate::process::Process, kernel_space: AddressSpace) {
-    *CURRENT_PROCESS.lock() = Some(CurrentProcess {
-        process: process as usize,
-        kernel_space,
-    });
-}
-
-pub fn take_current_process() -> Option<(usize, AddressSpace)> {
-    CURRENT_PROCESS
-        .lock()
-        .take()
-        .map(|current| (current.process, current.kernel_space))
-}
-
 #[no_mangle]
 extern "C" fn vanta_syscall_dispatch(
     number: u64,
@@ -111,6 +114,7 @@ extern "C" fn vanta_syscall_dispatch(
 ) -> u64 {
     match number {
         SYS_WRITE => write_user(arg1, arg2),
+        SYS_YIELD => SYSCALL_RETURN_YIELD,
         SYS_EXIT => {
             unsafe {
                 VANTA_SYSCALL_EXIT_CODE = arg1;
@@ -120,6 +124,22 @@ extern "C" fn vanta_syscall_dispatch(
         _ => SYSCALL_ERROR,
     }
 }
+
+pub fn prepare_user_return(context: UserContext, space: AddressSpace) -> *const UserContext {
+    unsafe {
+        NEXT_CONTEXT = context;
+    }
+    unsafe {
+        paging::activate(space);
+    }
+    core::ptr::addr_of!(NEXT_CONTEXT)
+}
+
+static mut NEXT_CONTEXT: UserContext = UserContext {
+    instruction_pointer: 0,
+    flags: 0,
+    stack_pointer: 0,
+};
 
 fn write_user(pointer: u64, length: u64) -> u64 {
     if length > 256 {
@@ -151,6 +171,19 @@ fn write_user(pointer: u64, length: u64) -> u64 {
 }
 
 #[no_mangle]
-extern "C" fn vanta_syscall_exit(code: u64) -> ! {
-    unsafe { crate::process::exit_current(code) }
+extern "C" fn vanta_syscall_yield(
+    instruction_pointer: u64,
+    flags: u64,
+    stack_pointer: u64,
+) -> *const UserContext {
+    crate::scheduler::yield_current(UserContext {
+        instruction_pointer,
+        flags,
+        stack_pointer,
+    })
+}
+
+#[no_mangle]
+extern "C" fn vanta_syscall_exit(code: u64) -> *const UserContext {
+    crate::scheduler::exit_current(code)
 }

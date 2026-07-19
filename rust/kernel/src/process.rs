@@ -68,20 +68,6 @@ impl Process {
         self.cleanup()
     }
 
-    /// Switch to this process and enter its ELF entry point at CPL3.
-    pub unsafe fn run(self: alloc::boxed::Box<Self>) -> ! {
-        let process_ptr = alloc::boxed::Box::into_raw(self);
-        let process = unsafe { &*process_ptr };
-        let entry = process.entry;
-        let stack = process.user_stack_top;
-        let space = process.space;
-        crate::syscall::register_process(process_ptr, paging::current_address_space());
-        unsafe {
-            paging::activate(space);
-            crate::gdt::enter_user(entry, stack)
-        }
-    }
-
     fn cleanup(&mut self) -> Result<usize, ProcessError> {
         if self.destroyed {
             return Ok(0);
@@ -100,32 +86,6 @@ impl Process {
         self.destroyed = true;
         Ok(freed_tables)
     }
-}
-
-pub unsafe fn exit_current(code: u64) -> ! {
-    let Some((process_ptr, kernel_space)) = crate::syscall::take_current_process() else {
-        panic!("syscall exit without a current process");
-    };
-    unsafe {
-        paging::activate(kernel_space);
-        let mut process = alloc::boxed::Box::from_raw(process_ptr as *mut Process);
-        let cleanup = process.destroy();
-        drop(process);
-        match cleanup {
-            Ok(freed_tables) => crate::serial_println!(
-                "[proc] user process exited: code={} tables-freed={}",
-                code,
-                freed_tables
-            ),
-            Err(error) => crate::serial_println!(
-                "[proc] user process exit cleanup failed: code={} error={:?}",
-                code,
-                error
-            ),
-        }
-    }
-    x86_64::instructions::interrupts::enable();
-    crate::shell::run()
 }
 
 impl Drop for Process {
