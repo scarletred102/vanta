@@ -216,8 +216,8 @@ const fn make_test_elf() -> [u8; 0x300] {
     put_u32(&mut image, ELF_HEADER_SIZE + 4, PF_X);
     put_u64(&mut image, ELF_HEADER_SIZE + 8, 0x100);
     put_u64(&mut image, ELF_HEADER_SIZE + 16, 0x0040_0000);
-    put_u64(&mut image, ELF_HEADER_SIZE + 32, 128);
-    put_u64(&mut image, ELF_HEADER_SIZE + 40, 128);
+    put_u64(&mut image, ELF_HEADER_SIZE + 32, 131);
+    put_u64(&mut image, ELF_HEADER_SIZE + 40, 131);
     put_u64(&mut image, ELF_HEADER_SIZE + 48, 0x1000);
 
     let second_header = ELF_HEADER_SIZE + PROGRAM_HEADER_SIZE;
@@ -293,7 +293,7 @@ const fn make_test_elf() -> [u8; 0x300] {
     image[0x15c] = 0x0f;
     image[0x15d] = 0x05;
 
-    // close(fd); yield; exit(0); ud2 if exit unexpectedly returns.
+    // close(fd); run without syscalls; exit(0); ud2 if exit unexpectedly returns.
     image[0x15e] = 0x48;
     image[0x15f] = 0xc7;
     image[0x160] = 0xc0;
@@ -305,20 +305,23 @@ const fn make_test_elf() -> [u8; 0x300] {
     image[0x169] = 0x05;
     image[0x16a] = 0x48;
     image[0x16b] = 0xc7;
-    image[0x16c] = 0xc0;
-    image[0x16d] = 24;
-    image[0x171] = 0x0f;
-    image[0x172] = 0x05;
-    image[0x173] = 0x48;
-    image[0x174] = 0xc7;
-    image[0x175] = 0xc0;
-    image[0x176] = 60;
-    image[0x17a] = 0x31;
-    image[0x17b] = 0xff;
-    image[0x17c] = 0x0f;
-    image[0x17d] = 0x05;
-    image[0x17e] = 0x0f;
-    image[0x17f] = 0x0b;
+    image[0x16c] = 0xc1;
+    put_u32(&mut image, 0x16d, 50_000_000);
+    image[0x171] = 0x48;
+    image[0x172] = 0xff;
+    image[0x173] = 0xc9;
+    image[0x174] = 0x75;
+    image[0x175] = 0xfb;
+    image[0x176] = 0x48;
+    image[0x177] = 0xc7;
+    image[0x178] = 0xc0;
+    image[0x179] = 60;
+    image[0x17d] = 0x31;
+    image[0x17e] = 0xff;
+    image[0x17f] = 0x0f;
+    image[0x180] = 0x05;
+    image[0x181] = 0x0f;
+    image[0x182] = 0x0b;
     image[0x200] = b'/';
     image[0x201] = b'e';
     image[0x202] = b't';
