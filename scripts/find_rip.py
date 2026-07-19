@@ -112,7 +112,7 @@ def print_bytes_at_addr(filepath, target_addr):
             print("Hex bytes after:  " + " ".join(f"{b:02x}" for b in bytes_around[16:]))
             break
 
-target_addresses = [0xffffffff800256fc, 0xffffffff80025743]
+target_addresses = [0xffffffff80027e9f]
 filepath = 'zig-out/bin/vanta'
 for addr in target_addresses:
     res = find_address_in_elf(filepath, addr)

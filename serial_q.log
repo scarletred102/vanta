@@ -1,0 +1,146 @@
+
+[BOOT]  VantaOS Phase 3 starting
+[DEBUG] CpuLocal size: 1152  timer_ticks offset: 1104  watchdog_last_ticks offset: 1112  watchdog_miss_count offset: 1144
+[BOOT]  Limine protocol — OK
+[GDT]   own GDT + TSS loaded
+[IDT]   Using CS selector 0x8
+[IDT]   Building table
+[IDT]   LIDT...
+[IDT]   LIDT done
+[IDT]   Loaded (32 exception vectors)
+[VMM]   HHDM=0xffff800000000000
+[VMM]   CR3=0xff96000 (using Limine's tables)
+[PMM]   Initializing Buddy Allocator...
+          0x1000 - 0x53000 (328 KB) bootloader
+          0x53000 - 0x9f000 (304 KB) USABLE
+          0x9fc00 - 0xa0000 (1 KB) reserved
+          0xf0000 - 0x100000 (64 KB) reserved
+          0x100000 - 0xe292000 (230984 KB) USABLE
+          0xe292000 - 0xe297000 (20 KB) bootloader
+          0xe297000 - 0xf202000 (15788 KB) kernel
+          0xf202000 - 0xff63000 (13700 KB) bootloader
+          0xff63000 - 0xff77000 (80 KB) USABLE
+          0xff77000 - 0xffe0000 (420 KB) bootloader
+          0xffe0000 - 0x10000000 (128 KB) reserved
+          0xfd000000 - 0xfd300000 (3072 KB) framebuffer
+          0xfffc0000 - 0x100000000 (256 KB) reserved
+          0xfd00000000 - 0x10000000000 (12582912 KB) reserved
+[PMM]   Buddy Allocator online. Total pages: 57842 Free pages: 57842
+[PMM]   total=225MB free=225MB
+[SLAB]  Slab allocator online
+[PROC]  kernel proc (pid 0) initialized
+[SYSCALL] MSRs configured (STAR/LSTAR/FMASK/SCE)
+[SYSCALL] Entry at 0xffffffff8002c460
+[SYSCALL] LSTAR verified OK
+[SYSCALL] STAR kernel CS verified OK
+[APIC]  Masking legacy 8259 PIC...
+[ACPI]  RSDP at virt=0xffff8000000f52e0 phys=0xf52e0
+[ACPI]  MADT found!
+[ACPI]  I/O APIC at 0xfec00000 gsi_base=0
+[ACPI]  ISO: IRQ 0 -> GSI 2 flags=0x0
+[ACPI]  ISO: IRQ 5 -> GSI 5 flags=0xd
+[ACPI]  ISO: IRQ 9 -> GSI 9 flags=0xd
+[ACPI]  ISO: IRQ 10 -> GSI 10 flags=0xd
+[ACPI]  ISO: IRQ 11 -> GSI 11 flags=0xd
+[APIC]  LAPIC Phys=0xfee00000  IOAPIC Phys=0xfec00000
+[APIC]  Local APIC enabled successfully
+[PIT]   Calibrating LAPIC timer (10ms target)...
+[PIT]   Calibrated: 626512 LAPIC ticks per 10ms
+[SCHED] Periodic preemption timer enabled (100Hz)
+[SMP]   Symmetric Multiprocessing initializing...
+[SMP]   MADT Discovered CPU count: 1
+[SMP]   Trampoline size: 253 bytes
+[SMP]   boot_aps starting...
+[SMP]   BSP APIC ID: 0
+[SMP]   BSP GS Base MSR configured
+[SMP]   PML4 mailbox written: 0xff96000
+[SMP]   Explicit identity map of 0x7000 and 0x8000 created
+[SMP]   Checking CPU 0 with APIC ID 0
+[SMP]   Skip BSP
+[APIC]  routed IRQ 1 -> GSI 1 pin 1 vec 33
+[KBD]   PS/2 Keyboard routed (IRQ 1 -> Vector 33)
+[APIC]  routed IRQ 11 -> GSI 11 pin 11 vec 34
+[AHCI]  AHCI IRQ routed (IRQ 11 -> Vector 34)
+[APIC]  routed IRQ 12 -> GSI 12 pin 12 vec 35
+[MOUSE] PS/2 Mouse routed (IRQ 12 -> Vector 35)
+[PS2]   Keyboard port enabled (IRQ 1)
+[PS2]   Mouse auxiliary port enabled (IRQ 12)
+[PCI]   Scanning PCI bus...
+[PCI]   Found Mass Storage Controller at 0:1.1 [Vendor: 0x8086 Device: 0x7010] (Other Storage, Subclass: 0x1)
+          BAR4: 0xc041
+[PCI]   Scan complete
+[FB]    1024x768x32bpp
+[SCHED] Per-CPU scheduler ready
+[P7-TEST] Spawning userspace filesystem stacks...
+[P11] timer_server spawned
+[P11] virtio_gpu_server spawned
+[P11] compositor_server SKIPPED (direct FB mode)
+[P11] input/pty/shell servers SKIPPED (console-in-terminal)
+[P11] terminal_emulator spawned
+[P7-TEST] Spawning complete. Running scheduler...
+══════════════════════════════════════════════
+  VantaOS Phase 7 complete. Starting scheduler.
+══════════════════════════════════════════════
+[WATCHDOG] CPU 0 first tick. CpuLocal=0xffffffff80e4d438 timer_ticks=0xffffffff80e4d888
+[LOG:ns] ns: Starting namespace routing server...
+[LOG:ns] ns: Registering with service registry...
+[LOG:ns] ns: Entering IPC routing loop...
+[LOG:tmpfs] tmpfs: Starting in-memory filesystem server...
+[LOG:tmpfs] tmpfs: Registering with service registry...
+[LOG:tmpfs] tmpfs: Entering IPC service loop...
+[LOG:vantafs] vantafs: Starting VantaFS userspace driver server...
+[LOG:vantafs] vantafs: Looking up block provider 'block.ahci.0p0'...
+[CAPCALL] lookup sent, waiting for reply pid=3
+[LOG:ahci] AHCI: Starting standalone userspace AHCI driver server...
+[LOG:ahci] AHCI: Mapping AHCI MMIO registers...
+[LOG:ahci] AHCI: MMIO registers mapped successfully at 0x20000000
+[LOG:ahci] AHCI: AHCI mode enabled globally in GHC
+[LOG:ahci] AHCI: No active ports detected.
+[LOG:ahci] AHCI: Setting up interrupt notification capability...
+[LOG:ahci] AHCI: DeviceIRQ successfully bound to Notification capability.
+[LOG:ahci] AHCI: Registering with service registry...
+[LOG:ahci] AHCI: Registered as 'block.ahci.0' successfully.
+[LOG:ahci] AHCI: Entering IPC service loop...
+[LOG:fs_test] fs_test: Starting VantaOS acceptance test framework...
+[LOG:fs_test] fs_test: Discovering 'fs.tmpfs' endpoint...
+[LOG:virtio_net] virtio-net: Starting virtio-net driver server (P8)...
+[LOG:virtio_net] virtio-net: Mapping BAR0 MMIO...
+[LOG:virtio_net] virtio-net: BAR0 mapped at 0x20000000.
+[LOG:virtio_net] virtio-net: Device reset, ACKNOWLEDGE + DRIVER set.
+[LOG:virtio_net] virtio-net: Device features: 0x0
+[LOG:virtio_net] virtio-net: Negotiated features: 0x0
+[LOG:virtio_net] virtio-net: Allocating RX virtqueue...
+[LOG:virtio_net] virtio-net: Allocating TX virtqueue...
+[LOG:virtio_net] virtio-net: [WARN] Device refused queue initialization. Falling back to dry-run mode.
+[LOG:virtio_net] virtio-net: Allocating RX buffers...
+[LOG:virtio_net] virtio-net: DMA buffers ready.
+[LOG:virtio_net] virtio-net: Pre-populating RX descriptors...
+[LOG:virtio_net] virtio-net: RX descriptors pre-populated (dry-run).
+[LOG:virtio_net] virtio-net: Dry-run — skipping DRIVER_OK.
+[LOG:virtio_net] virtio-net: Dry-run — skipping DeviceIRQ binding.
+[LOG:virtio_net] virtio-net: F_MAC not negotiated or dry-run; using default MAC.
+[LOG:virtio_net] virtio-net: Registering as 'hw.net.0'...
+[LOG:virtio_net] virtio-net: Registered as 'hw.net.0'.
+[LOG:virtio_net] virtio-net: Entering IPC service loop...
+[LOG:timer] timer: starting timer server...
+[LOG:timer] timer: registered as sys.timer
+[ThreadSpawn] Spawning thread in current process
+[ThreadSpawn] Thread started successfully
+[LOG:timer] timer: tick relay thread spawned
+[LOG:timer] timer: entering main loop
+[LOG:virtio_gpu] [GPU] display server starting
+[LOG:virtio_gpu] [GPU] using Limine FB dimensions
+[LOG:virtio_gpu] [GPU] registered as hw.display.0
+[LOG:terminal] [TERM] console starting
+[LOG:terminal] [TERM] console ready
+[REGISTRY] Service registry thread online.
+[REGISTRY] Registered service 'sys.namespace'
+[REGISTRY] Registered service 'fs.tmpfs'
+[REGISTRY] Got NS_LOOKUP for 'block.ahci.0p0'
+[REGISTRY] Current registry:
+  - 'sys.namespace'
+  - 'fs.tmpfs'
+[REGISTRY] Registered service 'block.ahci.0'
+[REGISTRY] Registered service 'hw.net.0'
+[REGISTRY] Registered service 'sys.timer'
+[REGISTRY] Registered service 'hw.display.0'

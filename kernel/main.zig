@@ -199,6 +199,7 @@ fn kmain() void {
     serial.puts("[AHCI]  AHCI IRQ routed (IRQ 11 -> Vector 34)\n");
     interrupts.routeIrq(12, 35, 0);
     serial.puts("[MOUSE] PS/2 Mouse routed (IRQ 12 -> Vector 35)\n");
+    interrupts.initPs2Keyboard();
     interrupts.initPs2Mouse();
 
     // PCI Bus Scanner
@@ -304,10 +305,11 @@ const fs_test_elf = @embedFile("bin/fs_test");
 const virtio_net_elf = @embedFile("bin/virtio_net");
 const timer_elf = @embedFile("bin/timer");
 const virtio_gpu_elf = @embedFile("bin/virtio_gpu");
-const compositor_elf = @embedFile("bin/compositor");
+const compositor_elf = @embedFile("bin/compositor"); // unused: compositor disabled for direct-FB mode
 const input_elf = @embedFile("bin/input");
 const terminal_elf = @embedFile("bin/terminal");
 const pty_elf = @embedFile("bin/pty");
+const shell_elf = @embedFile("bin/shell");
 
 var ns_port: port_mod.Port = .{};
 var tmpfs_port: port_mod.Port = .{};
@@ -319,8 +321,9 @@ var timer_port: port_mod.Port = .{};
 var virtio_gpu_port: port_mod.Port = .{};
 var compositor_port: port_mod.Port = .{};
 var input_port: port_mod.Port = .{};
-var terminal_port: port_mod.Port = .{};
 var pty_port: port_mod.Port = .{};
+var shell_port: port_mod.Port = .{};
+var terminal_port: port_mod.Port = .{};
 
 const RegistryEntry = struct {
     name: [32]u8,
@@ -334,7 +337,7 @@ var registry_count: usize = 0;
 pub fn registryThread() callconv(.c) noreturn {
     serial.puts("[REGISTRY] Service registry thread online.\n");
     while (true) {
-        if (registry_port.recvBlocking()) |*msg| {
+        if (registry_port.recvBlockingFiltered(false)) |*msg| {
             if (msg.msg_type == 0x10) { // RegistryRegister
                 const name = std.mem.sliceTo(msg.payload[0..32], 0);
                 if (name.len > 0 and msg.transferred_caps[0].type != 0) {
@@ -360,8 +363,16 @@ pub fn registryThread() callconv(.c) noreturn {
                     }
                 }
             } else if (msg.msg_type == 0x11) { // RegistryLookup
-                serial.puts("[REGISTRY] Got NS_LOOKUP\n");
                 const name = std.mem.sliceTo(msg.payload[0..32], 0);
+                serial.puts("[REGISTRY] Got NS_LOOKUP for '");
+                serial.puts(name);
+                serial.puts("'\n");
+                serial.puts("[REGISTRY] Current registry:\n");
+                for (0..registry_count) |i| {
+                    serial.puts("  - '");
+                    serial.puts(registry_table[i].name[0..registry_table[i].name_len]);
+                    serial.puts("'\n");
+                }
                 var found = false;
                 var found_idx: usize = 0;
                 for (0..registry_count) |i| {
@@ -430,15 +441,15 @@ pub fn runPhase7Test() void {
     // 2. Setup capabilities
     // Setup NS
     _ = cap.cap_table_insert(&ns_proc.cap_table, @intFromPtr(&ns_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant);
-    _ = cap.cap_table_insert(&ns_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend);
+    _ = cap.cap_table_insert(&ns_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv);
 
     // Setup tmpfs
     _ = cap.cap_table_insert(&tmpfs_proc.cap_table, @intFromPtr(&tmpfs_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant);
-    _ = cap.cap_table_insert(&tmpfs_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend);
+    _ = cap.cap_table_insert(&tmpfs_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv);
 
     // Setup VantaFS
     _ = cap.cap_table_insert(&vantafs_proc.cap_table, @intFromPtr(&vantafs_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant);
-    _ = cap.cap_table_insert(&vantafs_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend);
+    _ = cap.cap_table_insert(&vantafs_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv);
 
     // Setup AHCI
     const bar5_phys = if (pci.ahci_bar5_phys != 0) pci.ahci_bar5_phys else b: {
@@ -448,12 +459,12 @@ pub fn runPhase7Test() void {
     };
     _ = cap.cap_table_insert(&ahci_proc.cap_table, bar5_phys, @intFromEnum(cap.CapType.Memory), cap.Rights.MemoryRead | cap.Rights.MemoryWrite | cap.Rights.MemoryMap);
     _ = cap.cap_table_insert(&ahci_proc.cap_table, @intFromPtr(&ahci_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant);
-    _ = cap.cap_table_insert(&ahci_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend);
+    _ = cap.cap_table_insert(&ahci_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv);
     _ = cap.cap_table_insert(&ahci_proc.cap_table, 11, @intFromEnum(cap.CapType.DeviceIRQ), cap.Rights.DeviceIRQBind);
 
     // Setup fs_test
     _ = cap.cap_table_insert(&fs_test_proc.cap_table, @intFromPtr(&ns_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend);
-    _ = cap.cap_table_insert(&fs_test_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend);
+    _ = cap.cap_table_insert(&fs_test_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv);
 
     // Setup virtio-net
     const virtio_net_bar0 = if (pci.virtio_net_bar0_phys != 0) pci.virtio_net_bar0_phys else b: {
@@ -463,7 +474,7 @@ pub fn runPhase7Test() void {
     };
     _ = cap.cap_table_insert(&virtio_net_proc.cap_table, virtio_net_bar0, @intFromEnum(cap.CapType.Memory), cap.Rights.MemoryRead | cap.Rights.MemoryWrite | cap.Rights.MemoryMap);
     _ = cap.cap_table_insert(&virtio_net_proc.cap_table, @intFromPtr(&virtio_net_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant);
-    _ = cap.cap_table_insert(&virtio_net_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend);
+    _ = cap.cap_table_insert(&virtio_net_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv);
     _ = cap.cap_table_insert(&virtio_net_proc.cap_table, 11, @intFromEnum(cap.CapType.DeviceIRQ), cap.Rights.DeviceIRQBind);
 
     // 3. Parse ELFs
@@ -594,6 +605,19 @@ pub fn runPhase7Test() void {
     const gpu_bar0 = if (pci.virtio_gpu_bar0_phys != 0) pci.virtio_gpu_bar0_phys else b: {
         const p = pmm.allocPage().?;
         @memset(@as([*]u8, @ptrFromInt(vmm.phys2virt(p)))[0..4096], 0);
+        // No real virtio-gpu — write Limine FB dimensions into the dummy
+        // page so the virtio_gpu_server can read them as a fallback.
+        // Layout: [0]=magic(0xFB01), [4]=width, [8]=height, [12]=stride
+        const meta = @as([*]volatile u32, @ptrFromInt(vmm.phys2virt(p)));
+        meta[0] = 0xFB01; // magic: "framebuffer info present"
+        if (framebuffer_req.response) |fb_resp| {
+            if (fb_resp.framebuffer_count > 0) {
+                const fb = fb_resp.framebuffers[0];
+                meta[1] = @intCast(fb.width);
+                meta[2] = @intCast(fb.height);
+                meta[3] = @intCast(fb.pitch);
+            }
+        }
         break :b p;
     };
     _ = cap.cap_table_insert(&virtio_gpu_proc.cap_table, gpu_bar0, @intFromEnum(cap.CapType.Memory), cap.Rights.MemoryRead | cap.Rights.MemoryWrite | cap.Rights.MemoryMap); // slot 1: BAR0
@@ -614,58 +638,25 @@ pub fn runPhase7Test() void {
     virtio_gpu_proc.thread_count += 1;
     serial.puts("[P11] virtio_gpu_server spawned\n");
 
-    // ── compositor_server ─────────────────────────────────────────────────
-    const compositor_proc = proc.create("compositor", 0) orelse { serial.puts("[WARN] compositor proc failed\n"); return; };
-    const fb_phys_for_comp = if (limine_fb_phys != 0) limine_fb_phys else b: {
-        const p = pmm.allocPage().?;
-        break :b p;
-    };
-    _ = cap.cap_table_insert(&compositor_proc.cap_table, fb_phys_for_comp, @intFromEnum(cap.CapType.Memory), cap.Rights.MemoryRead | cap.Rights.MemoryWrite | cap.Rights.MemoryMap); // slot 1: Limine FB
-    _ = cap.cap_table_insert(&compositor_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv); // slot 2
-    _ = cap.cap_table_insert(&compositor_proc.cap_table, @intFromPtr(&compositor_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant); // slot 3
+    // ── compositor_server — DISABLED ──────────────────────────────────────
+    // Terminal now renders directly to Limine FB. Compositor would clear it
+    // to black every 16ms, erasing the terminal output.
+    serial.puts("[P11] compositor_server SKIPPED (direct FB mode)\n");
 
-    const compositor_elf_info = @import("elf.zig").parse_elf64(compositor_elf) catch { serial.puts("[WARN] compositor ELF parse failed\n"); return; };
-    const compositor_entry = @import("elf.zig").load_elf(compositor_elf_info, compositor_elf, compositor_proc.space.pml4_phys) catch { serial.puts("[WARN] compositor ELF load failed\n"); return; };
-    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = compositor_proc.space.pml4_phys }, 16, compositor_proc.user_stack_top).?;
-    const compositor_stack_top = @import("elf.zig").setupUserStack(compositor_proc.space.pml4_phys, compositor_entry, compositor_elf_info, compositor_proc.user_stack_top);
-    const ut_compositor = thread.create_user(compositor_entry, compositor_stack_top, compositor_proc.space.pml4_phys, compositor_proc.pid) orelse { serial.puts("[WARN] ut_compositor failed\n"); return; };
-    sched.enqueue(ut_compositor);
-    compositor_proc.thread_count += 1;
-    serial.puts("[P11] compositor_server spawned\n");
+    // ── input_server / pty_server / shell_server — DISABLED ───────────────
+    // The terminal is now a self-contained console (pluto/zigux model): it owns
+    // the keyboard IRQ, translates scancodes, runs the shell builtins inline,
+    // and renders directly to the framebuffer. This removes the fragile
+    // multi-server IPC chain (registration handshake, cap-transfer broadcast,
+    // PTY round-trip) that never worked end to end.
+    serial.puts("[P11] input/pty/shell servers SKIPPED (console-in-terminal)\n");
 
-    // ── input_server ──────────────────────────────────────────────────────
-    const input_proc = proc.create("input", 0) orelse { serial.puts("[WARN] input proc failed\n"); return; };
-    _ = cap.cap_table_insert(&input_proc.cap_table, 1, @intFromEnum(cap.CapType.DeviceIRQ), cap.Rights.DeviceIRQBind); // slot 1: IRQ 1 (keyboard)
-    _ = cap.cap_table_insert(&input_proc.cap_table, 12, @intFromEnum(cap.CapType.DeviceIRQ), cap.Rights.DeviceIRQBind); // slot 2: IRQ 12 (mouse)
-    _ = cap.cap_table_insert(&input_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv); // slot 3
-    _ = cap.cap_table_insert(&input_proc.cap_table, @intFromPtr(&input_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant); // slot 4
-
-    const input_elf_info = @import("elf.zig").parse_elf64(input_elf) catch { serial.puts("[WARN] input ELF parse failed\n"); return; };
-    const input_entry = @import("elf.zig").load_elf(input_elf_info, input_elf, input_proc.space.pml4_phys) catch { serial.puts("[WARN] input ELF load failed\n"); return; };
-    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = input_proc.space.pml4_phys }, 16, input_proc.user_stack_top).?;
-    const input_stack_top = @import("elf.zig").setupUserStack(input_proc.space.pml4_phys, input_entry, input_elf_info, input_proc.user_stack_top);
-    const ut_input = thread.create_user(input_entry, input_stack_top, input_proc.space.pml4_phys, input_proc.pid) orelse { serial.puts("[WARN] ut_input failed\n"); return; };
-    sched.enqueue(ut_input);
-    input_proc.thread_count += 1;
-    serial.puts("[P11] input_server spawned\n");
-
-    // ── pty_server ────────────────────────────────────────────────────────
-    const pty_proc = proc.create("pty", 0) orelse { serial.puts("[WARN] pty proc failed\n"); return; };
-    _ = cap.cap_table_insert(&pty_proc.cap_table, @intFromPtr(&pty_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant); // slot 1
-    _ = cap.cap_table_insert(&pty_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv); // slot 2
-
-    const pty_elf_info = @import("elf.zig").parse_elf64(pty_elf) catch { serial.puts("[WARN] pty ELF parse failed\n"); return; };
-    const pty_entry = @import("elf.zig").load_elf(pty_elf_info, pty_elf, pty_proc.space.pml4_phys) catch { serial.puts("[WARN] pty ELF load failed\n"); return; };
-    _ = vmm.alloc_user_stack_in_space(vmm.AddressSpace{ .pml4_phys = pty_proc.space.pml4_phys }, 16, pty_proc.user_stack_top).?;
-    const pty_stack_top = @import("elf.zig").setupUserStack(pty_proc.space.pml4_phys, pty_entry, pty_elf_info, pty_proc.user_stack_top);
-    const ut_pty = thread.create_user(pty_entry, pty_stack_top, pty_proc.space.pml4_phys, pty_proc.pid) orelse { serial.puts("[WARN] ut_pty failed\n"); return; };
-    sched.enqueue(ut_pty);
-    pty_proc.thread_count += 1;
-    serial.puts("[P11] pty_server spawned\n");
-
-    // ── terminal_emulator ─────────────────────────────────────────────────
+    // ── terminal_emulator (self-contained console) ────────────────────────
     const terminal_proc = proc.create("terminal", 0) orelse { serial.puts("[WARN] terminal proc failed\n"); return; };
-    _ = cap.cap_table_insert(&terminal_proc.cap_table, @intFromPtr(&registry_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv); // slot 1: registry
+    _ = cap.cap_table_insert(&terminal_proc.cap_table, @intFromPtr(&terminal_port), @intFromEnum(cap.CapType.Endpoint), cap.Rights.EndpointSend | cap.Rights.EndpointRecv | cap.Rights.EndpointGrant); // slot 1: own port (unused)
+    const fb_phys_for_term = if (limine_fb_phys != 0) limine_fb_phys else b: { const pg = pmm.allocPage().?; break :b pg; };
+    _ = cap.cap_table_insert(&terminal_proc.cap_table, fb_phys_for_term, @intFromEnum(cap.CapType.Memory), cap.Rights.MemoryRead | cap.Rights.MemoryWrite | cap.Rights.MemoryMap); // slot 2: Limine FB
+    _ = cap.cap_table_insert(&terminal_proc.cap_table, 1, @intFromEnum(cap.CapType.DeviceIRQ), cap.Rights.DeviceIRQBind); // slot 3: keyboard IRQ 1
 
     const terminal_elf_info = @import("elf.zig").parse_elf64(terminal_elf) catch { serial.puts("[WARN] terminal ELF parse failed\n"); return; };
     const terminal_entry = @import("elf.zig").load_elf(terminal_elf_info, terminal_elf, terminal_proc.space.pml4_phys) catch { serial.puts("[WARN] terminal ELF load failed\n"); return; };

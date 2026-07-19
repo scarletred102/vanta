@@ -1,7 +1,22 @@
-# Vanta — Rust rewrite, session 1
+# Vanta — Rust kernel rewrite
 
-Minimal x86_64 kernel. Boots via UEFI + Limine, draws an in-kernel terminal to
-the framebuffer, echoes PS/2 keystrokes.
+Rust x86_64 kernel foundation. It boots via UEFI + Limine, draws an in-kernel
+terminal to the framebuffer, and echoes PS/2 keystrokes. The rewrite follows
+Linux-style subsystem boundaries while retaining Vanta's own microkernel and
+capability model; it is not a copy of Linux.
+
+## Linux reference source
+
+The pinned reference is Linux 6.18.39, the current long-term branch selected
+for a stable architecture baseline. Fetch it outside git with:
+
+```powershell
+.\scripts\fetch-linux.ps1
+```
+
+The script verifies the official archive checksum before extraction. The
+source is intentionally kept out of this repository; Vanta code is written
+independently in Rust.
 
 ## Run
 
@@ -39,6 +54,7 @@ rust/
       gdt.rs                 # GDT + TSS + double-fault IST
       interrupts.rs          # IDT, PIC, exception + IRQ handlers
       framebuffer.rs         # Limine framebuffer + bitmap font
+      memory.rs              # memory-map accounting + physical frames
       keyboard.rs            # IRQ1 scancode queue
       shell.rs               # decoder + echo loop
   esp/
@@ -56,12 +72,13 @@ rust/
 - IDT with CPU exception + timer + keyboard IRQ handlers
 - PIC 8259 remap, IRQ0 + IRQ1 unmasked
 - PS/2 keyboard via `pc-keyboard` scancode decoder
+- Limine memory-map accounting and bounded physical-frame allocator
 - In-kernel shell: prompt, echo, backspace, newline
 
 ## What does not (yet)
 
 - No userspace, no syscalls, no ELF loader
-- No heap; everything is static / `heapless`
+- No general heap or page-table manager yet; the early frame allocator is static
 - No filesystem, no networking
 - No mouse, no windowing — terminal only
 - Single-CPU only; SMP/APIC come later

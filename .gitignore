@@ -7,3 +7,9 @@ vanta.iso
 qemu.log
 *.o
 *.elf
+AGENTS.md
+vantaos_roadmap.html
+zigux/
+pluto/
+third_party/linux-6.18.39/
+third_party/linux-6.18.39.tar.xz

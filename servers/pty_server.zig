@@ -3,7 +3,7 @@
 // ============================================================================
 
 const std = @import("std");
-const libvanta = @import("../libvanta/libvanta.zig");
+const libvanta = @import("libvanta");
 
 // Pre-assigned startup capability handles
 pub const PORT_CAP_HANDLE: u64 = 0x0001000000000001; // Slot 1, Gen 1

@@ -18,7 +18,7 @@
 // ============================================================================
 
 const std = @import("std");
-const libvanta = @import("../libvanta/libvanta.zig");
+const libvanta = @import("libvanta");
 
 // ── Cap handles ──────────────────────────────────────────────────────────────
 

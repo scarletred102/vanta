@@ -21,7 +21,7 @@ pub var current: ?*Thread = null;
 
 // ── Per-CPU Enqueue / Dequeue ──────────────────────────────────
 
-fn enqueueLocal(q: *cpu_local.RunQueue, t: *Thread) void {
+pub fn enqueueLocal(q: *cpu_local.RunQueue, t: *Thread) void {
     t.state = .ready;
     t.next = null;
     const flags = q.lock.lock_irqsave();
@@ -153,14 +153,19 @@ pub fn yield() void {
         cpu.thread_to_reap = null;
     }
 
-    const next_t = dequeueNext() orelse return;
+    const next_t = dequeueNext() orelse {
+        if (cpu.current_thread) |cur| {
+            cur.state = .running;
+            @atomicStore(bool, &cur.yielded, true, .release);
+        }
+        return;
+    };
 
     const prev = cpu.current_thread;
     if (prev) |p| {
         p.user_rsp_scratch = cpu.user_rsp_scratch;
         if (p.state == .running) {
             p.state = .ready;
-            enqueueLocal(&cpu.run_queue, p);
         }
     }
 
@@ -203,6 +208,9 @@ pub fn yield() void {
 
     if (cpu.prev_thread) |p| {
         @atomicStore(bool, &p.yielded, true, .release);
+        if (p.state == .ready) {
+            enqueueLocal(&cpu.run_queue, p);
+        }
         cpu.prev_thread = null;
     }
 }
@@ -213,11 +221,8 @@ pub fn block() void {
 
 pub fn wake(t: *Thread) void {
     if (t.state == .ready or t.state == .running) return;
-    // Bounded spin: wait for the thread to finish its yield() critical section.
-    // Falls through after timeout to avoid livelock — the scheduler handles
-    // re-enqueue of a thread that hasn't fully context-switched yet.
-    var spins: usize = 0;
-    while (!@atomicLoad(bool, &t.yielded, .acquire) and spins < 1000) : (spins += 1) {
+    // Wait for the thread to finish its yield() critical section.
+    while (!@atomicLoad(bool, &t.yielded, .acquire)) {
         asm volatile ("pause");
     }
     enqueue(t);

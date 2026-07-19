@@ -3,7 +3,7 @@
 #![feature(abi_x86_interrupt)]
 
 use core::panic::PanicInfo;
-use limine::request::FramebufferRequest;
+use limine::request::{FramebufferRequest, MemmapRequest};
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
 mod serial;
@@ -12,6 +12,7 @@ mod interrupts;
 mod framebuffer;
 mod keyboard;
 mod shell;
+mod memory;
 
 #[used]
 #[link_section = ".requests"]
@@ -20,6 +21,10 @@ static BASE_REVISION: BaseRevision = BaseRevision::with_revision(3);
 #[used]
 #[link_section = ".requests"]
 static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
+
+#[used]
+#[link_section = ".requests"]
+static MEMMAP_REQUEST: MemmapRequest = MemmapRequest::new();
 
 #[used]
 #[link_section = ".requests_start_marker"]
@@ -51,6 +56,32 @@ pub extern "C" fn _start() -> ! {
         }
     } else {
         serial_println!("[boot] WARNING: no framebuffer response");
+    }
+
+    if let Some(memmap_resp) = MEMMAP_REQUEST.response() {
+        let stats = memory::init(memmap_resp);
+        serial_println!(
+            "[mm] entries={} usable={} MiB frames={} tracked={}",
+            stats.map_entries,
+            stats.usable_bytes / (1024 * 1024),
+            stats.usable_frames,
+            stats.tracked_frames
+        );
+
+        let first = memory::alloc_frame();
+        let second = memory::alloc_frame();
+        match (first, second) {
+            (Some(first), Some(second)) if first != second => {
+                serial_println!(
+                    "[mm] frame allocator self-check passed: {:#x}, {:#x}",
+                    first.start_address(),
+                    second.start_address()
+                );
+            }
+            _ => serial_println!("[mm] WARNING: frame allocator self-check failed"),
+        }
+    } else {
+        serial_println!("[mm] WARNING: no Limine memory-map response");
     }
 
     kprintln!("vanta os | kernel terminal");

@@ -1,4 +1,6 @@
 [toolchain]
-channel = "nightly"
+# x86_64 0.15.5 uses the current Step trait API, which landed in this
+# nightly window. Pinning avoids a floating nightly silently breaking builds.
+channel = "nightly-2026-07-10"
 components = ["rust-src"]
 targets = ["x86_64-unknown-none"]

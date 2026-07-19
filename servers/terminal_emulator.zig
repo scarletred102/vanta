@@ -1,31 +1,37 @@
-// VantaOS — terminal emulator
-// 80×25 VT100/ANSI terminal on a compositor surface.
-// Connects to sys.compositor (display), sys.input (keyboard), sys.pty (I/O).
+// VantaOS — terminal console (self-contained)
+// 80×25 VT100/ANSI terminal rendered directly to the Limine framebuffer.
+// Owns the keyboard IRQ directly, translates scancodes, runs the shell
+// builtins inline, and renders to the framebuffer. No input/pty/shell IPC.
 
-const lib = @import("../libvanta/libvanta.zig");
+const lib = @import("libvanta");
 const font = @import("bitmap_font.zig");
-const atlas = @import("glyph_atlas.zig");
 
-// ── Cap slots (injected by kernel) ───────────────────────────────────
-// slot 1: registry endpoint
-const REGISTRY_CAP: lib.Handle = 0x0001000000000001;
-// Created dynamically in main()
-var NOTIF_CAP: lib.Handle = 0;
+// ── Cap slots (injected by kernel at spawn) ─────────────────────────
+// slot 1: terminal's own port (unused, kept for symmetry)
+// slot 2: MemoryCap — Limine linear framebuffer (direct pixel access)
+// slot 3: DeviceIRQ — IRQ 1 (PS/2 keyboard)
+const TERM_PORT_CAP: lib.Handle = 0x0001000000000001;
+const FB_MEM_CAP: lib.Handle = 0x0001000000000002;
+const KBD_IRQ_CAP: lib.Handle = 0x0001000000000003;
 
-// ── Terminal dimensions ───────────────────────────────────────────────
+// ── Framebuffer — hardcoded to match limine.conf resolution ─────────
+const FB_WIDTH: u32 = 1024;
+const FB_HEIGHT: u32 = 768;
+const FB_STRIDE_PX: u32 = FB_WIDTH; // pixels per row
+const FB_VADDR: u64 = 0x50000000;
+
+// ── Terminal dimensions ─────────────────────────────────────────────
 const COLS: u32 = 80;
 const ROWS: u32 = 25;
 const CELL_W: u32 = font.GLYPH_W;
 const CELL_H: u32 = font.GLYPH_H;
-const SURF_W: u32 = COLS * CELL_W; // 640
-const SURF_H: u32 = ROWS * CELL_H; // 400
 
-// ── Colours (BGRA8) ───────────────────────────────────────────────────
-const COLOR_BG: u32 = 0xFF1A1A2E;  // dark navy
-const COLOR_FG: u32 = 0xFFE0E0E0;  // light grey
+// ── Colours (BGRA8) ─────────────────────────────────────────────────
+const COLOR_BG: u32 = 0xFF1A1A2E; // dark navy
+const COLOR_FG: u32 = 0xFFE0E0E0; // light grey
 const COLOR_CURSOR: u32 = 0xFF00FF88; // green cursor
 
-// ── Cell buffer ───────────────────────────────────────────────────────
+// ── Cell buffer ─────────────────────────────────────────────────────
 const Cell = struct {
     ch: u8 = ' ',
     fg: u32 = COLOR_FG,
@@ -38,145 +44,60 @@ var cursor_row: u32 = 0;
 var cursor_col: u32 = 0;
 var cursor_visible: bool = true;
 
-// ── ANSI parser state ─────────────────────────────────────────────────
+// ── ANSI parser state ───────────────────────────────────────────────
 const ParseState = enum { normal, esc, csi };
 var parse_state: ParseState = .normal;
 var csi_params: [8]u32 = [_]u32{0} ** 8;
 var csi_param_count: u32 = 0;
-var csi_buf: [32]u8 = [_]u8{0} ** 32;
-var csi_len: u32 = 0;
 
-// ── Surface framebuffer ───────────────────────────────────────────────
-// Mapped at SURFACE_VADDR after CreateSurface
-const SURFACE_VADDR: u64 = 0x60000000;
-var surface_id: u64 = 0;
-var surf_pixels: [*]u32 = undefined;
+// ── Framebuffer pixel pointer ───────────────────────────────────────
+var fb_pixels: [*]volatile u32 = undefined;
 
-// ── Service discovery caps ────────────────────────────────────────────
-var compositor_cap: lib.Handle = 0;
-var input_cap: lib.Handle = 0;
-var pty_cap: lib.Handle = 0;
+// ── Keyboard state ──────────────────────────────────────────────────
+var shift_down: bool = false;
+var line_buf: [256]u8 = [_]u8{0} ** 256;
+var line_len: usize = 0;
 
-// ── Registry helpers ──────────────────────────────────────────────────
+// Scancode set 1 → ASCII (unshifted). Index = scancode (0x00..0x58).
+const SCANCODE_MAP: [89]u8 = .{
+    0,   0,   '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-',  '=',  0x08,
+    '\t','q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']',  '\n',
+    0,   'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'','`',
+    0,   '\\','z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0,
+    '*', 0,   ' ', 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+    0,   0,   0,   0,   0,   0,   0,   '7', '8', '9', '-', '4', '5',
+    '6', '+', '1', '2', '3', '0', '.', 0,
+};
 
-fn registryLookup(name: []const u8) lib.Handle {
-    var msg: lib.Message = .{};
-    msg.msg_type = 0x11; // NS_LOOKUP
-    for (name, 0..) |c, i| {
-        if (i >= 32) break;
-        msg.payload[i] = c;
-    }
-    // Busy-retry for up to ~2000 attempts (services may not be up yet)
-    var attempts: u32 = 0;
-    while (attempts < 2000) : (attempts += 1) {
-        var reply: lib.Message = .{};
-        _ = lib.vanta_cap_call(REGISTRY_CAP, @intFromPtr(&msg), @intFromPtr(&reply));
-        // Registry inserts the found cap into our table and returns handle in caps[0]
-        if (reply.msg_type == 0x11 and reply.caps[0] != 0) {
-            return reply.caps[0];
-        }
-        var spin: u32 = 0;
-        while (spin < 50000) : (spin += 1) asm volatile ("pause");
-    }
-    return 0;
-}
+const SCANCODE_MAP_SHIFT: [89]u8 = .{
+    0,   0,   '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_',  '+',  0x08,
+    '\t','Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n',
+    0,   'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~',
+    0,   '|', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0,
+    '*', 0,   ' ', 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+    0,   0,   0,   0,   0,   0,   0,   '7', '8', '9', '-', '4', '5',
+    '6', '+', '1', '2', '3', '0', '.', 0,
+};
 
-// ── Compositor helpers ────────────────────────────────────────────────
-
-fn createSurface() void {
-    var msg: lib.Message = .{};
-    msg.msg_type = 0x30; // MSG_CREATE_SURFACE
-    @as(*align(1) u32, @ptrCast(&msg.payload[0])).* = SURF_W;
-    @as(*align(1) u32, @ptrCast(&msg.payload[4])).* = SURF_H;
-    var reply: lib.Message = .{};
-    _ = lib.vanta_cap_call(compositor_cap, @intFromPtr(&msg), @intFromPtr(&reply));
-    if (reply.msg_type == (0x30 | 0x8000)) {
-        surface_id = @as(*align(1) u64, @ptrCast(&reply.payload[0])).*;
-        // Map the SHM cap from the reply so we can write pixels
-        const shm = reply.caps[0];
-        if (shm != 0) {
-            _ = lib.vanta_shm_map(shm, SURFACE_VADDR);
-        }
-    }
-    surf_pixels = @as([*]u32, @ptrFromInt(SURFACE_VADDR));
-}
-
-fn swapBuffers() void {
-    var msg: lib.Message = .{};
-    msg.msg_type = 0x31; // MSG_SWAP_BUFFERS
-    @as(*align(1) u64, @ptrCast(&msg.payload[0])).* = surface_id;
-    _ = lib.vanta_cap_send(compositor_cap, @intFromPtr(&msg));
-}
-
-fn setPosition(x: i32, y: i32) void {
-    var msg: lib.Message = .{};
-    msg.msg_type = 0x32;
-    @as(*align(1) u64, @ptrCast(&msg.payload[0])).* = surface_id;
-    @as(*align(1) i32, @ptrCast(&msg.payload[8])).* = x;
-    @as(*align(1) i32, @ptrCast(&msg.payload[12])).* = y;
-    _ = lib.vanta_cap_send(compositor_cap, @intFromPtr(&msg));
-}
-
-// ── Input registration ────────────────────────────────────────────────
-
-fn registerForKeyEvents() void {
-    var msg: lib.Message = .{};
-    msg.msg_type = 0x50; // MSG_SET_FOCUS_CAP
-    msg.payload[0] = 1;  // key events
-    msg.caps[0] = NOTIF_CAP;
-    _ = lib.vanta_cap_send(input_cap, @intFromPtr(&msg));
-}
-
-// ── PTY helpers ───────────────────────────────────────────────────────
-
-fn ptyWrite(data: []const u8) void {
-    if (pty_cap == 0) return;
-    var msg: lib.Message = .{};
-    msg.msg_type = 0x41; // MSG_PTY_WRITE
-    @as(*align(1) u32, @ptrCast(&msg.payload[0])).* = 0; // FD_MASTER
-    const n = @min(data.len, 56);
-    @as(*align(1) u32, @ptrCast(&msg.payload[4])).* = @intCast(n);
-    @memcpy(msg.payload[8..8 + n], data[0..n]);
-    _ = lib.vanta_cap_send(pty_cap, @intFromPtr(&msg));
-}
-
-fn ptyRead(out: []u8) usize {
-    if (pty_cap == 0) return 0;
-    var msg: lib.Message = .{};
-    msg.msg_type = 0x42; // MSG_PTY_READ
-    msg.flags.expects_reply = true;
-    @as(*align(1) u32, @ptrCast(&msg.payload[0])).* = 0; // FD_MASTER
-    var reply: lib.Message = .{};
-    _ = lib.vanta_cap_call(pty_cap, @intFromPtr(&msg), @intFromPtr(&reply));
-    if (reply.msg_type == 0x42) {
-        const n = @min(@as(*align(1) u32, @ptrCast(&reply.payload[0])).*, @as(u32, @intCast(out.len)));
-        @memcpy(out[0..n], reply.payload[4..4 + n]);
-        return n;
-    }
-    return 0;
-}
-
-// ── Rendering ─────────────────────────────────────────────────────────
+// ── Rendering (direct to Limine FB) ─────────────────────────────────
 
 fn renderCell(row: u32, col: u32) void {
     const cell = &cells[row][col];
     const bmp = font.getGlyph(cell.ch);
     const px = col * CELL_W;
     const py = row * CELL_H;
-    const stride = SURF_W;
 
     for (0..CELL_H) |r| {
         const bits = bmp[r];
         for (0..CELL_W) |c| {
             const on = (bits >> @intCast(7 - c)) & 1 != 0;
-            surf_pixels[(py + r) * stride + (px + c)] = if (on) cell.fg else cell.bg;
+            fb_pixels[(py + r) * FB_STRIDE_PX + (px + c)] = if (on) cell.fg else cell.bg;
         }
     }
-    // Draw cursor
     if (row == cursor_row and col == cursor_col and cursor_visible) {
         const cy = py + CELL_H - 2;
         for (0..CELL_W) |c| {
-            surf_pixels[cy * stride + (px + c)] = COLOR_CURSOR;
+            fb_pixels[cy * FB_STRIDE_PX + (px + c)] = COLOR_CURSOR;
         }
     }
     cell.dirty = false;
@@ -191,7 +112,6 @@ fn renderAll() void {
 }
 
 fn renderDirty() void {
-    // Always re-render cursor's old and new positions
     for (0..ROWS) |r| {
         for (0..COLS) |c| {
             if (cells[r][c].dirty) {
@@ -201,7 +121,12 @@ fn renderDirty() void {
     }
 }
 
-// ── Terminal output primitives ────────────────────────────────────────
+fn clearScreen() void {
+    const total = FB_STRIDE_PX * FB_HEIGHT;
+    for (0..total) |i| fb_pixels[i] = COLOR_BG;
+}
+
+// ── Terminal output primitives ──────────────────────────────────────
 
 fn scrollUp() void {
     for (1..ROWS) |r| {
@@ -231,7 +156,7 @@ fn putChar(ch: u8) void {
             cells[cursor_row][cursor_col].dirty = true;
             cursor_col = 0;
         },
-        0x08 => { // backspace
+        0x08 => {
             if (cursor_col > 0) {
                 cells[cursor_row][cursor_col].dirty = true;
                 cursor_col -= 1;
@@ -257,53 +182,24 @@ fn putChar(ch: u8) void {
         else => {},
     }
 
-    // Mark old cursor position dirty
     if (old_r != cursor_row or old_c != cursor_col) {
         cells[old_r][old_c].dirty = true;
         cells[cursor_row][cursor_col].dirty = true;
     }
 }
 
-// ── ANSI/VT100 parser ─────────────────────────────────────────────────
+// ── ANSI/VT100 parser ───────────────────────────────────────────────
 
 fn processAnsiCmd(cmd: u8) void {
     const p0 = if (csi_param_count > 0) csi_params[0] else 0;
-    const p1 = if (csi_param_count > 1) csi_params[1] else 0;
-    _ = p1;
     switch (cmd) {
-        'A' => { // cursor up
-            const n = if (p0 == 0) 1 else p0;
-            if (cursor_row >= n) {
-                cells[cursor_row][cursor_col].dirty = true;
-                cursor_row -= n;
-                cells[cursor_row][cursor_col].dirty = true;
-            }
-        },
-        'B' => { // cursor down
-            const n = if (p0 == 0) 1 else p0;
-            cells[cursor_row][cursor_col].dirty = true;
-            cursor_row = @min(cursor_row + n, ROWS - 1);
-            cells[cursor_row][cursor_col].dirty = true;
-        },
-        'C' => { // cursor right
-            const n = if (p0 == 0) 1 else p0;
-            cells[cursor_row][cursor_col].dirty = true;
-            cursor_col = @min(cursor_col + n, COLS - 1);
-            cells[cursor_row][cursor_col].dirty = true;
-        },
-        'D' => { // cursor left
-            const n = if (p0 == 0) 1 else p0;
-            cells[cursor_row][cursor_col].dirty = true;
-            if (cursor_col >= n) cursor_col -= n;
-            cells[cursor_row][cursor_col].dirty = true;
-        },
-        'H', 'f' => { // cursor position
+        'H', 'f' => {
             cells[cursor_row][cursor_col].dirty = true;
             cursor_row = if (p0 > 0) @min(p0 - 1, ROWS - 1) else 0;
             cursor_col = if (csi_param_count > 1 and csi_params[1] > 0) @min(csi_params[1] - 1, COLS - 1) else 0;
             cells[cursor_row][cursor_col].dirty = true;
         },
-        'J' => { // erase display
+        'J' => {
             if (p0 == 2) {
                 for (0..ROWS) |r| {
                     for (0..COLS) |c| {
@@ -314,12 +210,11 @@ fn processAnsiCmd(cmd: u8) void {
                 cursor_col = 0;
             }
         },
-        'K' => { // erase line
+        'K' => {
             const start: u32 = if (p0 == 1) 0 else cursor_col;
             const end: u32 = if (p0 == 0) COLS else cursor_col + 1;
             for (start..end) |c| cells[cursor_row][c] = .{};
         },
-        'm' => {}, // SGR — ignore colours for now
         else => {},
     }
 }
@@ -336,7 +231,6 @@ fn feedByte(b: u8) void {
         .esc => {
             if (b == '[') {
                 parse_state = .csi;
-                csi_len = 0;
                 csi_param_count = 0;
                 for (&csi_params) |*p| p.* = 0;
             } else {
@@ -351,7 +245,6 @@ fn feedByte(b: u8) void {
             } else if (b == ';') {
                 if (csi_param_count < csi_params.len) csi_param_count += 1;
             } else {
-                // Final byte
                 processAnsiCmd(b);
                 parse_state = .normal;
             }
@@ -359,90 +252,131 @@ fn feedByte(b: u8) void {
     }
 }
 
-// ── Key event → ASCII ─────────────────────────────────────────────────
-
-fn handleKeyMsg(msg: *const lib.Message) void {
-    const flags = @as(*align(1) const u32, @ptrCast(&msg.payload[0])).*;
-    const codepoint = @as(*align(1) const u32, @ptrCast(&msg.payload[8])).*;
-    // Only handle keydown with a printable codepoint or control keys
-    if (flags & 0x01 == 0) return; // only keydown
-    if (codepoint == 0) return;
-    const byte: u8 = if (codepoint < 128) @truncate(codepoint) else '?';
-    // Echo to display
-    feedByte(byte);
-    // Send to PTY
-    const data: [1]u8 = .{byte};
-    ptyWrite(&data);
+fn print(s: []const u8) void {
+    for (s) |b| feedByte(b);
 }
 
-// ── Initial prompt ────────────────────────────────────────────────────
+// ── Shell builtins (run inline) ─────────────────────────────────────
 
-fn printWelcome() void {
-    const msg = "VantaOS v0.1\r\nvanta> ";
-    for (msg) |c| feedByte(c);
+fn strEql(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| if (x != y) return false;
+    return true;
 }
 
-// ── Main ──────────────────────────────────────────────────────────────
+fn startsWith(s: []const u8, prefix: []const u8) bool {
+    if (s.len < prefix.len) return false;
+    return strEql(s[0..prefix.len], prefix);
+}
+
+fn executeCommand(cmd: []const u8) void {
+    if (cmd.len == 0) {
+        // empty line — just reprint prompt
+    } else if (strEql(cmd, "help")) {
+        print("Commands:\r\n");
+        print("  help         print this message\r\n");
+        print("  echo <text>  print text\r\n");
+        print("  clear        clear screen\r\n");
+        print("  uname        OS information\r\n");
+        print("  ls           list files\r\n");
+    } else if (startsWith(cmd, "echo ")) {
+        print(cmd[5..]);
+        print("\r\n");
+    } else if (strEql(cmd, "echo")) {
+        print("\r\n");
+    } else if (strEql(cmd, "clear")) {
+        print("\x1B[2J\x1B[H");
+    } else if (strEql(cmd, "uname")) {
+        print("VantaOS 0.1 x86_64\r\n");
+    } else if (strEql(cmd, "ls")) {
+        print("No filesystem mounted.\r\n");
+    } else {
+        print(cmd);
+        print(": command not found\r\n");
+    }
+}
+
+fn printPrompt() void {
+    print("vanta$ ");
+}
+
+// ── Keyboard input ──────────────────────────────────────────────────
+
+fn handleChar(ch: u8) void {
+    if (ch == '\n' or ch == '\r') {
+        print("\r\n");
+        executeCommand(line_buf[0..line_len]);
+        line_len = 0;
+        printPrompt();
+    } else if (ch == 0x08) {
+        if (line_len > 0) {
+            line_len -= 1;
+            feedByte(0x08);
+        }
+    } else if (ch >= 0x20 and ch < 0x7F) {
+        if (line_len < line_buf.len) {
+            line_buf[line_len] = ch;
+            line_len += 1;
+            feedByte(ch);
+        }
+    }
+}
+
+fn processScancode(sc: u8) void {
+    const release = (sc & 0x80) != 0;
+    const code: u8 = sc & 0x7F;
+
+    // Shift modifiers (0x2A = left, 0x36 = right).
+    if (code == 0x2A or code == 0x36) {
+        shift_down = !release;
+        return;
+    }
+    if (release) return;
+    if (code >= SCANCODE_MAP.len) return;
+
+    const ch = if (shift_down) SCANCODE_MAP_SHIFT[code] else SCANCODE_MAP[code];
+    if (ch == 0) return;
+    handleChar(ch);
+}
+
+// ── Main ────────────────────────────────────────────────────────────
 
 pub export fn main() void {
-    lib.vanta_debug_print("[TERM] terminal emulator starting\n");
+    lib.vanta_debug_print("[TERM] console starting\n");
 
-    // Create our notification cap for receiving key events from input server
-    const notif_res = lib.vanta_notif_create();
-    if (notif_res.err == 0) NOTIF_CAP = notif_res.handle;
-
-    // Service discovery — retry until services are up
-    compositor_cap = registryLookup("sys.compositor");
-    input_cap = registryLookup("sys.input");
-    pty_cap = registryLookup("sys.pty");
-
-    if (compositor_cap == 0) {
-        lib.vanta_debug_print("[TERM] could not find sys.compositor\n");
+    // 1. Map the Limine framebuffer directly.
+    const map_err = lib.vanta_mem_map(FB_MEM_CAP, FB_VADDR, 2048);
+    if (map_err != 0) {
+        lib.vanta_debug_print("[TERM] FB mem_map FAILED\n");
         lib.vanta_exit(1);
     }
+    fb_pixels = @as([*]volatile u32, @ptrFromInt(FB_VADDR));
+    clearScreen();
 
-    // Create surface and get pixel buffer
-    createSurface();
-    // Centre the terminal on screen
-    setPosition(0, 0);
-    registerForKeyEvents();
+    // 2. Bind the keyboard IRQ to a notification we can wait on.
+    const notif = lib.vanta_notif_create();
+    if (notif.err != 0) {
+        lib.vanta_debug_print("[TERM] notif_create FAILED\n");
+        lib.vanta_exit(1);
+    }
+    const kbd_notif = notif.handle;
+    _ = lib.vanta_irq_bind(KBD_IRQ_CAP, kbd_notif);
 
-    // Initialize atlas and render initial screen
-    atlas.reset();
-    printWelcome();
+    // 3. Welcome banner + prompt.
+    print("VantaOS v0.1\r\n");
+    print("Type 'help' for commands.\r\n");
+    printPrompt();
     renderAll();
-    swapBuffers();
+    lib.vanta_debug_print("[TERM] console ready\n");
 
-    lib.vanta_debug_print("[TERM] ready\n");
-
-    var poll_handles: [1]u64 = .{NOTIF_CAP};
-
+    // 4. Main loop: block until a keyboard IRQ, drain scancodes, render.
     while (true) {
-        // Wait for key event notification (input server fires NOTIF_CAP)
-        const res = lib.vanta_cap_poll(@intFromPtr(&poll_handles), 1, 100);
-
-        if (res.idx == 0) {
-            // Drain key event messages
-            var iters: u32 = 0;
-            while (iters < 32) : (iters += 1) {
-                var msg: lib.Message = .{};
-                const err = lib.vanta_cap_recv(NOTIF_CAP, @intFromPtr(&msg));
-                if (err != 0) break;
-                if (msg.msg_type == 0x51) { // MSG_KEY_EVENT
-                    handleKeyMsg(&msg);
-                }
-            }
+        _ = lib.vanta_cap_wait(kbd_notif, 0xFFFFFFFFFFFFFFFF);
+        while (true) {
+            const res = lib.vanta_irq_readbyte(KBD_IRQ_CAP);
+            if (res.err != 0) break;
+            processScancode(res.byte);
         }
-
-        // Poll PTY for output from the shell
-        var out_buf: [64]u8 = [_]u8{0} ** 64;
-        const n = ptyRead(&out_buf);
-        if (n > 0) {
-            for (out_buf[0..n]) |b| feedByte(b);
-        }
-
-        // Re-render changed cells and push frame
         renderDirty();
-        swapBuffers();
     }
 }

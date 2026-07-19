@@ -445,7 +445,9 @@ pub fn receiveMessageCaps(receiver_table: *CapTable, msg: *port_mod.Message) voi
                 linkEntry(receiver_table, dst_idx);
 
                 // Update parent links for any children that were derived from this cap
-                updateChildrenParent(cap_entry.old_table, cap_entry.old_index, cap_entry.generation, receiver_table, dst_idx);
+                if (cap_entry.old_table != null) {
+                    updateChildrenParent(cap_entry.old_table, cap_entry.old_index, cap_entry.generation, receiver_table, dst_idx);
+                }
 
                 msg.buffer_cap = encodeHandle(dst_idx, entry.generation);
             } else {
@@ -486,7 +488,9 @@ pub fn receiveMessageCaps(receiver_table: *CapTable, msg: *port_mod.Message) voi
                 linkEntry(receiver_table, dst_idx);
 
                 // Update parent links for any children that were derived from this cap
-                updateChildrenParent(cap_entry.old_table, cap_entry.old_index, cap_entry.generation, receiver_table, dst_idx);
+                if (cap_entry.old_table != null) {
+                    updateChildrenParent(cap_entry.old_table, cap_entry.old_index, cap_entry.generation, receiver_table, dst_idx);
+                }
 
                 msg.caps[i] = encodeHandle(dst_idx, entry.generation);
             } else {
@@ -512,13 +516,14 @@ fn updateChildrenParent(
     old_table: ?*CapTable, old_index: u16, generation: u16,
     new_table: *CapTable, new_index: u16
 ) void {
+    const o_table = old_table orelse return;
     const entry = &new_table.entries[new_index];
     if (getCapListHead(entry.type, entry.kernel_object_ptr)) |head| {
         var curr_table = head.table;
         var curr_idx = head.index;
         while (curr_table) |c_tab| {
             const child = &c_tab.entries[curr_idx];
-            if (child.parent_table == old_table and child.parent_index == old_index and child.parent_generation == generation) {
+            if (child.parent_table == o_table and child.parent_index == old_index and child.parent_generation == generation) {
                 child.parent_table = new_table;
                 child.parent_index = new_index;
             }
