@@ -55,10 +55,10 @@ rust/
       storage.rs             # sector block-device trait + RAM block driver
       vfs.rs                 # writable VantaFS volume + root mount
       serial.rs              # COM1 logger
-      gdt.rs                 # GDT + TSS + ring-3 entry + double-fault IST
+      gdt.rs                 # per-CPU GDT/TSS/stacks + ring-3 entry
       interrupts.rs          # IDT, PIC/PIT, exception + IRQ handlers
       apic.rs                # local-APIC discovery + MMIO/x2APIC setup
-      smp.rs                 # Limine application-processor handoff
+      smp.rs                 # Limine AP handoff + locked kernel work queue
       framebuffer.rs         # Limine framebuffer + bitmap font
       memory.rs              # memory-map accounting + physical frames
       paging.rs              # HHDM translation + mutable page-table manager
@@ -83,7 +83,8 @@ rust/
 - IDT with CPU exception + timer + keyboard IRQ handlers
 - PIC 8259 remap, 100 Hz PIT, IRQ0 + IRQ1 unmasked
 - Local APIC discovery and uncached xAPIC MMIO / x2APIC software enable
-- Limine SMP handoff: AP discovery, bootstrap acknowledgement, and safe AP halt
+- Limine SMP handoff: per-CPU GDT/TSS/IDT setup, AP acknowledgement, and
+  locked kernel-work dispatch before safe AP halt
 - PS/2 keyboard via `pc-keyboard` scancode decoder
 - Limine memory-map accounting and bounded physical-frame allocator
 - HHDM translation and page-table inspection of Limine's active mappings
@@ -107,8 +108,8 @@ rust/
 - No slab allocator yet; the bootstrap free-list has fixed metadata capacity
 - No VirtIO/persistent block driver, filesystem journaling, or networking
 - No mouse, no windowing — terminal only
-- APs are discovered and brought online, but shared scheduling and per-CPU
-  runtime state are not implemented yet
+- APs have independent descriptor/interrupt-stack state and can execute
+  locked kernel work, but cannot yet run or migrate user tasks
 
 ## Verifying the keyboard pipeline without a GUI
 
