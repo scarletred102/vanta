@@ -48,6 +48,7 @@ pub enum MapError {
 
 pub const MAP_WRITABLE: u64 = 1 << 1;
 pub const MAP_USER: u64 = 1 << 2;
+pub const MAP_NO_EXECUTE: u64 = 1 << 63;
 
 static HHDM_OFFSET: Mutex<Option<u64>> = Mutex::new(None);
 
@@ -78,6 +79,20 @@ pub fn current_cr3() -> u64 {
 pub fn current_address_space() -> AddressSpace {
     AddressSpace {
         pml4_phys: current_cr3(),
+    }
+}
+
+/// Activate an address space that shares the current kernel-half mappings.
+///
+/// The caller must ensure that the target contains valid mappings for the
+/// currently executing kernel and stack before switching CR3.
+pub unsafe fn activate(space: AddressSpace) {
+    unsafe {
+        asm!(
+            "mov cr3, {pml4}",
+            pml4 = in(reg) space.pml4_phys,
+            options(nostack, preserves_flags)
+        );
     }
 }
 
@@ -144,6 +159,13 @@ pub fn translate_in(space: AddressSpace, virtual_address: u64) -> Option<Transla
         physical_address: (pt_entry & ADDRESS_MASK) | (virtual_address & (PAGE_SIZE - 1)),
         page_size: PAGE_SIZE,
     })
+}
+
+/// Return the raw flags from a mapped 4 KiB leaf PTE.
+pub fn flags_in(space: AddressSpace, virtual_address: u64) -> Option<u64> {
+    let location = pte_location(space, virtual_address, false, false).ok()??;
+    let entry = read_entry(location.table_phys, location.index)?;
+    (entry & PRESENT != 0).then_some(entry & !ADDRESS_MASK)
 }
 
 /// Create an address space that shares the active kernel-half mappings.

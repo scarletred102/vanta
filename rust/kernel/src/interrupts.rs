@@ -2,6 +2,7 @@ use crate::{gdt, serial_println};
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use spin::Mutex;
+use x86_64::PrivilegeLevel;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 pub const PIC_1_OFFSET: u8 = 32;
@@ -25,7 +26,9 @@ pub static PICS: Mutex<ChainedPics> =
 lazy_static! {
     static ref IDT: InterruptDescriptorTable = {
         let mut idt = InterruptDescriptorTable::new();
-        idt.breakpoint.set_handler_fn(breakpoint_handler);
+        idt.breakpoint
+            .set_handler_fn(breakpoint_handler)
+            .set_privilege_level(PrivilegeLevel::Ring3);
         idt.general_protection_fault.set_handler_fn(gp_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
         unsafe {
@@ -44,7 +47,7 @@ pub fn init_idt() {
 }
 
 extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
-    serial_println!("[int] breakpoint: {:#?}", frame);
+    serial_println!("[user] ring3 breakpoint: {:#?}", frame);
 }
 
 extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, code: u64) -> ! {

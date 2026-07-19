@@ -11,15 +11,19 @@ use core::panic::PanicInfo;
 use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest};
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
+mod elf;
 mod framebuffer;
+mod fs;
 mod gdt;
 mod heap;
 mod interrupts;
 mod keyboard;
 mod memory;
 mod paging;
+mod process;
 mod serial;
 mod shell;
+mod syscall;
 
 #[used]
 #[link_section = ".requests"]
@@ -220,6 +224,59 @@ pub extern "C" fn _start() -> ! {
         serial_println!("[vm] WARNING: no Limine HHDM response");
     }
 
+    let init_image = match fs::FileSystem::new(&fs::INITRAMFS) {
+        Ok(rootfs) => {
+            let init = rootfs.read("/bin/init");
+            let motd = rootfs.read("/etc/motd");
+            let bin_directory = rootfs.is_directory("/bin");
+            let etc_directory = rootfs.is_directory("/etc");
+            let init_executable = rootfs.is_executable("/bin/init");
+            let missing = rootfs.read("/missing");
+            let directory_as_file = rootfs.read("/bin");
+            let traversal = rootfs.read("/bin/../etc/motd");
+            let truncated = fs::FileSystem::new(&fs::INITRAMFS[..fs::INITRAMFS.len() - 1]);
+            match (
+                init,
+                motd,
+                bin_directory,
+                etc_directory,
+                init_executable,
+                missing,
+                directory_as_file,
+                traversal,
+                truncated,
+            ) {
+                (
+                    Ok(init),
+                    Ok(motd),
+                    Ok(true),
+                    Ok(true),
+                    Ok(true),
+                    Err(fs::FsError::NotFound),
+                    Err(fs::FsError::NotFile),
+                    Err(fs::FsError::InvalidPath),
+                    Err(fs::FsError::Truncated),
+                ) if init.len() == elf::TEST_ELF.len() && motd == b"Vanta initramfs\n" => {
+                    serial_println!(
+                        "[fs] initramfs self-check passed: entries={} init-bytes={} motd-bytes={}",
+                        rootfs.entry_count(),
+                        init.len(),
+                        motd.len()
+                    );
+                    init
+                }
+                _ => {
+                    serial_println!("[fs] WARNING: initramfs self-check failed");
+                    &[]
+                }
+            }
+        }
+        Err(error) => {
+            serial_println!("[fs] WARNING: initramfs parse failed: {:?}", error);
+            &[]
+        }
+    };
+
     kprintln!("vanta os | kernel terminal");
     kprintln!("-----------------------------------");
 
@@ -231,6 +288,13 @@ pub extern "C" fn _start() -> ! {
     kprintln!("[ok] idt");
     serial_println!("[boot] idt loaded");
 
+    let syscall_ready = syscall::init();
+    if syscall_ready {
+        serial_println!("[boot] syscall ABI configured");
+    } else {
+        serial_println!("[boot] WARNING: syscall ABI configuration failed");
+    }
+
     unsafe {
         let mut pics = interrupts::PICS.lock();
         pics.initialize();
@@ -240,6 +304,60 @@ pub extern "C" fn _start() -> ! {
     x86_64::instructions::interrupts::enable();
     kprintln!("[ok] pic + sti");
     serial_println!("[boot] interrupts enabled");
+
+    match process::load_elf(init_image) {
+        Ok(mut process) => {
+            let entry = process.entry();
+            let entry_translation = paging::translate_in(process.address_space(), entry);
+            let entry_flags = paging::flags_in(process.address_space(), entry).unwrap_or(0);
+            let stack_flags = paging::flags_in(
+                process.address_space(),
+                process.user_stack_top() - memory::PAGE_SIZE,
+            )
+            .unwrap_or(0);
+            let user = entry_flags & paging::MAP_USER != 0;
+            let executable = entry_flags & paging::MAP_NO_EXECUTE == 0;
+            let stack_user = stack_flags & paging::MAP_USER != 0;
+            let stack_no_execute = stack_flags & paging::MAP_NO_EXECUTE != 0;
+            let data_flags =
+                paging::flags_in(process.address_space(), elf::TEST_DATA_ADDRESS).unwrap_or(0);
+            let data_user = data_flags & paging::MAP_USER != 0;
+            let data_writable = data_flags & paging::MAP_WRITABLE != 0;
+            let data_no_execute = data_flags & paging::MAP_NO_EXECUTE != 0;
+            let data_initialized = process.read_user_byte(elf::TEST_DATA_ADDRESS) == Some(b'[');
+            let data_bss_zero = process.read_user_byte(elf::TEST_DATA_ADDRESS + 28) == Some(0);
+            if entry_translation.is_some()
+                && user
+                && executable
+                && stack_user
+                && stack_no_execute
+                && data_user
+                && data_writable
+                && data_no_execute
+                && data_initialized
+                && data_bss_zero
+            {
+                match process.destroy() {
+                    Ok(freed_tables) => serial_println!(
+                        "[proc] ELF load/cleanup self-check passed: entry={:#x} tables-freed={}",
+                        entry,
+                        freed_tables
+                    ),
+                    Err(error) => serial_println!("[proc] cleanup self-check failed: {:?}", error),
+                }
+            } else {
+                serial_println!("[proc] ELF permission self-check failed");
+            }
+        }
+        Err(error) => serial_println!("[proc] ELF load self-check failed: {:?}", error),
+    }
+
+    if syscall_ready {
+        match process::load_elf(init_image) {
+            Ok(process) => unsafe { alloc::boxed::Box::new(process).run() },
+            Err(error) => serial_println!("[proc] user-entry load failed: {:?}", error),
+        }
+    }
 
     shell::run()
 }
