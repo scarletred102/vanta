@@ -14,6 +14,7 @@ struct NetworkState {
     device: VirtioNet,
     gateway_mac: Option<MacAddress>,
     gateway_echoed: bool,
+    dns_replied: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,6 +23,7 @@ pub struct NetworkInfo {
     pub local_ip: Ipv4Address,
     pub gateway_mac: Option<MacAddress>,
     pub gateway_echoed: bool,
+    pub dns_replied: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,6 +31,7 @@ pub enum NetworkError {
     Device(VirtioNetError),
     GatewayUnreachable,
     GatewayNoEcho,
+    DnsUnreachable,
 }
 
 impl From<VirtioNetError> for NetworkError {
@@ -70,16 +73,36 @@ pub fn initialize() -> Result<NetworkInfo, NetworkError> {
         local_ip: LOCAL_IP,
         gateway_mac: Some(gateway_mac),
         gateway_echoed,
+        dns_replied: false,
     };
+    if !info.gateway_echoed {
+        return Err(NetworkError::GatewayNoEcho);
+    }
+    let request = net::udp_dns_query(mac, gateway_mac, LOCAL_IP);
+    device.transmit(&request)?;
+    let mut dns_replied = false;
+    for _ in 0..ARP_POLL_ATTEMPTS {
+        if let Some(frame) = device.receive()? {
+            if net::is_udp_dns_reply(&frame, LOCAL_IP) {
+                dns_replied = true;
+                break;
+            }
+        }
+        core::hint::spin_loop();
+    }
     *NETWORK.lock() = Some(NetworkState {
         device,
         gateway_mac: Some(gateway_mac),
         gateway_echoed,
+        dns_replied,
     });
-    if info.gateway_echoed {
-        Ok(info)
+    if dns_replied {
+        Ok(NetworkInfo {
+            dns_replied,
+            ..info
+        })
     } else {
-        Err(NetworkError::GatewayNoEcho)
+        Err(NetworkError::DnsUnreachable)
     }
 }
 
@@ -90,5 +113,6 @@ pub fn status() -> Option<NetworkInfo> {
         local_ip: LOCAL_IP,
         gateway_mac: state.gateway_mac,
         gateway_echoed: state.gateway_echoed,
+        dns_replied: state.dns_replied,
     })
 }

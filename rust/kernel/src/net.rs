@@ -11,6 +11,8 @@ const ETHERTYPE_IPV4: u16 = 0x0800;
 const ARP_REQUEST: u16 = 1;
 const ARP_REPLY: u16 = 2;
 const IP_PROTOCOL_ICMP: u8 = 1;
+const IP_PROTOCOL_UDP: u8 = 17;
+const QEMU_DNS: Ipv4Address = [10, 0, 2, 3];
 
 pub fn arp_request(
     local_mac: MacAddress,
@@ -112,6 +114,63 @@ pub fn is_icmp_echo_reply(
         && frame[icmp + 1] == 0
         && read_u16(frame, icmp + 4) == Some(identifier)
         && valid_checksum(&frame[icmp..ip + total_length])
+}
+
+pub fn udp_dns_query(
+    local_mac: MacAddress,
+    gateway_mac: MacAddress,
+    local_ip: Ipv4Address,
+) -> [u8; 71] {
+    let mut frame = [0u8; 71];
+    frame[..6].copy_from_slice(&gateway_mac);
+    frame[6..12].copy_from_slice(&local_mac);
+    write_u16(&mut frame, 12, ETHERTYPE_IPV4);
+    let ip = ETHERNET_HEADER_SIZE;
+    frame[ip] = 0x45;
+    write_u16(&mut frame, ip + 2, 57);
+    write_u16(&mut frame, ip + 4, 0x5650);
+    frame[ip + 8] = 64;
+    frame[ip + 9] = IP_PROTOCOL_UDP;
+    frame[ip + 12..ip + 16].copy_from_slice(&local_ip);
+    frame[ip + 16..ip + 20].copy_from_slice(&QEMU_DNS);
+    let header_checksum = checksum(&frame[ip..ip + 20]);
+    write_u16(&mut frame, ip + 10, header_checksum);
+    let udp = ip + 20;
+    write_u16(&mut frame, udp, 49_152);
+    write_u16(&mut frame, udp + 2, 53);
+    write_u16(&mut frame, udp + 4, 37);
+    let dns = udp + 8;
+    write_u16(&mut frame, dns, 0x564e);
+    write_u16(&mut frame, dns + 2, 0x0100);
+    write_u16(&mut frame, dns + 4, 1);
+    frame[dns + 12..dns + 25].copy_from_slice(b"\x07example\x03com\0");
+    write_u16(&mut frame, dns + 25, 1);
+    write_u16(&mut frame, dns + 27, 1);
+    frame
+}
+
+pub fn is_udp_dns_reply(frame: &[u8], local_ip: Ipv4Address) -> bool {
+    let ip = ETHERNET_HEADER_SIZE;
+    if frame.len() < ip + 20 + 8 + 12
+        || read_u16(frame, 12) != Some(ETHERTYPE_IPV4)
+        || frame[ip] >> 4 != 4
+        || frame[ip + 9] != IP_PROTOCOL_UDP
+        || frame[ip + 12..ip + 16] != QEMU_DNS
+        || frame[ip + 16..ip + 20] != local_ip
+        || !valid_checksum(&frame[ip..ip + 20])
+    {
+        return false;
+    }
+    let udp = ip + 20;
+    let udp_length = read_u16(frame, udp + 4).map(usize::from).unwrap_or(0);
+    if udp_length < 20 || frame.len() < udp + udp_length {
+        return false;
+    }
+    let dns = udp + 8;
+    read_u16(frame, udp) == Some(53)
+        && read_u16(frame, udp + 2) == Some(49_152)
+        && read_u16(frame, dns) == Some(0x564e)
+        && read_u16(frame, dns + 2).is_some_and(|flags| flags & 0x8000 != 0)
 }
 
 fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {

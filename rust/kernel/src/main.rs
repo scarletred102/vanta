@@ -246,6 +246,7 @@ pub extern "C" fn _start() -> ! {
     }
 
     let storage_ready = vfs::initialize_root(128)
+        .and_then(|()| vfs::create_dir_root("/etc"))
         .and_then(|()| vfs::write_root("/etc/config", b"vanta-storage"))
         .and_then(|()| vfs::read_root("/etc/config"))
         .map(|bytes| bytes == b"vanta-storage")
@@ -440,7 +441,7 @@ pub extern "C" fn _start() -> ! {
     run_virtio_self_check();
     match network::initialize() {
         Ok(info) => serial_println!(
-            "[net] icmp gateway reply local={}.{}.{}.{} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} gateway={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            "[net] udp dns reply local={}.{}.{}.{} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} gateway={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             info.local_ip[0],
             info.local_ip[1],
             info.local_ip[2],
@@ -464,6 +465,7 @@ pub extern "C" fn _start() -> ! {
         Err(error) => serial_println!("[net] WARNING: bring-up failed: {:?}", error),
     }
     if !init_image.is_empty() {
+        let _ = vfs::create_dir_root("/bin");
         if vfs::write_root("/bin/init", &elf::CHILD_ELF).is_ok() {
             serial_println!("[proc] staged /bin/init for user spawn");
         } else {

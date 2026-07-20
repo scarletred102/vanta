@@ -87,7 +87,7 @@ if ($Virtio) {
     $required += "[storage] virtio-blk ready:"
 }
 if ($Network) {
-    $required += "[net] icmp gateway reply"
+    $required += "[net] udp dns reply"
 }
 
 foreach ($marker in $required) {
