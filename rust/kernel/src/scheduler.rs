@@ -91,6 +91,16 @@ struct Scheduler {
 static SCHEDULER: Mutex<Option<Scheduler>> = Mutex::new(None);
 
 pub unsafe fn start(processes: Vec<Box<Process>>) -> ! {
+    start_on_current_cpu(processes, "started")
+}
+
+pub unsafe fn start_ap_test(process: Box<Process>) -> ! {
+    let mut processes = Vec::with_capacity(1);
+    processes.push(process);
+    start_on_current_cpu(processes, "AP user test started")
+}
+
+unsafe fn start_on_current_cpu(processes: Vec<Box<Process>>, label: &str) -> ! {
     let kernel_space = paging::current_address_space();
     if processes.is_empty() {
         crate::shell::run();
@@ -119,7 +129,7 @@ pub unsafe fn start(processes: Vec<Box<Process>>) -> ! {
     });
 
     let (context, space) = current_target();
-    crate::serial_println!("[sched] started tasks={}", task_count());
+    crate::serial_println!("[sched] {} tasks={}", label, task_count());
     crate::syscall::prepare_user_return(context, space);
     unsafe { crate::gdt::enter_user(context.instruction_pointer, context.stack_pointer) }
 }
@@ -242,6 +252,9 @@ pub fn exit_current(code: u64) -> *const UserContext {
     crate::serial_println!("[sched] task exited: code={} remaining={}", code, remaining);
     let Some((context, space, next)) = next else {
         *SCHEDULER.lock() = None;
+        if crate::smp::ap_user_task_active() {
+            crate::smp::finish_user_task();
+        }
         x86_64::instructions::interrupts::enable();
         crate::shell::run()
     };

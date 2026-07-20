@@ -86,6 +86,8 @@ rust/
 - Local APIC discovery and uncached xAPIC MMIO / x2APIC software enable
 - Limine SMP handoff: per-CPU GDT/TSS/IDT setup, AP acknowledgement, and
   locked kernel-work dispatch before safe AP halt
+- AP user-mode execution handoff: an AP configures its own syscall state, runs
+  an isolated user process to exit, and returns completion to the BSP
 - PS/2 keyboard via `pc-keyboard` scancode decoder
 - Limine memory-map accounting and bounded physical-frame allocator
 - HHDM translation and page-table inspection of Limine's active mappings
@@ -113,7 +115,8 @@ rust/
 - No modern VirtIO PCI transport, filesystem journaling, or networking
 - No mouse, no windowing — terminal only
 - APs have independent descriptor/interrupt-stack state and can execute
-  locked kernel work, but cannot yet run or migrate user tasks
+  isolated handoff tasks, but the scheduler does not yet run user tasks on
+  multiple CPUs concurrently or migrate them between CPUs
 
 ## Verifying the keyboard pipeline without a GUI
 

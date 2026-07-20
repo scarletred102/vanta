@@ -405,6 +405,15 @@ pub extern "C" fn _start() -> ! {
     }
 
     if syscall_ready {
+        if smp.online_aps > 0 {
+            match process::load_elf(init_image) {
+                Ok(process) => {
+                    let completed = smp::run_user_task(Box::new(process));
+                    serial_println!("[smp] AP user task completed={}", completed);
+                }
+                Err(error) => serial_println!("[smp] AP user-task load failed: {:?}", error),
+            }
+        }
         match (process::load_elf(init_image), process::load_elf(init_image)) {
             (Ok(first), Ok(second)) => {
                 let mut tasks = Vec::with_capacity(2);
