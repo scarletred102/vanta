@@ -249,9 +249,22 @@ pub extern "C" fn _start() -> ! {
         .unwrap_or(false)
         && vfs::write_root("/etc/config", b"vanta-vfs-syscall\n").is_ok()
         && vfs::remount_root().is_ok()
-        && vfs::read_root("/etc/config").ok().as_deref() == Some(b"vanta-vfs-syscall\n");
+        && vfs::read_root("/etc/config").ok().as_deref() == Some(b"vanta-vfs-syscall\n")
+        && vfs::write_root("/tmp/lifecycle", b"first").is_ok()
+        && vfs::write_root("/tmp/lifecycle", b"replacement payload").is_ok()
+        && vfs::file_info_root("/tmp/lifecycle").is_ok_and(|info| {
+            info.length == b"replacement payload".len() && info.allocated_sectors == 1
+        })
+        && vfs::rename_root("/tmp/lifecycle", "/tmp/renamed").is_ok()
+        && vfs::read_root("/tmp/lifecycle").is_err()
+        && vfs::read_root("/tmp/renamed").ok().as_deref() == Some(b"replacement payload")
+        && vfs::remove_root("/tmp/renamed").is_ok()
+        && vfs::read_root("/tmp/renamed").is_err()
+        && vfs::remount_root().is_ok();
     if storage_ready {
-        serial_println!("[storage] writable VFS root mounted and persistence self-check passed");
+        serial_println!(
+            "[storage] writable VFS root mounted and lifecycle/remount self-check passed"
+        );
     } else {
         serial_println!("[storage] WARNING: block device/VFS self-check failed");
     }

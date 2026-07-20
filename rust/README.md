@@ -29,6 +29,13 @@ independently in Rust.
 HEADLESS=1 ./run.sh  # serial-only, useful for CI
 ```
 
+Run the checked QEMU regressions from PowerShell:
+
+```powershell
+.\test-qemu.ps1          # RAM-root lifecycle and SMP checks
+.\test-qemu.ps1 -Virtio  # also require persistent legacy VirtIO storage
+```
+
 Requires:
 - rustup with a nightly toolchain (a `rust-toolchain.toml` pins this) on a
   `x86_64-pc-windows-gnu` host
@@ -71,6 +78,7 @@ rust/
       syscall.rs              # per-CPU syscall/sysret entry + VFS/process ABI
       keyboard.rs            # IRQ1 scancode queue
       shell.rs               # decoder + echo loop
+  test-qemu.ps1              # checked two-vCPU QEMU boot regression
   esp/
     EFI/BOOT/BOOTX64.EFI     # Limine UEFI bootloader
     boot/vanta-kernel        # built kernel (gitignored)
@@ -90,8 +98,8 @@ rust/
   MADT processor/IOAPIC/IRQ-override discovery and MCFG region counting
 - Limine SMP handoff: per-CPU GDT/TSS/IDT setup, AP acknowledgement, and
   locked kernel-work dispatch before safe AP halt
-- AP user-mode execution handoff: an AP configures its own syscall state, runs
-  an isolated user process to exit, and returns completion to the BSP
+- Concurrent AP user-mode scheduling with isolated per-CPU run queues, global
+  PIDs, and local-APIC timer preemption verified in two-vCPU QEMU
 - PS/2 keyboard via `pc-keyboard` scancode decoder
 - Limine memory-map accounting and bounded physical-frame allocator
 - HHDM translation and page-table inspection of Limine's active mappings
@@ -114,7 +122,7 @@ rust/
 - Timer-preemptive round-robin scheduler with complete callee-saved user
   context across timer and voluntary syscall switches
 - Per-CPU syscall stacks and return state selected through the kernel GS base
-- Round-robin address-space switching and per-process exit reclamation
+- Per-CPU round-robin address-space switching and per-process exit reclamation
 - User process exit switches back to the kernel address space and reclaims it
 - Read-only CPIO `newc` initramfs with `/bin/init` and `/etc/motd` lookup
 - Filesystem-backed `/bin/init` loading through the ELF/process path
@@ -125,17 +133,16 @@ rust/
 - Persistent VantaFS auto-format/mount on an attached legacy VirtIO disk,
   verified through an attached-disk write/read round trip and a second boot
 - In-kernel shell with editable input and `help`, `status`, dynamic `ls`,
-  `cat`, `write`, and `clear` commands over the mounted VFS root
+  `cat`, `write`, `stat`, `mv`, `rm`, `run`, and `clear` commands over the
+  mounted VFS root; `run` launches a VFS-backed ring-3 ELF
 
 ## What does not (yet)
 
 - No copy-on-write `fork` yet
 - No slab allocator yet; the bootstrap free-list has fixed metadata capacity
-- No modern VirtIO PCI transport, filesystem journaling, or networking
+- No modern VirtIO PCI transport, filesystem journaling, directories, or networking
 - No mouse, no windowing — terminal only
-- APs have independent descriptor/interrupt-stack state and can execute
-  isolated handoff tasks, but the scheduler does not yet run user tasks on
-  multiple CPUs concurrently or migrate them between CPUs
+- No SMP task migration, load balancing, or idle-CPU wake IPIs yet
 
 ## Verifying the keyboard pipeline without a GUI
 
