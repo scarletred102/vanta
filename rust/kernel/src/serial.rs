@@ -19,10 +19,7 @@ pub fn init() {
 pub fn _print(args: fmt::Arguments) {
     use x86_64::instructions::interrupts;
     interrupts::without_interrupts(|| {
-        SERIAL1
-            .lock()
-            .write_fmt(args)
-            .expect("serial write failed");
+        SERIAL1.lock().write_fmt(args).expect("serial write failed");
     });
 }
 

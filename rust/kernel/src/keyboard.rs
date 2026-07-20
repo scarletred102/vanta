@@ -1,5 +1,5 @@
-use heapless::mpmc::Q64;
 use core::sync::atomic::{AtomicU32, Ordering};
+use heapless::mpmc::Q64;
 
 static SCANCODE_QUEUE: Q64<u8> = Q64::new();
 static IRQ_COUNT: AtomicU32 = AtomicU32::new(0);
