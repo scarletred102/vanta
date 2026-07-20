@@ -61,7 +61,9 @@ impl Writer {
     }
 
     fn put_pixel(&mut self, x: usize, y: usize, rgb: [u8; 3]) {
-        if x >= self.width || y >= self.height { return; }
+        if x >= self.width || y >= self.height {
+            return;
+        }
         let off = y * self.pitch + x * self.bpp;
         let val = self.encode(rgb);
         unsafe {
@@ -69,8 +71,12 @@ impl Writer {
                 4 => core::ptr::write_volatile(self.addr.add(off) as *mut u32, val),
                 3 => {
                     self.addr.add(off).write_volatile((val & 0xff) as u8);
-                    self.addr.add(off + 1).write_volatile(((val >> 8) & 0xff) as u8);
-                    self.addr.add(off + 2).write_volatile(((val >> 16) & 0xff) as u8);
+                    self.addr
+                        .add(off + 1)
+                        .write_volatile(((val >> 8) & 0xff) as u8);
+                    self.addr
+                        .add(off + 2)
+                        .write_volatile(((val >> 16) & 0xff) as u8);
                 }
                 2 => core::ptr::write_volatile(self.addr.add(off) as *mut u16, val as u16),
                 _ => {}
@@ -154,7 +160,9 @@ fn blend(bg: [u8; 3], fg: [u8; 3], a: u8) -> [u8; 3] {
 
 impl fmt::Write for Writer {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        for c in s.chars() { self.write_char(c); }
+        for c in s.chars() {
+            self.write_char(c);
+        }
         Ok(())
     }
 }
@@ -176,7 +184,9 @@ pub fn with_writer<F: FnOnce(&mut Writer)>(f: F) {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    with_writer(|w| { let _ = w.write_fmt(args); });
+    with_writer(|w| {
+        let _ = w.write_fmt(args);
+    });
 }
 
 #[macro_export]
