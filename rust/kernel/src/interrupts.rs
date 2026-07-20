@@ -151,6 +151,10 @@ extern "C" fn vanta_timer_tick(
     } else {
         unsafe { PICS.lock().notify_end_of_interrupt(HwIrq::Timer.as_u8()) };
     }
+    if crate::smp::is_application_processor() {
+        crate::smp::note_ap_timer_tick();
+        crate::apic::rearm_timer();
+    }
     crate::scheduler::timer_tick(context)
 }
 

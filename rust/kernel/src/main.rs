@@ -479,12 +479,24 @@ pub extern "C" fn _start() -> ! {
 
     if syscall_ready {
         if smp.online_aps > 0 {
-            match process::load_elf(&elf::EXEC_ELF) {
-                Ok(process) => {
-                    let completed = smp::run_user_task(Box::new(process));
-                    serial_println!("[smp] AP exec task completed={}", completed);
+            match (
+                process::load_elf(&elf::EXEC_ELF),
+                process::load_elf(&elf::EXEC_ELF),
+            ) {
+                (Ok(first), Ok(second)) => {
+                    let mut tasks = Vec::with_capacity(2);
+                    tasks.push(Box::new(first));
+                    tasks.push(Box::new(second));
+                    let queued = smp::enqueue_user_tasks(tasks);
+                    serial_println!(
+                        "[smp] queued AP run queue={} dispatched={}",
+                        queued,
+                        smp::dispatched_user_tasks()
+                    );
                 }
-                Err(error) => serial_println!("[smp] AP user-task load failed: {:?}", error),
+                (Err(error), _) | (_, Err(error)) => {
+                    serial_println!("[smp] AP user-task load failed: {:?}", error)
+                }
             }
         }
         match (process::load_elf(init_image), process::load_elf(init_image)) {
