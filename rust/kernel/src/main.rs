@@ -10,6 +10,7 @@ use core::alloc::Layout;
 use core::panic::PanicInfo;
 use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, MpRequest};
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
+use storage::BlockDevice;
 
 mod apic;
 mod elf;
@@ -29,6 +30,7 @@ mod smp;
 mod storage;
 mod syscall;
 mod vfs;
+mod virtio;
 
 #[used]
 #[link_section = ".requests"]
@@ -353,6 +355,7 @@ pub extern "C" fn _start() -> ! {
     x86_64::instructions::interrupts::enable();
     kprintln!("[ok] pic + sti");
     serial_println!("[boot] interrupts enabled");
+    run_virtio_self_check();
 
     match process::load_elf(init_image) {
         Ok(mut process) => {
@@ -416,6 +419,52 @@ pub extern "C" fn _start() -> ! {
     }
 
     shell::run()
+}
+
+fn run_virtio_self_check() {
+    match virtio::VirtioBlock::probe() {
+        Ok(mut device) => {
+            let sectors = device.sector_count();
+            let mut written = [0u8; storage::SECTOR_SIZE];
+            written[..16].copy_from_slice(b"vanta-virtio-ok\n");
+            let write_ok = device.write_sector(32, &written).is_ok();
+            let mut read_back = [0u8; storage::SECTOR_SIZE];
+            let read_ok = device.read_sector(32, &mut read_back).is_ok();
+            let mount = vfs::mount_virtio_root(device);
+            let root_ready = match mount {
+                Ok(existed) => {
+                    let previous = vfs::read_root("/etc/persistent").ok();
+                    let expected = b"vanta-persistent-vfs\n";
+                    let persisted = vfs::write_root("/etc/persistent", expected).is_ok()
+                        && vfs::remount_root().is_ok()
+                        && vfs::read_root("/etc/persistent").ok().as_deref() == Some(expected);
+                    serial_println!(
+                        "[storage] persistent VFS mounted: existed={} prior-bytes={} remount={}",
+                        existed,
+                        previous.as_ref().map_or(0, Vec::len),
+                        persisted
+                    );
+                    persisted
+                }
+                Err(error) => {
+                    serial_println!("[storage] persistent VFS mount failed: {:?}", error);
+                    false
+                }
+            };
+            serial_println!(
+                "[storage] virtio-blk ready: sectors={} write={} read={} equal={} root={}",
+                sectors,
+                write_ok,
+                read_ok,
+                read_back == written,
+                root_ready
+            );
+        }
+        Err(virtio::VirtioError::NotFound) => {
+            serial_println!("[storage] no VirtIO block device; using RAM bootstrap disk");
+        }
+        Err(error) => serial_println!("[storage] VirtIO block probe failed: {:?}", error),
+    }
 }
 
 #[alloc_error_handler]

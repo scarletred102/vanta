@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::storage::{BlockDevice, RamDisk, StorageError, SECTOR_SIZE};
+use crate::virtio::VirtioBlock;
 
 const MAGIC: &[u8; 8] = b"VANTA1FS";
 const SUPERBLOCK_SECTOR: u64 = 0;
@@ -14,7 +15,39 @@ const MAX_DIRECTORY_ENTRIES: usize = 8;
 const DIRECTORY_ENTRY_SIZE: usize = 64;
 const MAX_PATH_LENGTH: usize = 48;
 
-static ROOT: Mutex<Vfs<RamDisk>> = Mutex::new(Vfs::new());
+static ROOT: Mutex<Vfs<RootDevice>> = Mutex::new(Vfs::new());
+
+pub enum RootDevice {
+    Ram(RamDisk),
+    Virtio(VirtioBlock),
+}
+
+impl BlockDevice for RootDevice {
+    fn sector_count(&self) -> u64 {
+        match self {
+            Self::Ram(device) => device.sector_count(),
+            Self::Virtio(device) => device.sector_count(),
+        }
+    }
+
+    fn read_sector(&self, sector: u64, buffer: &mut [u8; SECTOR_SIZE]) -> Result<(), StorageError> {
+        match self {
+            Self::Ram(device) => device.read_sector(sector, buffer),
+            Self::Virtio(device) => device.read_sector(sector, buffer),
+        }
+    }
+
+    fn write_sector(
+        &mut self,
+        sector: u64,
+        buffer: &[u8; SECTOR_SIZE],
+    ) -> Result<(), StorageError> {
+        match self {
+            Self::Ram(device) => device.write_sector(sector, buffer),
+            Self::Virtio(device) => device.write_sector(sector, buffer),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VfsError {
@@ -100,6 +133,22 @@ impl<D: BlockDevice> VantaFs<D> {
             sector_count: device.sector_count(),
             device,
         })
+    }
+
+    pub fn mount_or_format(device: D) -> Result<(Self, bool), VfsError> {
+        let mut superblock = [0u8; SECTOR_SIZE];
+        device.read_sector(SUPERBLOCK_SECTOR, &mut superblock)?;
+        let formatted = &superblock[..MAGIC.len()] == MAGIC
+            && get_u32(&superblock, 8) == 1
+            && get_u32(&superblock, 12) == SECTOR_SIZE as u32
+            && get_u64(&superblock, 16) == device.sector_count()
+            && get_u32(&superblock, 24) == DIRECTORY_SECTOR as u32
+            && get_u32(&superblock, 28) == MAX_DIRECTORY_ENTRIES as u32;
+        if formatted {
+            Ok((Self::mount(device)?, true))
+        } else {
+            Ok((Self::format(device)?, false))
+        }
     }
 
     pub fn into_device(self) -> D {
@@ -261,6 +310,10 @@ impl<D: BlockDevice> Vfs<D> {
         self.root.take().ok_or(VfsError::NotMounted)
     }
 
+    pub fn replace_root(&mut self, filesystem: VantaFs<D>) {
+        self.root = Some(filesystem);
+    }
+
     pub fn read(&mut self, path: &str) -> Result<Vec<u8>, VfsError> {
         self.root
             .as_mut()
@@ -278,8 +331,14 @@ impl<D: BlockDevice> Vfs<D> {
 
 pub fn initialize_root(sectors: u64) -> Result<(), VfsError> {
     let disk = RamDisk::new(sectors).map_err(VfsError::Storage)?;
-    let filesystem = VantaFs::format(disk)?;
+    let filesystem = VantaFs::format(RootDevice::Ram(disk))?;
     ROOT.lock().mount_root(filesystem)
+}
+
+pub fn mount_virtio_root(device: VirtioBlock) -> Result<bool, VfsError> {
+    let (filesystem, existed) = VantaFs::mount_or_format(RootDevice::Virtio(device))?;
+    ROOT.lock().replace_root(filesystem);
+    Ok(existed)
 }
 
 pub fn remount_root() -> Result<(), VfsError> {

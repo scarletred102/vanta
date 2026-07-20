@@ -53,7 +53,8 @@ rust/
       elf.rs                 # ELF64 parser + embedded CPL3 test image
       fs.rs                  # read-only CPIO newc initramfs
       storage.rs             # sector block-device trait + RAM block driver
-      vfs.rs                 # writable VantaFS volume + root mount
+      virtio.rs              # legacy VirtIO PCI block driver + DMA split ring
+      vfs.rs                 # writable VantaFS volume + RAM/VirtIO root mount
       serial.rs              # COM1 logger
       gdt.rs                 # per-CPU GDT/TSS/stacks + ring-3 entry
       interrupts.rs          # IDT, PIC/PIT, exception + IRQ handlers
@@ -99,15 +100,17 @@ rust/
 - User process exit switches back to the kernel address space and reclaims it
 - Read-only CPIO `newc` initramfs with `/bin/init` and `/etc/motd` lookup
 - Filesystem-backed `/bin/init` loading through the ELF/process path
-- Sector block-device abstraction with a writable RAM-disk implementation
+- Sector block-device abstraction with RAM and legacy VirtIO PCI drivers
 - Writable VantaFS root mount with remount/persistence self-checks
+- Persistent VantaFS auto-format/mount on an attached legacy VirtIO disk,
+  verified through an attached-disk write/read round trip and a second boot
 - In-kernel shell: prompt, echo, backspace, newline
 
 ## What does not (yet)
 
 - No fork/exec or process creation beyond the boot-time test workload yet
 - No slab allocator yet; the bootstrap free-list has fixed metadata capacity
-- No VirtIO/persistent block driver, filesystem journaling, or networking
+- No modern VirtIO PCI transport, filesystem journaling, or networking
 - No mouse, no windowing — terminal only
 - APs have independent descriptor/interrupt-stack state and can execute
   locked kernel work, but cannot yet run or migrate user tasks
