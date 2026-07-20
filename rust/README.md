@@ -99,6 +99,8 @@ rust/
   `lseek`, `dup`, `getpid`, `yield`, and `exit` calls
 - Per-process descriptor tables with Linux-style shared open-file offsets for
   duplicated descriptors
+- Conventional descriptor numbers: `0` stdin, `1` stdout, `2` stderr, and
+  VFS opens beginning at `3`
 - Timer-preemptive round-robin scheduler with full user interrupt contexts
 - Per-CPU syscall stacks and return state selected through the kernel GS base
 - Round-robin address-space switching and per-process exit reclamation

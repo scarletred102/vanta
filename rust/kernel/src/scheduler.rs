@@ -123,7 +123,7 @@ unsafe fn start_on_current_cpu(processes: Vec<Box<Process>>, label: &str) -> ! {
             },
             interrupt_context: InterruptContext::initial(process.entry(), process.user_stack_top()),
             process: Some(process),
-            descriptors: Vec::new(),
+            descriptors: alloc::vec![None, None, None],
         })
         .collect();
     *SCHEDULER.lock() = Some(Scheduler {
@@ -359,7 +359,7 @@ fn install_descriptor(
     descriptors: &mut Vec<Option<FileDescriptor>>,
     descriptor: FileDescriptor,
 ) -> Result<u64, ()> {
-    const MAX_DESCRIPTORS: usize = 4;
+    const MAX_DESCRIPTORS: usize = 5;
     if let Some((index, slot)) = descriptors
         .iter_mut()
         .enumerate()
