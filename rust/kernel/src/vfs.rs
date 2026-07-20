@@ -1,5 +1,6 @@
 //! Writable VantaFS volume and root VFS mount.
 
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -211,6 +212,19 @@ impl<D: BlockDevice> VantaFs<D> {
         self.write_record(index, record)
     }
 
+    pub fn list_files(&mut self) -> Result<Vec<String>, VfsError> {
+        let records = self.records()?;
+        let mut paths = Vec::new();
+        for record in records.iter().filter(|record| record.name_length != 0) {
+            let name = core::str::from_utf8(&record.name[..record.name_length])
+                .map_err(|_| VfsError::InvalidFormat)?;
+            let mut path = String::from("/");
+            path.push_str(name);
+            paths.push(path);
+        }
+        Ok(paths)
+    }
+
     fn find_record(&mut self, path: &[u8]) -> Result<Option<(usize, FileRecord)>, VfsError> {
         let records = self.records()?;
         Ok(records
@@ -327,6 +341,10 @@ impl<D: BlockDevice> Vfs<D> {
             .ok_or(VfsError::NotMounted)?
             .write_file(path, data)
     }
+
+    pub fn list(&mut self) -> Result<Vec<String>, VfsError> {
+        self.root.as_mut().ok_or(VfsError::NotMounted)?.list_files()
+    }
 }
 
 pub fn initialize_root(sectors: u64) -> Result<(), VfsError> {
@@ -353,6 +371,10 @@ pub fn read_root(path: &str) -> Result<Vec<u8>, VfsError> {
 
 pub fn write_root(path: &str, data: &[u8]) -> Result<(), VfsError> {
     ROOT.lock().write(path, data)
+}
+
+pub fn list_root() -> Result<Vec<String>, VfsError> {
+    ROOT.lock().list()
 }
 
 fn normalize_path(path: &str) -> Result<&[u8], VfsError> {

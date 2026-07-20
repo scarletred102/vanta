@@ -449,7 +449,13 @@ fn run_virtio_self_check() {
                         && vfs::write_root("/etc/persistent", expected).is_ok()
                         && vfs::remount_root().is_ok()
                         && vfs::read_root("/etc/config").ok().as_deref() == Some(config)
-                        && vfs::read_root("/etc/persistent").ok().as_deref() == Some(expected);
+                        && vfs::read_root("/etc/persistent").ok().as_deref() == Some(expected)
+                        && vfs::list_root()
+                            .map(|paths| {
+                                paths.iter().any(|path| path == "/etc/config")
+                                    && paths.iter().any(|path| path == "/etc/persistent")
+                            })
+                            .unwrap_or(false);
                     serial_println!(
                         "[storage] persistent VFS mounted: existed={} prior-bytes={} remount={}",
                         existed,

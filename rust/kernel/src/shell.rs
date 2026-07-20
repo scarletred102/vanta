@@ -78,12 +78,16 @@ fn execute(command: &str) {
         "status" => {
             kprintln!("kernel: rust-native | userspace: ring 3 | storage: VantaFS");
         }
-        "ls" => {
-            kprintln!("/etc/config");
-            kprintln!("/etc/persistent");
-        }
-        "cat /etc/config" | "cat /etc/persistent" => {
-            let path = command.strip_prefix("cat ").expect("known cat command");
+        "ls" => match crate::vfs::list_root() {
+            Ok(paths) => {
+                for path in paths {
+                    kprintln!("{}", path);
+                }
+            }
+            Err(_) => kprintln!("ls: VFS unavailable"),
+        },
+        command if command.starts_with("cat ") => {
+            let path = command.strip_prefix("cat ").expect("cat command");
             match crate::vfs::read_root(path) {
                 Ok(contents) => {
                     let needs_newline = contents.last().copied() != Some(b'\n');
@@ -95,6 +99,16 @@ fn execute(command: &str) {
                     }
                 }
                 Err(_) => kprintln!("{}: not found", path),
+            }
+        }
+        command if command.starts_with("write ") => {
+            let Some((path, contents)) = command[6..].split_once(' ') else {
+                kprintln!("usage: write <path> <text>");
+                return;
+            };
+            match crate::vfs::write_root(path, contents.as_bytes()) {
+                Ok(()) => kprintln!("wrote {} bytes to {}", contents.len(), path),
+                Err(_) => kprintln!("write: failed for {}", path),
             }
         }
         "clear" => kprint!("\x1b[2J\x1b[H"),
