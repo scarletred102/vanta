@@ -58,8 +58,15 @@ pub enum VfsError {
     InvalidPath,
     NameTooLong,
     NotFound,
+    AlreadyExists,
     NoSpace,
     FileTooLarge,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileInfo {
+    pub length: usize,
+    pub allocated_sectors: u32,
 }
 
 impl From<StorageError> for VfsError {
@@ -182,8 +189,8 @@ impl<D: BlockDevice> VantaFs<D> {
             .map_err(|_| VfsError::FileTooLarge)?;
         let existing = self.find_record(path)?;
         let (index, mut record) = if let Some((index, mut record)) = existing {
-            if record.sector_count < required_sectors {
-                record.start_sector = self.allocate(required_sectors)?;
+            if record.sector_count != required_sectors {
+                record.start_sector = self.allocate(required_sectors, Some(index))?;
                 record.sector_count = required_sectors;
             }
             (index, record)
@@ -192,7 +199,7 @@ impl<D: BlockDevice> VantaFs<D> {
             let mut record = FileRecord::empty();
             record.name[..path.len()].copy_from_slice(path);
             record.name_length = path.len();
-            record.start_sector = self.allocate(required_sectors)?;
+            record.start_sector = self.allocate(required_sectors, None)?;
             record.sector_count = required_sectors;
             (index, record)
         };
@@ -210,6 +217,37 @@ impl<D: BlockDevice> VantaFs<D> {
                 .write_sector(record.start_sector as u64 + offset as u64, &sector)?;
         }
         self.write_record(index, record)
+    }
+
+    pub fn remove_file(&mut self, path: &str) -> Result<(), VfsError> {
+        let path = normalize_path(path)?;
+        let (index, _) = self.find_record(path)?.ok_or(VfsError::NotFound)?;
+        self.clear_record(index)
+    }
+
+    pub fn rename_file(&mut self, old_path: &str, new_path: &str) -> Result<(), VfsError> {
+        let old_path = normalize_path(old_path)?;
+        let new_path = normalize_path(new_path)?;
+        if old_path == new_path {
+            return Ok(());
+        }
+        let (index, mut record) = self.find_record(old_path)?.ok_or(VfsError::NotFound)?;
+        if self.find_record(new_path)?.is_some() {
+            return Err(VfsError::AlreadyExists);
+        }
+        record.name.fill(0);
+        record.name[..new_path.len()].copy_from_slice(new_path);
+        record.name_length = new_path.len();
+        self.write_record(index, record)
+    }
+
+    pub fn file_info(&mut self, path: &str) -> Result<FileInfo, VfsError> {
+        let path = normalize_path(path)?;
+        let (_, record) = self.find_record(path)?.ok_or(VfsError::NotFound)?;
+        Ok(FileInfo {
+            length: record.length,
+            allocated_sectors: record.sector_count,
+        })
     }
 
     pub fn list_files(&mut self) -> Result<Vec<String>, VfsError> {
@@ -240,8 +278,15 @@ impl<D: BlockDevice> VantaFs<D> {
         let mut records = [FileRecord::empty(); MAX_DIRECTORY_ENTRIES];
         for (index, record) in records.iter_mut().enumerate() {
             let offset = index * DIRECTORY_ENTRY_SIZE;
+            let active = sector[offset];
+            if active == 0 {
+                continue;
+            }
+            if active != 1 {
+                return Err(VfsError::InvalidFormat);
+            }
             record.name_length = sector[offset + 1] as usize;
-            if record.name_length > MAX_PATH_LENGTH {
+            if record.name_length == 0 || record.name_length > MAX_PATH_LENGTH {
                 return Err(VfsError::InvalidFormat);
             }
             record
@@ -259,6 +304,9 @@ impl<D: BlockDevice> VantaFs<D> {
                 && (record.start_sector < FIRST_DATA_SECTOR
                     || record.start_sector as u64 + record.sector_count as u64 > self.sector_count)
             {
+                return Err(VfsError::InvalidFormat);
+            }
+            if record.length > record.sector_count as usize * SECTOR_SIZE {
                 return Err(VfsError::InvalidFormat);
             }
         }
@@ -283,6 +331,15 @@ impl<D: BlockDevice> VantaFs<D> {
         Ok(())
     }
 
+    fn clear_record(&mut self, index: usize) -> Result<(), VfsError> {
+        let mut sector = [0u8; SECTOR_SIZE];
+        self.device.read_sector(DIRECTORY_SECTOR, &mut sector)?;
+        let offset = index * DIRECTORY_ENTRY_SIZE;
+        sector[offset..offset + DIRECTORY_ENTRY_SIZE].fill(0);
+        self.device.write_sector(DIRECTORY_SECTOR, &sector)?;
+        Ok(())
+    }
+
     fn first_free_index(&mut self) -> Result<usize, VfsError> {
         self.records()?
             .iter()
@@ -290,16 +347,25 @@ impl<D: BlockDevice> VantaFs<D> {
             .ok_or(VfsError::NoSpace)
     }
 
-    fn allocate(&mut self, sectors: u32) -> Result<u32, VfsError> {
+    fn allocate(&mut self, sectors: u32, ignored_index: Option<usize>) -> Result<u32, VfsError> {
         let records = self.records()?;
-        let mut next = FIRST_DATA_SECTOR;
-        for record in records.iter().filter(|record| record.name_length != 0) {
-            next = next.max(record.start_sector.saturating_add(record.sector_count));
+        let last_start = self
+            .sector_count
+            .checked_sub(sectors as u64)
+            .ok_or(VfsError::NoSpace)?;
+        for candidate in FIRST_DATA_SECTOR as u64..=last_start {
+            let end = candidate + sectors as u64;
+            let available = records.iter().enumerate().all(|(index, record)| {
+                index == ignored_index.unwrap_or(usize::MAX)
+                    || record.name_length == 0
+                    || end <= record.start_sector as u64
+                    || candidate >= record.start_sector as u64 + record.sector_count as u64
+            });
+            if available {
+                return candidate.try_into().map_err(|_| VfsError::NoSpace);
+            }
         }
-        if next as u64 + sectors as u64 > self.sector_count {
-            return Err(VfsError::NoSpace);
-        }
-        Ok(next)
+        Err(VfsError::NoSpace)
     }
 }
 
@@ -345,6 +411,27 @@ impl<D: BlockDevice> Vfs<D> {
     pub fn list(&mut self) -> Result<Vec<String>, VfsError> {
         self.root.as_mut().ok_or(VfsError::NotMounted)?.list_files()
     }
+
+    pub fn remove(&mut self, path: &str) -> Result<(), VfsError> {
+        self.root
+            .as_mut()
+            .ok_or(VfsError::NotMounted)?
+            .remove_file(path)
+    }
+
+    pub fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), VfsError> {
+        self.root
+            .as_mut()
+            .ok_or(VfsError::NotMounted)?
+            .rename_file(old_path, new_path)
+    }
+
+    pub fn info(&mut self, path: &str) -> Result<FileInfo, VfsError> {
+        self.root
+            .as_mut()
+            .ok_or(VfsError::NotMounted)?
+            .file_info(path)
+    }
 }
 
 pub fn initialize_root(sectors: u64) -> Result<(), VfsError> {
@@ -375,6 +462,18 @@ pub fn write_root(path: &str, data: &[u8]) -> Result<(), VfsError> {
 
 pub fn list_root() -> Result<Vec<String>, VfsError> {
     ROOT.lock().list()
+}
+
+pub fn remove_root(path: &str) -> Result<(), VfsError> {
+    ROOT.lock().remove(path)
+}
+
+pub fn rename_root(old_path: &str, new_path: &str) -> Result<(), VfsError> {
+    ROOT.lock().rename(old_path, new_path)
+}
+
+pub fn file_info_root(path: &str) -> Result<FileInfo, VfsError> {
+    ROOT.lock().info(path)
 }
 
 fn normalize_path(path: &str) -> Result<&[u8], VfsError> {

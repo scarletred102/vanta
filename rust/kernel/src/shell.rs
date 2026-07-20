@@ -1,4 +1,6 @@
+use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::{keyboard, kprint, kprintln, serial_println};
 use pc_keyboard::{layouts::Us104Key, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
@@ -73,7 +75,8 @@ fn execute(command: &str) {
     match command {
         "" => {}
         "help" => {
-            kprintln!("help  status  ls  cat /etc/config  cat /etc/persistent  clear");
+            kprintln!("help  status  ls  cat <path>  write <path> <text>");
+            kprintln!("stat <path>  mv <old> <new>  rm <path>  run <path>  clear");
         }
         "status" => {
             kprintln!("kernel: rust-native | userspace: ring 3 spawn/wait/exec | storage: VantaFS");
@@ -110,6 +113,57 @@ fn execute(command: &str) {
                 Ok(()) => kprintln!("wrote {} bytes to {}", contents.len(), path),
                 Err(_) => kprintln!("write: failed for {}", path),
             }
+        }
+        command if command.starts_with("stat ") => {
+            let path = command.strip_prefix("stat ").expect("stat command");
+            match crate::vfs::file_info_root(path) {
+                Ok(info) => kprintln!(
+                    "{}: {} bytes ({} sector{})",
+                    path,
+                    info.length,
+                    info.allocated_sectors,
+                    if info.allocated_sectors == 1 { "" } else { "s" }
+                ),
+                Err(_) => kprintln!("{}: not found", path),
+            }
+        }
+        command if command.starts_with("mv ") => {
+            let Some((old_path, new_path)) = command[3..].split_once(' ') else {
+                kprintln!("usage: mv <old> <new>");
+                return;
+            };
+            match crate::vfs::rename_root(old_path, new_path) {
+                Ok(()) => kprintln!("renamed {} to {}", old_path, new_path),
+                Err(_) => kprintln!("mv: failed for {}", old_path),
+            }
+        }
+        command if command.starts_with("rm ") => {
+            let path = command.strip_prefix("rm ").expect("rm command");
+            match crate::vfs::remove_root(path) {
+                Ok(()) => kprintln!("removed {}", path),
+                Err(_) => kprintln!("rm: failed for {}", path),
+            }
+        }
+        command if command.starts_with("run ") => {
+            let path = command.strip_prefix("run ").expect("run command");
+            let image = match crate::vfs::read_root(path) {
+                Ok(image) => image,
+                Err(_) => {
+                    kprintln!("run: {}: not found", path);
+                    return;
+                }
+            };
+            let process = match crate::process::load_elf(&image) {
+                Ok(process) => process,
+                Err(_) => {
+                    kprintln!("run: {}: not an executable", path);
+                    return;
+                }
+            };
+            kprintln!("starting {}", path);
+            let mut processes = Vec::with_capacity(1);
+            processes.push(Box::new(process));
+            unsafe { crate::scheduler::start(processes) }
         }
         "clear" => kprint!("\x1b[2J\x1b[H"),
         _ => kprintln!("{}: command not found", command),
