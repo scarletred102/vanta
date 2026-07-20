@@ -17,6 +17,7 @@ const DIRECTORY_ENTRY_SIZE: usize = 64;
 const MAX_PATH_LENGTH: usize = 48;
 
 static ROOT: Mutex<Vfs<RootDevice>> = Mutex::new(Vfs::new());
+static TMP: Mutex<Option<VantaFs<RamDisk>>> = Mutex::new(None);
 
 pub enum RootDevice {
     Ram(RamDisk),
@@ -59,6 +60,8 @@ pub enum VfsError {
     NameTooLong,
     NotFound,
     AlreadyExists,
+    IsDirectory,
+    NotEmpty,
     NoSpace,
     FileTooLarge,
 }
@@ -67,6 +70,13 @@ pub enum VfsError {
 pub struct FileInfo {
     pub length: usize,
     pub allocated_sectors: u32,
+    pub is_directory: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum EntryKind {
+    File,
+    Directory,
 }
 
 impl From<StorageError> for VfsError {
@@ -77,6 +87,7 @@ impl From<StorageError> for VfsError {
 
 #[derive(Clone, Copy)]
 struct FileRecord {
+    kind: EntryKind,
     name: [u8; MAX_PATH_LENGTH],
     name_length: usize,
     start_sector: u32,
@@ -87,6 +98,7 @@ struct FileRecord {
 impl FileRecord {
     const fn empty() -> Self {
         Self {
+            kind: EntryKind::File,
             name: [0; MAX_PATH_LENGTH],
             name_length: 0,
             start_sector: 0,
@@ -166,6 +178,9 @@ impl<D: BlockDevice> VantaFs<D> {
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, VfsError> {
         let path = normalize_path(path)?;
         let (_, record) = self.find_record(path)?.ok_or(VfsError::NotFound)?;
+        if record.kind == EntryKind::Directory {
+            return Err(VfsError::IsDirectory);
+        }
         let mut data = vec![0u8; record.length];
         let mut sector = [0u8; SECTOR_SIZE];
         let mut copied = 0;
@@ -189,6 +204,9 @@ impl<D: BlockDevice> VantaFs<D> {
             .map_err(|_| VfsError::FileTooLarge)?;
         let existing = self.find_record(path)?;
         let (index, mut record) = if let Some((index, mut record)) = existing {
+            if record.kind == EntryKind::Directory {
+                return Err(VfsError::IsDirectory);
+            }
             if record.sector_count != required_sectors {
                 record.start_sector = self.allocate(required_sectors, Some(index))?;
                 record.sector_count = required_sectors;
@@ -221,8 +239,24 @@ impl<D: BlockDevice> VantaFs<D> {
 
     pub fn remove_file(&mut self, path: &str) -> Result<(), VfsError> {
         let path = normalize_path(path)?;
-        let (index, _) = self.find_record(path)?.ok_or(VfsError::NotFound)?;
+        let (index, record) = self.find_record(path)?.ok_or(VfsError::NotFound)?;
+        if record.kind == EntryKind::Directory && self.has_children(path)? {
+            return Err(VfsError::NotEmpty);
+        }
         self.clear_record(index)
+    }
+
+    pub fn create_dir(&mut self, path: &str) -> Result<(), VfsError> {
+        let path = normalize_path(path)?;
+        if self.find_record(path)?.is_some() {
+            return Err(VfsError::AlreadyExists);
+        }
+        let index = self.first_free_index()?;
+        let mut record = FileRecord::empty();
+        record.kind = EntryKind::Directory;
+        record.name[..path.len()].copy_from_slice(path);
+        record.name_length = path.len();
+        self.write_record(index, record)
     }
 
     pub fn rename_file(&mut self, old_path: &str, new_path: &str) -> Result<(), VfsError> {
@@ -232,6 +266,9 @@ impl<D: BlockDevice> VantaFs<D> {
             return Ok(());
         }
         let (index, mut record) = self.find_record(old_path)?.ok_or(VfsError::NotFound)?;
+        if record.kind == EntryKind::Directory && self.has_children(old_path)? {
+            return Err(VfsError::NotEmpty);
+        }
         if self.find_record(new_path)?.is_some() {
             return Err(VfsError::AlreadyExists);
         }
@@ -247,6 +284,7 @@ impl<D: BlockDevice> VantaFs<D> {
         Ok(FileInfo {
             length: record.length,
             allocated_sectors: record.sector_count,
+            is_directory: record.kind == EntryKind::Directory,
         })
     }
 
@@ -258,6 +296,9 @@ impl<D: BlockDevice> VantaFs<D> {
                 .map_err(|_| VfsError::InvalidFormat)?;
             let mut path = String::from("/");
             path.push_str(name);
+            if record.kind == EntryKind::Directory {
+                path.push('/');
+            }
             paths.push(path);
         }
         Ok(paths)
@@ -272,6 +313,15 @@ impl<D: BlockDevice> VantaFs<D> {
             .map(|(index, record)| (index, *record)))
     }
 
+    fn has_children(&mut self, path: &[u8]) -> Result<bool, VfsError> {
+        let records = self.records()?;
+        Ok(records.iter().any(|record| {
+            record.name_length > path.len()
+                && record.name[..record.name_length].starts_with(path)
+                && record.name[path.len()] == b'/'
+        }))
+    }
+
     fn records(&mut self) -> Result<[FileRecord; MAX_DIRECTORY_ENTRIES], VfsError> {
         let mut sector = [0u8; SECTOR_SIZE];
         self.device.read_sector(DIRECTORY_SECTOR, &mut sector)?;
@@ -282,7 +332,12 @@ impl<D: BlockDevice> VantaFs<D> {
             if active == 0 {
                 continue;
             }
-            if active != 1 {
+            record.kind = match active {
+                1 => EntryKind::File,
+                2 => EntryKind::Directory,
+                _ => return Err(VfsError::InvalidFormat),
+            };
+            if active != 1 && active != 2 {
                 return Err(VfsError::InvalidFormat);
             }
             record.name_length = sector[offset + 1] as usize;
@@ -309,6 +364,11 @@ impl<D: BlockDevice> VantaFs<D> {
             if record.length > record.sector_count as usize * SECTOR_SIZE {
                 return Err(VfsError::InvalidFormat);
             }
+            if record.kind == EntryKind::Directory
+                && (record.length != 0 || record.sector_count != 0 || record.start_sector != 0)
+            {
+                return Err(VfsError::InvalidFormat);
+            }
         }
         Ok(records)
     }
@@ -317,7 +377,10 @@ impl<D: BlockDevice> VantaFs<D> {
         let mut sector = [0u8; SECTOR_SIZE];
         self.device.read_sector(DIRECTORY_SECTOR, &mut sector)?;
         let offset = index * DIRECTORY_ENTRY_SIZE;
-        sector[offset] = 1;
+        sector[offset] = match record.kind {
+            EntryKind::File => 1,
+            EntryKind::Directory => 2,
+        };
         sector[offset + 1] = record.name_length as u8;
         sector[offset + 2..offset + 50].copy_from_slice(&record.name);
         put_u32(&mut sector, offset + 50, record.start_sector);
@@ -432,12 +495,22 @@ impl<D: BlockDevice> Vfs<D> {
             .ok_or(VfsError::NotMounted)?
             .file_info(path)
     }
+
+    pub fn create_dir(&mut self, path: &str) -> Result<(), VfsError> {
+        self.root
+            .as_mut()
+            .ok_or(VfsError::NotMounted)?
+            .create_dir(path)
+    }
 }
 
 pub fn initialize_root(sectors: u64) -> Result<(), VfsError> {
     let disk = RamDisk::new(sectors).map_err(VfsError::Storage)?;
     let filesystem = VantaFs::format(RootDevice::Ram(disk))?;
-    ROOT.lock().mount_root(filesystem)
+    ROOT.lock().mount_root(filesystem)?;
+    let tmp_disk = RamDisk::new(32).map_err(VfsError::Storage)?;
+    *TMP.lock() = Some(VantaFs::format(tmp_disk)?);
+    Ok(())
 }
 
 pub fn mount_virtio_root(device: VirtioBlock) -> Result<bool, VfsError> {
@@ -453,27 +526,100 @@ pub fn remount_root() -> Result<(), VfsError> {
 }
 
 pub fn read_root(path: &str) -> Result<Vec<u8>, VfsError> {
+    if let Some(path) = tmp_path(path) {
+        return TMP
+            .lock()
+            .as_mut()
+            .ok_or(VfsError::NotMounted)?
+            .read_file(path);
+    }
     ROOT.lock().read(path)
 }
 
 pub fn write_root(path: &str, data: &[u8]) -> Result<(), VfsError> {
+    if let Some(path) = tmp_path(path) {
+        return TMP
+            .lock()
+            .as_mut()
+            .ok_or(VfsError::NotMounted)?
+            .write_file(path, data);
+    }
     ROOT.lock().write(path, data)
 }
 
 pub fn list_root() -> Result<Vec<String>, VfsError> {
-    ROOT.lock().list()
+    let mut paths = ROOT.lock().list()?;
+    paths.push(String::from("/tmp/"));
+    let mut tmp = TMP.lock();
+    for path in tmp.as_mut().ok_or(VfsError::NotMounted)?.list_files()? {
+        let mut mounted = String::from("/tmp/");
+        mounted.push_str(path.trim_start_matches('/'));
+        paths.push(mounted);
+    }
+    Ok(paths)
 }
 
 pub fn remove_root(path: &str) -> Result<(), VfsError> {
+    if let Some(path) = tmp_path(path) {
+        return TMP
+            .lock()
+            .as_mut()
+            .ok_or(VfsError::NotMounted)?
+            .remove_file(path);
+    }
     ROOT.lock().remove(path)
 }
 
 pub fn rename_root(old_path: &str, new_path: &str) -> Result<(), VfsError> {
+    match (tmp_path(old_path), tmp_path(new_path)) {
+        (Some(old_path), Some(new_path)) => {
+            return TMP
+                .lock()
+                .as_mut()
+                .ok_or(VfsError::NotMounted)?
+                .rename_file(old_path, new_path)
+        }
+        (Some(_), None) | (None, Some(_)) => return Err(VfsError::InvalidPath),
+        (None, None) => {}
+    }
     ROOT.lock().rename(old_path, new_path)
 }
 
 pub fn file_info_root(path: &str) -> Result<FileInfo, VfsError> {
+    if path == "/tmp" || path == "/tmp/" {
+        return Ok(FileInfo {
+            length: 0,
+            allocated_sectors: 0,
+            is_directory: true,
+        });
+    }
+    if let Some(path) = tmp_path(path) {
+        return TMP
+            .lock()
+            .as_mut()
+            .ok_or(VfsError::NotMounted)?
+            .file_info(path);
+    }
     ROOT.lock().info(path)
+}
+
+pub fn create_dir_root(path: &str) -> Result<(), VfsError> {
+    if path == "/tmp" || path == "/tmp/" {
+        return Ok(());
+    }
+    if let Some(path) = tmp_path(path) {
+        return TMP
+            .lock()
+            .as_mut()
+            .ok_or(VfsError::NotMounted)?
+            .create_dir(path);
+    }
+    ROOT.lock().create_dir(path)
+}
+
+fn tmp_path(path: &str) -> Option<&str> {
+    path.strip_prefix("/tmp/")
+        .or_else(|| path.strip_prefix("tmp/"))
 }
 
 fn normalize_path(path: &str) -> Result<&[u8], VfsError> {

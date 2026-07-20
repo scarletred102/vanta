@@ -76,7 +76,8 @@ fn execute(command: &str) {
         "" => {}
         "help" => {
             kprintln!("help  status  ls  cat <path>  write <path> <text>");
-            kprintln!("stat <path>  mv <old> <new>  rm <path>  run <path>  net  clear");
+            kprintln!("mkdir <path>  stat <path>  mv <old> <new>  rm <path>");
+            kprintln!("run <path>  net  clear");
         }
         "status" => {
             kprintln!("kernel: rust-native | userspace: ring 3 spawn/wait/exec | storage: VantaFS");
@@ -109,6 +110,14 @@ fn execute(command: &str) {
                 kprintln!(
                     "icmp: {}",
                     if info.gateway_echoed {
+                        "ok"
+                    } else {
+                        "unavailable"
+                    }
+                );
+                kprintln!(
+                    "udp dns: {}",
+                    if info.dns_replied {
                         "ok"
                     } else {
                         "unavailable"
@@ -154,9 +163,14 @@ fn execute(command: &str) {
             let path = command.strip_prefix("stat ").expect("stat command");
             match crate::vfs::file_info_root(path) {
                 Ok(info) => kprintln!(
-                    "{}: {} bytes ({} sector{})",
+                    "{}: {} {} ({} sector{})",
                     path,
-                    info.length,
+                    if info.is_directory {
+                        "directory"
+                    } else {
+                        "file"
+                    },
+                    if info.is_directory { 0 } else { info.length },
                     info.allocated_sectors,
                     if info.allocated_sectors == 1 { "" } else { "s" }
                 ),
@@ -171,6 +185,13 @@ fn execute(command: &str) {
             match crate::vfs::rename_root(old_path, new_path) {
                 Ok(()) => kprintln!("renamed {} to {}", old_path, new_path),
                 Err(_) => kprintln!("mv: failed for {}", old_path),
+            }
+        }
+        command if command.starts_with("mkdir ") => {
+            let path = command.strip_prefix("mkdir ").expect("mkdir command");
+            match crate::vfs::create_dir_root(path) {
+                Ok(()) => kprintln!("created {}", path),
+                Err(_) => kprintln!("mkdir: failed for {}", path),
             }
         }
         command if command.starts_with("rm ") => {
