@@ -18,6 +18,8 @@ pub const SYS_LSEEK: u64 = 8;
 pub const SYS_YIELD: u64 = 24;
 pub const SYS_DUP: u64 = 32;
 pub const SYS_GETPID: u64 = 39;
+pub const SYS_SOCKET: u64 = 41;
+pub const SYS_CONNECT: u64 = 42;
 pub const SYS_GETPPID: u64 = 110;
 pub const SYS_EXEC: u64 = 59;
 pub const SYS_EXIT: u64 = 60;
@@ -228,6 +230,8 @@ extern "C" fn vanta_syscall_dispatch(
         SYS_CLOSE => close_user(arg1),
         SYS_LSEEK => seek_user(arg1, arg2 as i64, arg3),
         SYS_DUP => duplicate_user(arg1),
+        SYS_SOCKET => socket_user(arg1, arg2, arg3),
+        SYS_CONNECT => connect_user(arg1, arg2, arg3),
         SYS_SPAWN => spawn_user(arg1, arg2),
         SYS_WAITPID => waitpid_user(arg1),
         SYS_EXEC => SYSCALL_RETURN_EXEC,
@@ -259,16 +263,18 @@ fn current_cpu_local() -> &'static mut CpuLocal {
 }
 
 fn write_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
-    if descriptor != 1 && descriptor != 2 {
-        return SYSCALL_ERROR;
-    }
     let Ok(bytes) = copy_from_user(pointer, length, false) else {
         return SYSCALL_ERROR;
     };
-    for byte in bytes {
-        crate::serial::_print(format_args!("{}", byte as char));
+    if descriptor == 1 || descriptor == 2 {
+        for byte in bytes {
+            crate::serial::_print(format_args!("{}", byte as char));
+        }
+        return length;
     }
-    length
+    crate::scheduler::write_current(descriptor, &bytes)
+        .map(|()| length)
+        .unwrap_or(SYSCALL_ERROR)
 }
 
 fn open_user(pointer: u64, length: u64) -> u64 {
@@ -309,6 +315,30 @@ fn seek_user(descriptor: u64, offset: i64, whence: u64) -> u64 {
 
 fn duplicate_user(descriptor: u64) -> u64 {
     crate::scheduler::duplicate_current(descriptor).unwrap_or(SYSCALL_ERROR)
+}
+
+fn socket_user(domain: u64, socket_type: u64, protocol: u64) -> u64 {
+    if domain != 2 || socket_type != 1 || protocol != 0 {
+        return SYSCALL_ERROR;
+    }
+    crate::scheduler::open_socket_current().unwrap_or(SYSCALL_ERROR)
+}
+
+fn connect_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
+    if length != 16 {
+        return SYSCALL_ERROR;
+    }
+    let Ok(address) = copy_from_user(pointer, length, false) else {
+        return SYSCALL_ERROR;
+    };
+    if u16::from_ne_bytes([address[0], address[1]]) != 2 {
+        return SYSCALL_ERROR;
+    }
+    let port = u16::from_be_bytes([address[2], address[3]]);
+    let remote_ip = [address[4], address[5], address[6], address[7]];
+    crate::scheduler::connect_socket_current(descriptor, remote_ip, port)
+        .map(|()| 0)
+        .unwrap_or(SYSCALL_ERROR)
 }
 
 fn spawn_user(pointer: u64, length: u64) -> u64 {
