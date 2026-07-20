@@ -14,7 +14,9 @@ pub const SYS_READ: u64 = 0;
 pub const SYS_WRITE: u64 = 1;
 pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
+pub const SYS_LSEEK: u64 = 8;
 pub const SYS_YIELD: u64 = 24;
+pub const SYS_DUP: u64 = 32;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_EXIT: u64 = 60;
 const SYSCALL_RETURN_EXIT: u64 = u64::MAX;
@@ -162,6 +164,8 @@ extern "C" fn vanta_syscall_dispatch(
         SYS_WRITE => write_user(arg1, arg2),
         SYS_OPEN => open_user(arg1, arg2),
         SYS_CLOSE => close_user(arg1),
+        SYS_LSEEK => seek_user(arg1, arg2 as i64, arg3),
+        SYS_DUP => duplicate_user(arg1),
         SYS_YIELD => SYSCALL_RETURN_YIELD,
         SYS_GETPID => crate::scheduler::current_pid(),
         SYS_EXIT => {
@@ -228,6 +232,14 @@ fn close_user(descriptor: u64) -> u64 {
     crate::scheduler::close_current(descriptor)
         .map(|()| 0)
         .unwrap_or(SYSCALL_ERROR)
+}
+
+fn seek_user(descriptor: u64, offset: i64, whence: u64) -> u64 {
+    crate::scheduler::seek_current(descriptor, offset, whence).unwrap_or(SYSCALL_ERROR)
+}
+
+fn duplicate_user(descriptor: u64) -> u64 {
+    crate::scheduler::duplicate_current(descriptor).unwrap_or(SYSCALL_ERROR)
 }
 
 fn copy_from_user(pointer: u64, length: u64, writable: bool) -> Result<Vec<u8>, ()> {

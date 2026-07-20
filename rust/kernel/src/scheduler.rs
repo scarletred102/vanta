@@ -1,6 +1,7 @@
 //! Cooperative single-CPU scheduler for user processes.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
 
@@ -75,7 +76,12 @@ struct Task {
     descriptors: Vec<Option<FileDescriptor>>,
 }
 
+#[derive(Clone)]
 struct FileDescriptor {
+    file: Arc<Mutex<OpenFile>>,
+}
+
+struct OpenFile {
     contents: Vec<u8>,
     offset: usize,
 }
@@ -293,28 +299,79 @@ pub fn current_pid() -> u64 {
 }
 
 pub fn open_current(contents: Vec<u8>) -> Result<u64, ()> {
-    const MAX_DESCRIPTORS: usize = 4;
     let mut scheduler = SCHEDULER.lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
     let descriptors = &mut scheduler.tasks[scheduler.current].descriptors;
-    if let Some((index, descriptor)) = descriptors
+    install_descriptor(
+        descriptors,
+        FileDescriptor {
+            file: Arc::new(Mutex::new(OpenFile {
+                contents,
+                offset: 0,
+            })),
+        },
+    )
+}
+
+pub fn duplicate_current(descriptor: u64) -> Result<u64, ()> {
+    let index: usize = descriptor.try_into().map_err(|_| ())?;
+    let mut scheduler = SCHEDULER.lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let descriptors = &mut scheduler.tasks[scheduler.current].descriptors;
+    let duplicate = descriptors
+        .get(index)
+        .and_then(Option::as_ref)
+        .cloned()
+        .ok_or(())?;
+    install_descriptor(descriptors, duplicate)
+}
+
+pub fn seek_current(descriptor: u64, offset: i64, whence: u64) -> Result<u64, ()> {
+    let index: usize = descriptor.try_into().map_err(|_| ())?;
+    let mut scheduler = SCHEDULER.lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let descriptor = scheduler.tasks[scheduler.current]
+        .descriptors
+        .get_mut(index)
+        .and_then(Option::as_mut)
+        .ok_or(())?;
+    let mut file = descriptor.file.lock();
+    let base = match whence {
+        0 => 0,
+        1 => file.offset,
+        2 => file.contents.len(),
+        _ => return Err(()),
+    };
+    let magnitude: usize = offset.unsigned_abs().try_into().map_err(|_| ())?;
+    let position = if offset.is_negative() {
+        base.checked_sub(magnitude).ok_or(())?
+    } else {
+        base.checked_add(magnitude).ok_or(())?
+    };
+    if position > file.contents.len() {
+        return Err(());
+    }
+    file.offset = position;
+    Ok(position as u64)
+}
+
+fn install_descriptor(
+    descriptors: &mut Vec<Option<FileDescriptor>>,
+    descriptor: FileDescriptor,
+) -> Result<u64, ()> {
+    const MAX_DESCRIPTORS: usize = 4;
+    if let Some((index, slot)) = descriptors
         .iter_mut()
         .enumerate()
         .find(|(_, descriptor)| descriptor.is_none())
     {
-        *descriptor = Some(FileDescriptor {
-            contents,
-            offset: 0,
-        });
+        *slot = Some(descriptor);
         return Ok(index as u64);
     }
     if descriptors.len() == MAX_DESCRIPTORS {
         return Err(());
     }
-    descriptors.push(Some(FileDescriptor {
-        contents,
-        offset: 0,
-    }));
+    descriptors.push(Some(descriptor));
     Ok((descriptors.len() - 1) as u64)
 }
 
@@ -327,12 +384,10 @@ pub fn read_current(descriptor: u64, length: usize) -> Result<Vec<u8>, ()> {
         .get_mut(index)
         .and_then(Option::as_mut)
         .ok_or(())?;
-    let end = descriptor
-        .offset
-        .saturating_add(length)
-        .min(descriptor.contents.len());
-    let bytes = descriptor.contents[descriptor.offset..end].to_vec();
-    descriptor.offset = end;
+    let mut file = descriptor.file.lock();
+    let end = file.offset.saturating_add(length).min(file.contents.len());
+    let bytes = file.contents[file.offset..end].to_vec();
+    file.offset = end;
     Ok(bytes)
 }
 

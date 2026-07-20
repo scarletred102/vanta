@@ -444,8 +444,11 @@ fn run_virtio_self_check() {
                 Ok(existed) => {
                     let previous = vfs::read_root("/etc/persistent").ok();
                     let expected = b"vanta-persistent-vfs\n";
-                    let persisted = vfs::write_root("/etc/persistent", expected).is_ok()
+                    let config = b"vanta-vfs-syscall\n";
+                    let persisted = vfs::write_root("/etc/config", config).is_ok()
+                        && vfs::write_root("/etc/persistent", expected).is_ok()
                         && vfs::remount_root().is_ok()
+                        && vfs::read_root("/etc/config").ok().as_deref() == Some(config)
                         && vfs::read_root("/etc/persistent").ok().as_deref() == Some(expected);
                     serial_println!(
                         "[storage] persistent VFS mounted: existed={} prior-bytes={} remount={}",

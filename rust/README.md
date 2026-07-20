@@ -95,7 +95,10 @@ rust/
 - ELF64 PT_LOAD loading into an isolated address space with user/NX flags
 - Reclaimable process mappings and a four-page user stack
 - Ring-3 entry through `iretq`, with a TSS privilege stack and syscall test
-- Single-CPU `syscall`/`sysretq` ABI with user `write` and `exit` calls
+- Per-CPU `syscall`/`sysretq` ABI with `open`, `read`, `write`, `close`,
+  `lseek`, `dup`, `getpid`, `yield`, and `exit` calls
+- Per-process descriptor tables with Linux-style shared open-file offsets for
+  duplicated descriptors
 - Timer-preemptive round-robin scheduler with full user interrupt contexts
 - Per-CPU syscall stacks and return state selected through the kernel GS base
 - Round-robin address-space switching and per-process exit reclamation
