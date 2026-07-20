@@ -1,14 +1,20 @@
 //! Bootloader-mediated application-processor handoff.
 
+use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use limine::request::MpResponse;
 use spin::Mutex;
 
+use crate::process::Process;
+
 static AP_ONLINE: AtomicUsize = AtomicUsize::new(0);
 static WORK_READY: AtomicBool = AtomicBool::new(false);
 static WORK_COMPLETED: AtomicUsize = AtomicUsize::new(0);
 static WORK_QUEUE: Mutex<usize> = Mutex::new(0);
+static USER_TASK_READY: AtomicBool = AtomicBool::new(false);
+static USER_TASK_COMPLETED: AtomicUsize = AtomicUsize::new(0);
+static USER_TASK: Mutex<Option<Box<Process>>> = Mutex::new(None);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SmpInfo {
@@ -41,7 +47,10 @@ pub fn bootstrap(response: Option<&MpResponse>, prepared_cpus: usize) -> SmpInfo
     AP_ONLINE.store(0, Ordering::Release);
     WORK_READY.store(false, Ordering::Release);
     WORK_COMPLETED.store(0, Ordering::Release);
+    USER_TASK_READY.store(false, Ordering::Release);
+    USER_TASK_COMPLETED.store(0, Ordering::Release);
     *WORK_QUEUE.lock() = 0;
+    *USER_TASK.lock() = None;
     let mut requested_aps = 0;
     for cpu in response.cpus() {
         if cpu.lapic_id != response.bsp_lapic_id {
@@ -85,6 +94,9 @@ unsafe extern "C" fn application_processor_entry(cpu: &limine::mp::MpInfo) -> ! 
         halt();
     }
     crate::interrupts::init_idt();
+    if !crate::syscall::init() {
+        halt();
+    }
     AP_ONLINE.fetch_add(1, Ordering::Release);
     while !WORK_READY.load(Ordering::Acquire) {
         core::hint::spin_loop();
@@ -92,6 +104,40 @@ unsafe extern "C" fn application_processor_entry(cpu: &limine::mp::MpInfo) -> ! 
     if take_work() {
         WORK_COMPLETED.fetch_add(1, Ordering::Release);
     }
+    loop {
+        while !USER_TASK_READY.load(Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
+        let task = USER_TASK.lock().take();
+        if let Some(task) = task {
+            crate::scheduler::start_ap_test(task)
+        }
+        USER_TASK_READY.store(false, Ordering::Release);
+    }
+}
+
+pub fn run_user_task(task: Box<Process>) -> bool {
+    if AP_ONLINE.load(Ordering::Acquire) == 0 || USER_TASK_READY.load(Ordering::Acquire) {
+        return false;
+    }
+    *USER_TASK.lock() = Some(task);
+    USER_TASK_COMPLETED.store(0, Ordering::Release);
+    USER_TASK_READY.store(true, Ordering::Release);
+    loop {
+        if USER_TASK_COMPLETED.load(Ordering::Acquire) != 0 {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+pub fn ap_user_task_active() -> bool {
+    USER_TASK_READY.load(Ordering::Acquire)
+}
+
+pub fn finish_user_task() -> ! {
+    USER_TASK_READY.store(false, Ordering::Release);
+    USER_TASK_COMPLETED.fetch_add(1, Ordering::Release);
     halt()
 }
 
