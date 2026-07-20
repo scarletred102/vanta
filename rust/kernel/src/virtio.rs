@@ -11,8 +11,6 @@ use crate::paging;
 use crate::serial_println;
 use crate::storage::{BlockDevice, StorageError, SECTOR_SIZE};
 
-const PCI_CONFIG_ADDRESS: u16 = 0xcf8;
-const PCI_CONFIG_DATA: u16 = 0xcfc;
 const VIRTIO_VENDOR_ID: u16 = 0x1af4;
 const VIRTIO_BLOCK_LEGACY_ID: u16 = 0x1001;
 const VIRTIO_BLOCK_MODERN_ID: u16 = 0x1042;
@@ -73,22 +71,21 @@ pub struct VirtioBlock {
 
 impl VirtioBlock {
     pub fn probe() -> Result<Self, VirtioError> {
-        let (bus, slot, device_id) = find_device().ok_or(VirtioError::NotFound)?;
+        let (address, device_id) = find_device().ok_or(VirtioError::NotFound)?;
         if device_id == VIRTIO_BLOCK_MODERN_ID {
             return Err(VirtioError::UnsupportedBar);
         }
-        let bar = pci_read(bus, slot, 0, 0x10);
+        let bar = crate::pci::read_u32(address, 0x10);
         if bar & 1 == 0 {
             return Err(VirtioError::UnsupportedBar);
         }
         let io_base = (bar & 0xfffc) as u16;
-        let command = pci_read(bus, slot, 0, 0x04) as u16 | 0x0004 | 0x0001;
-        pci_write(
-            bus,
-            slot,
-            0,
+        let command = crate::pci::read_u32(address, 0x04) as u16 | 0x0004 | 0x0001;
+        let previous_command = crate::pci::read_u32(address, 0x04);
+        crate::pci::write_u32(
+            address,
             0x04,
-            (pci_read(bus, slot, 0, 0x04) & 0xffff_0000) | command as u32,
+            (previous_command & 0xffff_0000) | command as u32,
         );
 
         write_status(io_base, 0);
@@ -126,8 +123,8 @@ impl VirtioBlock {
             | ((port_read32(io_base, DEVICE_CONFIG + 4) as u64) << 32);
         serial_println!(
             "[virtio] legacy pci={:02x}:{:02x} queue={} sectors={} pfn={:#x}",
-            bus,
-            slot,
+            address.bus,
+            address.device,
             queue_size,
             sectors,
             port_read32(io_base, QUEUE_ADDRESS),
@@ -265,18 +262,15 @@ impl BlockDevice for VirtioBlock {
     }
 }
 
-fn find_device() -> Option<(u8, u8, u16)> {
-    for slot in 0..32u8 {
-        let value = pci_read(0, slot, 0, 0);
-        let vendor = value as u16;
-        let device = (value >> 16) as u16;
-        if vendor == VIRTIO_VENDOR_ID
-            && (device == VIRTIO_BLOCK_LEGACY_ID || device == VIRTIO_BLOCK_MODERN_ID)
-        {
-            return Some((0, slot, device));
-        }
-    }
-    None
+fn find_device() -> Option<(crate::pci::PciAddress, u16)> {
+    crate::pci::devices()
+        .into_iter()
+        .find(|device| {
+            device.vendor_id == VIRTIO_VENDOR_ID
+                && (device.device_id == VIRTIO_BLOCK_LEGACY_ID
+                    || device.device_id == VIRTIO_BLOCK_MODERN_ID)
+        })
+        .map(|device| (device.address, device.device_id))
 }
 
 fn allocate_contiguous_frames(
@@ -328,34 +322,6 @@ fn align_up(value: usize, alignment: usize) -> usize {
 
 fn write_status(base: u16, status: u8) {
     port_write8(base, DEVICE_STATUS, status);
-}
-
-fn pci_read(bus: u8, slot: u8, function: u8, offset: u8) -> u32 {
-    let address = 0x8000_0000u32
-        | ((bus as u32) << 16)
-        | ((slot as u32) << 11)
-        | ((function as u32) << 8)
-        | (offset as u32 & 0xfc);
-    let mut address_port: Port<u32> = Port::new(PCI_CONFIG_ADDRESS);
-    let mut data_port: Port<u32> = Port::new(PCI_CONFIG_DATA);
-    unsafe {
-        address_port.write(address);
-        data_port.read()
-    }
-}
-
-fn pci_write(bus: u8, slot: u8, function: u8, offset: u8, value: u32) {
-    let address = 0x8000_0000u32
-        | ((bus as u32) << 16)
-        | ((slot as u32) << 11)
-        | ((function as u32) << 8)
-        | (offset as u32 & 0xfc);
-    let mut address_port: Port<u32> = Port::new(PCI_CONFIG_ADDRESS);
-    let mut data_port: Port<u32> = Port::new(PCI_CONFIG_DATA);
-    unsafe {
-        address_port.write(address);
-        data_port.write(value);
-    }
 }
 
 fn port_write8(base: u16, offset: u16, value: u8) {

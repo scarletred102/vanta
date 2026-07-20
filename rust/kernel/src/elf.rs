@@ -403,7 +403,8 @@ const fn make_spawner_elf() -> [u8; 0x300] {
     let second_header = ELF_HEADER_SIZE + PROGRAM_HEADER_SIZE;
     put_u64(&mut image, second_header + 32, 20);
 
-    // spawn("/bin/init"); preserve the child PID on the user stack across yield.
+    // Spawn "/bin/init" and keep the PID in rbx while waitpid yields. This is a
+    // regression probe for voluntary context switches preserving callee-saved state.
     image[0x1b9] = 0xb8;
     put_u32(&mut image, 0x1ba, 400);
     image[0x1be] = 0xbf;
@@ -419,27 +420,27 @@ const fn make_spawner_elf() -> [u8; 0x300] {
     image[0x1ce] = 2;
     image[0x1cf] = 0x0f;
     image[0x1d0] = 0x0b;
-    image[0x1d1] = 0x50;
-    image[0x1d2] = 0xb8;
-    put_u32(&mut image, 0x1d3, 61);
-    image[0x1d7] = 0x48;
-    image[0x1d8] = 0x8b;
-    image[0x1d9] = 0x3c;
-    image[0x1da] = 0x24;
-    image[0x1db] = 0x0f;
-    image[0x1dc] = 0x05;
-    image[0x1dd] = 0x48;
-    image[0x1de] = 0x85;
-    image[0x1df] = 0xc0;
-    image[0x1e0] = 0x79;
-    image[0x1e1] = 9;
-    image[0x1e2] = 0xb8;
-    put_u32(&mut image, 0x1e3, 24);
-    image[0x1e7] = 0x0f;
-    image[0x1e8] = 0x05;
-    image[0x1e9] = 0xeb;
-    image[0x1ea] = 0xe7;
-    image[0x1eb] = 0x90;
+    image[0x1d1] = 0x48;
+    image[0x1d2] = 0x89;
+    image[0x1d3] = 0xc3;
+    image[0x1d4] = 0xb8;
+    put_u32(&mut image, 0x1d5, 61);
+    image[0x1d9] = 0x48;
+    image[0x1da] = 0x89;
+    image[0x1db] = 0xdf;
+    image[0x1dc] = 0x0f;
+    image[0x1dd] = 0x05;
+    image[0x1de] = 0x48;
+    image[0x1df] = 0x85;
+    image[0x1e0] = 0xc0;
+    image[0x1e1] = 0x79;
+    image[0x1e2] = 9;
+    image[0x1e3] = 0xb8;
+    put_u32(&mut image, 0x1e4, 24);
+    image[0x1e8] = 0x0f;
+    image[0x1e9] = 0x05;
+    image[0x1ea] = 0xeb;
+    image[0x1eb] = 0xe8;
     image[0x1ec] = 0xb8;
     put_u32(&mut image, 0x1ed, 60);
     image[0x1f1] = 0x31;
@@ -460,5 +461,36 @@ const fn make_spawner_elf() -> [u8; 0x300] {
     image
 }
 
+const fn make_exec_elf() -> [u8; 0x300] {
+    let mut image = make_test_elf();
+    put_u64(&mut image, ELF_HEADER_SIZE + 32, 247);
+    put_u64(&mut image, ELF_HEADER_SIZE + 40, 247);
+    let second_header = ELF_HEADER_SIZE + PROGRAM_HEADER_SIZE;
+    put_u64(&mut image, second_header + 32, 20);
+
+    // exec("/bin/init"); the replacement image must exit without returning here.
+    image[0x1ad] = 0xb8;
+    put_u32(&mut image, 0x1ae, 59);
+    image[0x1b2] = 0xbf;
+    put_u32(&mut image, 0x1b3, (TEST_DATA_ADDRESS + 11) as u32);
+    image[0x1b7] = 0xbe;
+    put_u32(&mut image, 0x1b8, 9);
+    image[0x1bc] = 0x0f;
+    image[0x1bd] = 0x05;
+    image[0x1be] = 0x0f;
+    image[0x1bf] = 0x0b;
+    image[0x20b] = b'/';
+    image[0x20c] = b'b';
+    image[0x20d] = b'i';
+    image[0x20e] = b'n';
+    image[0x20f] = b'/';
+    image[0x210] = b'i';
+    image[0x211] = b'n';
+    image[0x212] = b'i';
+    image[0x213] = b't';
+    image
+}
+
 pub const CHILD_ELF: [u8; 0x300] = make_test_elf();
 pub const TEST_ELF: [u8; 0x300] = make_spawner_elf();
+pub const EXEC_ELF: [u8; 0x300] = make_exec_elf();

@@ -8,10 +8,11 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 use core::alloc::Layout;
 use core::panic::PanicInfo;
-use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, MpRequest};
+use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, MpRequest, RsdpRequest};
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 use storage::BlockDevice;
 
+mod acpi;
 mod apic;
 mod elf;
 mod framebuffer;
@@ -19,9 +20,11 @@ mod fs;
 mod gdt;
 mod heap;
 mod interrupts;
+mod ioapic;
 mod keyboard;
 mod memory;
 mod paging;
+mod pci;
 mod process;
 mod scheduler;
 mod serial;
@@ -47,6 +50,10 @@ static MEMMAP_REQUEST: MemmapRequest = MemmapRequest::new();
 #[used]
 #[link_section = ".requests"]
 static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
+
+#[used]
+#[link_section = ".requests"]
+static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
 
 #[used]
 #[link_section = ".requests"]
@@ -305,6 +312,25 @@ pub extern "C" fn _start() -> ! {
     kprintln!("vanta os | kernel terminal");
     kprintln!("-----------------------------------");
 
+    let acpi_result = RSDP_REQUEST.response().map(|response| {
+        let physical = response.address as u64;
+        serial_println!("[acpi] RSDP physical={:#x}", physical);
+        acpi::initialize(physical)
+    });
+    match acpi_result {
+        Some(Ok(info)) => serial_println!(
+            "[acpi] self-check={} rev={} root={:?} tables={} madt={:?} mcfg={:?}",
+            acpi::self_check(),
+            info.revision,
+            info.root,
+            info.table_count,
+            info.madt,
+            info.mcfg
+        ),
+        Some(Err(error)) => serial_println!("[acpi] WARNING: table discovery failed: {:?}", error),
+        None => serial_println!("[acpi] WARNING: Limine did not provide RSDP"),
+    }
+
     let prepared_cpus = gdt::initialize_bootstrap(smp::reported_cpu_count(MP_REQUEST.response()));
     kprintln!("[ok] gdt");
     serial_println!("[boot] gdt loaded: per-cpu-states={}", prepared_cpus);
@@ -320,6 +346,40 @@ pub extern "C" fn _start() -> ! {
         apic.lapic_id,
         apic.physical_base,
         apic.x2apic_supported
+    );
+    let ioapic = RSDP_REQUEST
+        .response()
+        .and_then(|response| acpi::initialize(response.address as u64).ok())
+        .and_then(|info| info.madt)
+        .map(|madt| ioapic::initialize(madt, apic.lapic_id));
+    match ioapic {
+        Some(Ok(info)) => serial_println!(
+            "[ioapic] entries={} timer-gsi={} keyboard-gsi={}",
+            info.entries,
+            info.timer_gsi,
+            info.keyboard_gsi
+        ),
+        Some(Err(error)) => serial_println!("[ioapic] WARNING: routing unavailable: {:?}", error),
+        None => serial_println!("[ioapic] WARNING: no MADT available"),
+    }
+
+    let ecam_configured = RSDP_REQUEST
+        .response()
+        .and_then(|response| acpi::initialize(response.address as u64).ok())
+        .and_then(|info| info.mcfg)
+        .and_then(|mcfg| mcfg.first_region)
+        .is_some_and(pci::configure_ecam);
+    serial_println!("[pci] ECAM configured={}", ecam_configured);
+
+    let pci_devices = pci::devices();
+    let virtio_block_present = pci_devices
+        .iter()
+        .any(|device| device.vendor_id == 0x1af4 && device.device_id == 0x1001);
+    serial_println!(
+        "[pci] legacy-config self-check={} devices={} virtio-blk={}",
+        pci::self_check(),
+        pci_devices.len(),
+        virtio_block_present
     );
 
     let smp = smp::bootstrap(MP_REQUEST.response(), prepared_cpus);
@@ -344,8 +404,14 @@ pub extern "C" fn _start() -> ! {
     unsafe {
         let mut pics = interrupts::PICS.lock();
         pics.initialize();
-        // unmask IRQ0 (timer) and IRQ1 (keyboard); mask the rest
-        pics.write_masks(0b1111_1100, 0b1111_1111);
+        if matches!(ioapic, Some(Ok(_))) {
+            pics.write_masks(0xff, 0xff);
+        } else {
+            pics.write_masks(0b1111_1100, 0b1111_1111);
+        }
+    }
+    if matches!(ioapic, Some(Ok(_))) {
+        interrupts::use_ioapic();
     }
     if interrupts::initialize_timer(100) {
         serial_println!("[boot] PIT configured: 100 Hz");
@@ -413,10 +479,10 @@ pub extern "C" fn _start() -> ! {
 
     if syscall_ready {
         if smp.online_aps > 0 {
-            match process::load_elf(init_image) {
+            match process::load_elf(&elf::EXEC_ELF) {
                 Ok(process) => {
                     let completed = smp::run_user_task(Box::new(process));
-                    serial_println!("[smp] AP user task completed={}", completed);
+                    serial_println!("[smp] AP exec task completed={}", completed);
                 }
                 Err(error) => serial_println!("[smp] AP user-task load failed: {:?}", error),
             }
