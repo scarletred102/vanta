@@ -3,6 +3,7 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 use crate::paging::{self, AddressSpace};
@@ -10,6 +11,7 @@ use crate::process::Process;
 use crate::syscall::UserContext;
 
 const TIMER_TICKS_PER_SLICE: u64 = 3;
+const MAX_CPUS: usize = 8;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -104,16 +106,24 @@ struct Scheduler {
     slice_ticks: u64,
 }
 
-static SCHEDULER: Mutex<Option<Scheduler>> = Mutex::new(None);
+static SCHEDULERS: [Mutex<Option<Scheduler>>; MAX_CPUS] = [const { Mutex::new(None) }; MAX_CPUS];
+static NEXT_PID: AtomicU64 = AtomicU64::new(1);
+
+fn current_scheduler() -> &'static Mutex<Option<Scheduler>> {
+    let index = crate::syscall::current_cpu_index();
+    &SCHEDULERS[index.min(MAX_CPUS - 1)]
+}
+
+fn allocate_pid() -> u64 {
+    NEXT_PID.fetch_add(1, Ordering::Relaxed)
+}
 
 pub unsafe fn start(processes: Vec<Box<Process>>) -> ! {
     start_on_current_cpu(processes, "started")
 }
 
-pub unsafe fn start_ap_test(process: Box<Process>) -> ! {
-    let mut processes = Vec::with_capacity(1);
-    processes.push(process);
-    start_on_current_cpu(processes, "AP user test started")
+pub unsafe fn start_ap(processes: Vec<Box<Process>>) -> ! {
+    start_on_current_cpu(processes, "AP run queue started")
 }
 
 unsafe fn start_on_current_cpu(processes: Vec<Box<Process>>, label: &str) -> ! {
@@ -123,10 +133,9 @@ unsafe fn start_on_current_cpu(processes: Vec<Box<Process>>, label: &str) -> ! {
     }
     let tasks = processes
         .into_iter()
-        .enumerate()
-        .map(|(index, process)| new_task((index + 1) as u64, None, process))
+        .map(|process| new_task(allocate_pid(), None, process))
         .collect();
-    *SCHEDULER.lock() = Some(Scheduler {
+    *current_scheduler().lock() = Some(Scheduler {
         tasks,
         current: 0,
         kernel_space,
@@ -135,14 +144,19 @@ unsafe fn start_on_current_cpu(processes: Vec<Box<Process>>, label: &str) -> ! {
     });
 
     let (context, space) = current_target();
-    crate::serial_println!("[sched] {} tasks={}", label, task_count());
+    crate::serial_println!(
+        "[sched] cpu={} {} tasks={}",
+        crate::syscall::current_cpu_index(),
+        label,
+        task_count()
+    );
     crate::syscall::prepare_user_return(context, space);
     unsafe { crate::gdt::enter_user(context.instruction_pointer, context.stack_pointer) }
 }
 
 pub fn yield_current(context: UserContext) -> *const UserContext {
     let (next_context, next_space, previous, next) = {
-        let mut scheduler = SCHEDULER.lock();
+        let mut scheduler = current_scheduler().lock();
         let scheduler = scheduler.as_mut().expect("yield without scheduler");
         let previous = scheduler.current;
         scheduler.tasks[previous].context = context;
@@ -185,7 +199,7 @@ pub fn timer_tick(context: *mut InterruptContext) -> *const InterruptContext {
     }
 
     let next = {
-        let mut scheduler = SCHEDULER.lock();
+        let mut scheduler = current_scheduler().lock();
         let Some(scheduler) = scheduler.as_mut() else {
             return context;
         };
@@ -240,7 +254,7 @@ pub fn timer_tick(context: *mut InterruptContext) -> *const InterruptContext {
 
 pub fn exit_current(code: u64) -> *const UserContext {
     let (next, remaining, parent_pid, exited_process) = {
-        let mut scheduler = SCHEDULER.lock();
+        let mut scheduler = current_scheduler().lock();
         let scheduler = scheduler.as_mut().expect("process exit without scheduler");
         let current = scheduler.current;
         let parent_pid = scheduler.tasks[current].parent_pid;
@@ -291,9 +305,10 @@ pub fn exit_current(code: u64) -> *const UserContext {
         remaining
     );
     let Some((context, space, next)) = next else {
-        *SCHEDULER.lock() = None;
-        if crate::smp::ap_user_task_active() {
-            crate::smp::finish_user_task();
+        *current_scheduler().lock() = None;
+        if crate::smp::is_application_processor() {
+            crate::smp::on_user_task_complete();
+            crate::smp::ap_idle();
         }
         x86_64::instructions::interrupts::enable();
         crate::shell::run()
@@ -303,7 +318,7 @@ pub fn exit_current(code: u64) -> *const UserContext {
 }
 
 fn current_target() -> (UserContext, AddressSpace) {
-    let mut scheduler = SCHEDULER.lock();
+    let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().expect("scheduler not initialized");
     let current = scheduler.current;
     let task = &mut scheduler.tasks[current];
@@ -325,7 +340,7 @@ fn next_alive(scheduler: &Scheduler, current: usize) -> Option<usize> {
 }
 
 pub fn current_pid() -> u64 {
-    let scheduler = SCHEDULER.lock();
+    let scheduler = current_scheduler().lock();
     scheduler
         .as_ref()
         .map(|scheduler| scheduler.tasks[scheduler.current].pid)
@@ -333,7 +348,7 @@ pub fn current_pid() -> u64 {
 }
 
 pub fn current_parent_pid() -> u64 {
-    let scheduler = SCHEDULER.lock();
+    let scheduler = current_scheduler().lock();
     scheduler
         .as_ref()
         .and_then(|scheduler| scheduler.tasks[scheduler.current].parent_pid)
@@ -342,19 +357,13 @@ pub fn current_parent_pid() -> u64 {
 
 pub fn spawn_current(process: Box<Process>) -> Result<u64, ()> {
     const MAX_TASKS: usize = 8;
-    let mut scheduler = SCHEDULER.lock();
+    let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
     if scheduler.tasks.len() == MAX_TASKS {
         return Err(());
     }
     let parent_pid = scheduler.tasks[scheduler.current].pid;
-    let pid = scheduler
-        .tasks
-        .iter()
-        .map(|task| task.pid)
-        .max()
-        .and_then(|pid| pid.checked_add(1))
-        .ok_or(())?;
+    let pid = allocate_pid();
     scheduler
         .tasks
         .push(new_task(pid, Some(parent_pid), process));
@@ -363,7 +372,7 @@ pub fn spawn_current(process: Box<Process>) -> Result<u64, ()> {
 
 pub fn exec_current(process: Box<Process>) -> *const UserContext {
     let (context, space, previous) = {
-        let mut scheduler = SCHEDULER.lock();
+        let mut scheduler = current_scheduler().lock();
         let scheduler = scheduler.as_mut().expect("exec without scheduler");
         let current = scheduler.current;
         let context = UserContext {
@@ -397,7 +406,7 @@ pub fn exec_current(process: Box<Process>) -> *const UserContext {
 }
 
 pub fn wait_child_current(pid: u64) -> Result<Option<u64>, ()> {
-    let mut scheduler = SCHEDULER.lock();
+    let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
     let parent_pid = scheduler.tasks[scheduler.current].pid;
     let child = scheduler
@@ -414,7 +423,7 @@ pub fn wait_child_current(pid: u64) -> Result<Option<u64>, ()> {
 
 pub fn wait_current(pid: u64, context: UserContext) -> *const UserContext {
     let (next_context, next_space, previous, next) = {
-        let mut scheduler = SCHEDULER.lock();
+        let mut scheduler = current_scheduler().lock();
         let scheduler = scheduler.as_mut().expect("wait without scheduler");
         let previous = scheduler.current;
         let parent_pid = scheduler.tasks[previous].pid;
@@ -487,7 +496,7 @@ fn new_task(pid: u64, parent_pid: Option<u64>, process: Box<Process>) -> Task {
 }
 
 pub fn open_current(contents: Vec<u8>) -> Result<u64, ()> {
-    let mut scheduler = SCHEDULER.lock();
+    let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
     let descriptors = &mut scheduler.tasks[scheduler.current].descriptors;
     install_descriptor(
@@ -503,7 +512,7 @@ pub fn open_current(contents: Vec<u8>) -> Result<u64, ()> {
 
 pub fn duplicate_current(descriptor: u64) -> Result<u64, ()> {
     let index: usize = descriptor.try_into().map_err(|_| ())?;
-    let mut scheduler = SCHEDULER.lock();
+    let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
     let descriptors = &mut scheduler.tasks[scheduler.current].descriptors;
     let duplicate = descriptors
@@ -516,7 +525,7 @@ pub fn duplicate_current(descriptor: u64) -> Result<u64, ()> {
 
 pub fn seek_current(descriptor: u64, offset: i64, whence: u64) -> Result<u64, ()> {
     let index: usize = descriptor.try_into().map_err(|_| ())?;
-    let mut scheduler = SCHEDULER.lock();
+    let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
     let descriptor = scheduler.tasks[scheduler.current]
         .descriptors
@@ -565,7 +574,7 @@ fn install_descriptor(
 
 pub fn read_current(descriptor: u64, length: usize) -> Result<Vec<u8>, ()> {
     let index: usize = descriptor.try_into().map_err(|_| ())?;
-    let mut scheduler = SCHEDULER.lock();
+    let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
     let descriptor = scheduler.tasks[scheduler.current]
         .descriptors
@@ -581,7 +590,7 @@ pub fn read_current(descriptor: u64, length: usize) -> Result<Vec<u8>, ()> {
 
 pub fn close_current(descriptor: u64) -> Result<(), ()> {
     let index: usize = descriptor.try_into().map_err(|_| ())?;
-    let mut scheduler = SCHEDULER.lock();
+    let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
     let descriptor = scheduler.tasks[scheduler.current]
         .descriptors
@@ -595,7 +604,7 @@ pub fn close_current(descriptor: u64) -> Result<(), ()> {
 }
 
 fn scheduler_pid(index: usize) -> u64 {
-    SCHEDULER
+    current_scheduler()
         .lock()
         .as_ref()
         .map(|scheduler| scheduler.tasks[index].pid)
@@ -603,7 +612,7 @@ fn scheduler_pid(index: usize) -> u64 {
 }
 
 fn task_count() -> usize {
-    SCHEDULER
+    current_scheduler()
         .lock()
         .as_ref()
         .map(|scheduler| scheduler.tasks.len())

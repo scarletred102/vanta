@@ -56,6 +56,7 @@ struct CpuLocal {
     user_rsp: u64,
     exit_code: u64,
     next_context: UserContext,
+    cpu_index: usize,
 }
 
 const EMPTY_CPU_LOCAL: CpuLocal = CpuLocal {
@@ -76,6 +77,7 @@ const EMPTY_CPU_LOCAL: CpuLocal = CpuLocal {
         flags: 0,
         stack_pointer: 0,
     },
+    cpu_index: 0,
 };
 
 static mut CPU_LOCALS: [CpuLocal; MAX_CPUS] = [EMPTY_CPU_LOCAL; MAX_CPUS];
@@ -198,12 +200,17 @@ pub fn initialize_cpu_local(index: usize) -> bool {
         (*local).syscall_stack_top = core::ptr::addr_of!((*local).syscall_stack)
             .cast::<u8>()
             .add(SYSCALL_STACK_SIZE) as u64;
+        (*local).cpu_index = index;
     }
     let mut gs_base = x86_64::registers::model_specific::Msr::new(0xc000_0101);
     unsafe {
         gs_base.write(local as u64);
     }
     true
+}
+
+pub fn current_cpu_index() -> usize {
+    current_cpu_local().cpu_index
 }
 
 #[no_mangle]
