@@ -19,6 +19,7 @@ pub const SYS_YIELD: u64 = 24;
 pub const SYS_DUP: u64 = 32;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_EXIT: u64 = 60;
+pub const SYS_WAITPID: u64 = 61;
 pub const SYS_SPAWN: u64 = 400;
 const SYSCALL_RETURN_EXIT: u64 = u64::MAX;
 const SYSCALL_RETURN_YIELD: u64 = u64::MAX - 2;
@@ -168,6 +169,7 @@ extern "C" fn vanta_syscall_dispatch(
         SYS_LSEEK => seek_user(arg1, arg2 as i64, arg3),
         SYS_DUP => duplicate_user(arg1),
         SYS_SPAWN => spawn_user(arg1, arg2),
+        SYS_WAITPID => waitpid_user(arg1),
         SYS_YIELD => SYSCALL_RETURN_YIELD,
         SYS_GETPID => crate::scheduler::current_pid(),
         SYS_EXIT => {
@@ -261,6 +263,13 @@ fn spawn_user(pointer: u64, length: u64) -> u64 {
         return SYSCALL_ERROR;
     };
     crate::scheduler::spawn_current(alloc::boxed::Box::new(process)).unwrap_or(SYSCALL_ERROR)
+}
+
+fn waitpid_user(pid: u64) -> u64 {
+    match crate::scheduler::wait_child_current(pid) {
+        Ok(Some(code)) => code,
+        Ok(None) | Err(()) => SYSCALL_ERROR,
+    }
 }
 
 fn copy_from_user(pointer: u64, length: u64, writable: bool) -> Result<Vec<u8>, ()> {

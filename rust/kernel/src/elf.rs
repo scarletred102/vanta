@@ -398,12 +398,12 @@ const fn make_test_elf() -> [u8; 0x300] {
 
 const fn make_spawner_elf() -> [u8; 0x300] {
     let mut image = make_test_elf();
-    put_u64(&mut image, ELF_HEADER_SIZE + 32, 220);
-    put_u64(&mut image, ELF_HEADER_SIZE + 40, 220);
+    put_u64(&mut image, ELF_HEADER_SIZE + 32, 247);
+    put_u64(&mut image, ELF_HEADER_SIZE + 40, 247);
     let second_header = ELF_HEADER_SIZE + PROGRAM_HEADER_SIZE;
     put_u64(&mut image, second_header + 32, 20);
 
-    // spawn("/bin/init"); trap on failure; exit without running the child payload.
+    // spawn("/bin/init"); preserve the child PID on the user stack across yield.
     image[0x1b9] = 0xb8;
     put_u32(&mut image, 0x1ba, 400);
     image[0x1be] = 0xbf;
@@ -419,14 +419,35 @@ const fn make_spawner_elf() -> [u8; 0x300] {
     image[0x1ce] = 2;
     image[0x1cf] = 0x0f;
     image[0x1d0] = 0x0b;
-    image[0x1d1] = 0xb8;
-    put_u32(&mut image, 0x1d2, 60);
-    image[0x1d6] = 0x31;
-    image[0x1d7] = 0xff;
-    image[0x1d8] = 0x0f;
-    image[0x1d9] = 0x05;
-    image[0x1da] = 0x0f;
-    image[0x1db] = 0x0b;
+    image[0x1d1] = 0x50;
+    image[0x1d2] = 0xb8;
+    put_u32(&mut image, 0x1d3, 61);
+    image[0x1d7] = 0x48;
+    image[0x1d8] = 0x8b;
+    image[0x1d9] = 0x3c;
+    image[0x1da] = 0x24;
+    image[0x1db] = 0x0f;
+    image[0x1dc] = 0x05;
+    image[0x1dd] = 0x48;
+    image[0x1de] = 0x85;
+    image[0x1df] = 0xc0;
+    image[0x1e0] = 0x79;
+    image[0x1e1] = 9;
+    image[0x1e2] = 0xb8;
+    put_u32(&mut image, 0x1e3, 24);
+    image[0x1e7] = 0x0f;
+    image[0x1e8] = 0x05;
+    image[0x1e9] = 0xeb;
+    image[0x1ea] = 0xe7;
+    image[0x1eb] = 0x90;
+    image[0x1ec] = 0xb8;
+    put_u32(&mut image, 0x1ed, 60);
+    image[0x1f1] = 0x31;
+    image[0x1f2] = 0xff;
+    image[0x1f3] = 0x0f;
+    image[0x1f4] = 0x05;
+    image[0x1f5] = 0x0f;
+    image[0x1f6] = 0x0b;
     image[0x20b] = b'/';
     image[0x20c] = b'b';
     image[0x20d] = b'i';
