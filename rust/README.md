@@ -59,10 +59,12 @@ rust/
       gdt.rs                 # per-CPU GDT/TSS/stacks + ring-3 entry
       interrupts.rs          # IDT, PIC/PIT, exception + IRQ handlers
       apic.rs                # local-APIC discovery + MMIO/x2APIC setup
+      acpi.rs                # checked RSDP/XSDT discovery and MADT/MCFG summaries
       smp.rs                 # Limine AP handoff + locked kernel work queue
       framebuffer.rs         # Limine framebuffer + bitmap font
       memory.rs              # memory-map accounting + physical frames
       paging.rs              # HHDM translation + mutable page-table manager
+      pci.rs                 # serialized legacy PCI configuration-space discovery
       heap.rs                # mapped free-list + global Rust allocator
       process.rs              # ELF PT_LOAD mapping + user stack lifecycle
       scheduler.rs           # timer-preemptive task table + round-robin switching
@@ -84,6 +86,8 @@ rust/
 - IDT with CPU exception + timer + keyboard IRQ handlers
 - PIC 8259 remap, 100 Hz PIT, IRQ0 + IRQ1 unmasked
 - Local APIC discovery and uncached xAPIC MMIO / x2APIC software enable
+- ACPI RSDP/XSDT validation with firmware-table checksum checks, including
+  MADT processor/IOAPIC/IRQ-override discovery and MCFG region counting
 - Limine SMP handoff: per-CPU GDT/TSS/IDT setup, AP acknowledgement, and
   locked kernel-work dispatch before safe AP halt
 - AP user-mode execution handoff: an AP configures its own syscall state, runs
@@ -103,15 +107,20 @@ rust/
   VFS opens beginning at `3`
 - `SYS_SPAWN` loads a VFS-backed ELF into a new address space with a distinct
   child PID and recorded parent PID
-- `SYS_WAITPID` reaps a completed child; the current user runtime polls with
-  `yield` until its child exits
-- Timer-preemptive round-robin scheduler with full user interrupt contexts
+- `SYS_WAITPID` blocks the calling parent until its selected child exits, then
+  wakes it with the child exit code
+- `SYS_EXEC` replaces the current process with a VFS-backed ELF; the old image
+  is reclaimed before control enters the replacement
+- Timer-preemptive round-robin scheduler with complete callee-saved user
+  context across timer and voluntary syscall switches
 - Per-CPU syscall stacks and return state selected through the kernel GS base
 - Round-robin address-space switching and per-process exit reclamation
 - User process exit switches back to the kernel address space and reclaims it
 - Read-only CPIO `newc` initramfs with `/bin/init` and `/etc/motd` lookup
 - Filesystem-backed `/bin/init` loading through the ELF/process path
 - Sector block-device abstraction with RAM and legacy VirtIO PCI drivers
+- Legacy PCI configuration-space enumeration shared by platform diagnostics and
+  the VirtIO block probe
 - Writable VantaFS root mount with remount/persistence self-checks
 - Persistent VantaFS auto-format/mount on an attached legacy VirtIO disk,
   verified through an attached-disk write/read round trip and a second boot
@@ -120,8 +129,7 @@ rust/
 
 ## What does not (yet)
 
-- No copy-on-write `fork`, blocking `waitpid`, or user-controlled `exec` image
-  replacement yet
+- No copy-on-write `fork` yet
 - No slab allocator yet; the bootstrap free-list has fixed metadata capacity
 - No modern VirtIO PCI transport, filesystem journaling, or networking
 - No mouse, no windowing — terminal only

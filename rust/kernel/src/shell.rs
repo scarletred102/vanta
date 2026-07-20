@@ -76,7 +76,7 @@ fn execute(command: &str) {
             kprintln!("help  status  ls  cat /etc/config  cat /etc/persistent  clear");
         }
         "status" => {
-            kprintln!("kernel: rust-native | userspace: ring 3 | storage: VantaFS");
+            kprintln!("kernel: rust-native | userspace: ring 3 spawn/wait/exec | storage: VantaFS");
         }
         "ls" => match crate::vfs::list_root() {
             Ok(paths) => {

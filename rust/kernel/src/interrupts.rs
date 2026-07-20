@@ -1,4 +1,5 @@
 use core::arch::global_asm;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{gdt, serial_println};
 use lazy_static::lazy_static;
@@ -25,6 +26,11 @@ impl HwIrq {
 
 pub static PICS: Mutex<ChainedPics> =
     Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
+static IOAPIC_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn use_ioapic() {
+    IOAPIC_ACTIVE.store(true, Ordering::Release);
+}
 
 lazy_static! {
     static ref IDT: InterruptDescriptorTable = {
@@ -140,8 +146,10 @@ pub fn initialize_timer(frequency_hz: u32) -> bool {
 extern "C" fn vanta_timer_tick(
     context: *mut crate::scheduler::InterruptContext,
 ) -> *const crate::scheduler::InterruptContext {
-    unsafe {
-        PICS.lock().notify_end_of_interrupt(HwIrq::Timer.as_u8());
+    if IOAPIC_ACTIVE.load(Ordering::Acquire) {
+        crate::apic::end_of_interrupt();
+    } else {
+        unsafe { PICS.lock().notify_end_of_interrupt(HwIrq::Timer.as_u8()) };
     }
     crate::scheduler::timer_tick(context)
 }
@@ -151,7 +159,9 @@ extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
     let mut data: Port<u8> = Port::new(0x60);
     let scancode: u8 = unsafe { data.read() };
     crate::keyboard::push_scancode(scancode);
-    unsafe {
-        PICS.lock().notify_end_of_interrupt(HwIrq::Keyboard.as_u8());
+    if IOAPIC_ACTIVE.load(Ordering::Acquire) {
+        crate::apic::end_of_interrupt();
+    } else {
+        unsafe { PICS.lock().notify_end_of_interrupt(HwIrq::Keyboard.as_u8()) };
     }
 }

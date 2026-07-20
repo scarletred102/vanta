@@ -81,6 +81,7 @@ struct Task {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TaskState {
     Runnable,
+    Waiting { child_pid: u64 },
     Zombie { exit_code: u64 },
     Reaped,
 }
@@ -148,6 +149,13 @@ pub fn yield_current(context: UserContext) -> *const UserContext {
         scheduler.tasks[previous]
             .interrupt_context
             .instruction_pointer = context.instruction_pointer;
+        scheduler.tasks[previous].interrupt_context.rbx = context.rbx;
+        scheduler.tasks[previous].interrupt_context.rbp = context.rbp;
+        scheduler.tasks[previous].interrupt_context.r12 = context.r12;
+        scheduler.tasks[previous].interrupt_context.r13 = context.r13;
+        scheduler.tasks[previous].interrupt_context.r14 = context.r14;
+        scheduler.tasks[previous].interrupt_context.r15 = context.r15;
+        scheduler.tasks[previous].interrupt_context.rax = context.return_value;
         scheduler.tasks[previous].interrupt_context.flags = context.flags;
         scheduler.tasks[previous].interrupt_context.stack_pointer = context.stack_pointer;
         let next = next_alive(scheduler, previous).unwrap_or(previous);
@@ -195,6 +203,13 @@ pub fn timer_tick(context: *mut InterruptContext) -> *const InterruptContext {
         }
         scheduler.tasks[previous].interrupt_context = unsafe { *context };
         scheduler.tasks[previous].context = UserContext {
+            return_value: scheduler.tasks[previous].interrupt_context.rax,
+            rbx: scheduler.tasks[previous].interrupt_context.rbx,
+            rbp: scheduler.tasks[previous].interrupt_context.rbp,
+            r12: scheduler.tasks[previous].interrupt_context.r12,
+            r13: scheduler.tasks[previous].interrupt_context.r13,
+            r14: scheduler.tasks[previous].interrupt_context.r14,
+            r15: scheduler.tasks[previous].interrupt_context.r15,
             instruction_pointer: scheduler.tasks[previous]
                 .interrupt_context
                 .instruction_pointer,
@@ -234,6 +249,18 @@ pub fn exit_current(code: u64) -> *const UserContext {
             .take()
             .expect("current task already exited");
         scheduler.tasks[current].state = TaskState::Zombie { exit_code: code };
+        let exited_pid = scheduler.tasks[current].pid;
+        if let Some(parent) = scheduler.tasks.iter_mut().find(|task| {
+            task.pid == parent_pid.unwrap_or(0)
+                && task.state
+                    == TaskState::Waiting {
+                        child_pid: exited_pid,
+                    }
+        }) {
+            parent.state = TaskState::Runnable;
+            parent.context.return_value = code;
+            parent.interrupt_context.rax = code;
+        }
         let kernel_space = scheduler.kernel_space;
         unsafe {
             paging::activate(kernel_space);
@@ -305,6 +332,14 @@ pub fn current_pid() -> u64 {
         .unwrap_or(0)
 }
 
+pub fn current_parent_pid() -> u64 {
+    let scheduler = SCHEDULER.lock();
+    scheduler
+        .as_ref()
+        .and_then(|scheduler| scheduler.tasks[scheduler.current].parent_pid)
+        .unwrap_or(0)
+}
+
 pub fn spawn_current(process: Box<Process>) -> Result<u64, ()> {
     const MAX_TASKS: usize = 8;
     let mut scheduler = SCHEDULER.lock();
@@ -326,6 +361,41 @@ pub fn spawn_current(process: Box<Process>) -> Result<u64, ()> {
     Ok(pid)
 }
 
+pub fn exec_current(process: Box<Process>) -> *const UserContext {
+    let (context, space, previous) = {
+        let mut scheduler = SCHEDULER.lock();
+        let scheduler = scheduler.as_mut().expect("exec without scheduler");
+        let current = scheduler.current;
+        let context = UserContext {
+            return_value: 0,
+            rbx: 0,
+            rbp: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            instruction_pointer: process.entry(),
+            flags: 0x202,
+            stack_pointer: process.user_stack_top(),
+        };
+        let interrupt_context =
+            InterruptContext::initial(process.entry(), process.user_stack_top());
+        let task = &mut scheduler.tasks[current];
+        let old = core::mem::replace(&mut task.process, Some(process));
+        task.context = context;
+        task.interrupt_context = interrupt_context;
+        let space = task
+            .process
+            .as_mut()
+            .expect("exec lost process")
+            .address_space();
+        (context, space, old)
+    };
+    drop(previous);
+    crate::serial_println!("[sched] exec pid={}", current_pid());
+    crate::syscall::prepare_user_return(context, space)
+}
+
 pub fn wait_child_current(pid: u64) -> Result<Option<u64>, ()> {
     let mut scheduler = SCHEDULER.lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
@@ -342,12 +412,70 @@ pub fn wait_child_current(pid: u64) -> Result<Option<u64>, ()> {
     Ok(Some(exit_code))
 }
 
+pub fn wait_current(pid: u64, context: UserContext) -> *const UserContext {
+    let (next_context, next_space, previous, next) = {
+        let mut scheduler = SCHEDULER.lock();
+        let scheduler = scheduler.as_mut().expect("wait without scheduler");
+        let previous = scheduler.current;
+        let parent_pid = scheduler.tasks[previous].pid;
+        let child = scheduler
+            .tasks
+            .iter()
+            .find(|task| task.pid == pid && task.parent_pid == Some(parent_pid))
+            .expect("wait selected an invalid child");
+        assert_eq!(
+            child.state,
+            TaskState::Runnable,
+            "wait selected a dead child"
+        );
+
+        scheduler.tasks[previous].context = context;
+        scheduler.tasks[previous].interrupt_context.rbx = context.rbx;
+        scheduler.tasks[previous].interrupt_context.rbp = context.rbp;
+        scheduler.tasks[previous].interrupt_context.r12 = context.r12;
+        scheduler.tasks[previous].interrupt_context.r13 = context.r13;
+        scheduler.tasks[previous].interrupt_context.r14 = context.r14;
+        scheduler.tasks[previous].interrupt_context.r15 = context.r15;
+        scheduler.tasks[previous].interrupt_context.rax = context.return_value;
+        scheduler.tasks[previous]
+            .interrupt_context
+            .instruction_pointer = context.instruction_pointer;
+        scheduler.tasks[previous].interrupt_context.flags = context.flags;
+        scheduler.tasks[previous].interrupt_context.stack_pointer = context.stack_pointer;
+        scheduler.tasks[previous].state = TaskState::Waiting { child_pid: pid };
+
+        let next = next_alive(scheduler, previous).expect("wait left no runnable task");
+        scheduler.current = next;
+        scheduler.slice_ticks = 0;
+        let task = &mut scheduler.tasks[next];
+        let process = task
+            .process
+            .as_mut()
+            .expect("scheduler selected an exited task");
+        (task.context, process.address_space(), previous, next)
+    };
+    crate::serial_println!(
+        "[sched] wait pid={} child={} -> {}",
+        scheduler_pid(previous),
+        pid,
+        scheduler_pid(next)
+    );
+    crate::syscall::prepare_user_return(next_context, next_space)
+}
+
 fn new_task(pid: u64, parent_pid: Option<u64>, process: Box<Process>) -> Task {
     Task {
         pid,
         parent_pid,
         state: TaskState::Runnable,
         context: UserContext {
+            return_value: 0,
+            rbx: 0,
+            rbp: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
             instruction_pointer: process.entry(),
             flags: 0x202,
             stack_pointer: process.user_stack_top(),

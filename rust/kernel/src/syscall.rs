@@ -18,11 +18,15 @@ pub const SYS_LSEEK: u64 = 8;
 pub const SYS_YIELD: u64 = 24;
 pub const SYS_DUP: u64 = 32;
 pub const SYS_GETPID: u64 = 39;
+pub const SYS_GETPPID: u64 = 110;
+pub const SYS_EXEC: u64 = 59;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_WAITPID: u64 = 61;
 pub const SYS_SPAWN: u64 = 400;
 const SYSCALL_RETURN_EXIT: u64 = u64::MAX;
 const SYSCALL_RETURN_YIELD: u64 = u64::MAX - 2;
+const SYSCALL_RETURN_WAIT: u64 = u64::MAX - 3;
+const SYSCALL_RETURN_EXEC: u64 = u64::MAX - 4;
 const SYSCALL_ERROR: u64 = u64::MAX - 1;
 const USER_ADDRESS_LIMIT: u64 = 0x0000_8000_0000_0000;
 const SYSCALL_STACK_SIZE: usize = 4096 * 2;
@@ -31,6 +35,13 @@ const MAX_CPUS: usize = 8;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct UserContext {
+    pub return_value: u64,
+    pub rbx: u64,
+    pub rbp: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
     pub instruction_pointer: u64,
     pub flags: u64,
     pub stack_pointer: u64,
@@ -54,6 +65,13 @@ const EMPTY_CPU_LOCAL: CpuLocal = CpuLocal {
     user_rsp: 0,
     exit_code: 0,
     next_context: UserContext {
+        return_value: 0,
+        rbx: 0,
+        rbp: 0,
+        r12: 0,
+        r13: 0,
+        r14: 0,
+        r15: 0,
         instruction_pointer: 0,
         flags: 0,
         stack_pointer: 0,
@@ -67,10 +85,18 @@ global_asm!(
     .global vanta_syscall_entry
     .extern vanta_syscall_dispatch
     .extern vanta_syscall_yield
+    .extern vanta_syscall_wait
+    .extern vanta_syscall_exec
     .extern vanta_syscall_exit
 vanta_syscall_entry:
     mov gs:[8208], rsp
     mov rsp, gs:[8200]
+    push r15
+    push r14
+    push r13
+    push r12
+    push rbp
+    push rbx
     push r11
     push rcx
     push r10
@@ -88,26 +114,53 @@ vanta_syscall_entry:
     je vanta_syscall_exit_path
     cmp rax, -3
     je vanta_syscall_yield_path
+    cmp rax, -4
+    je vanta_syscall_wait_path
+    cmp rax, -5
+    je vanta_syscall_exec_path
     mov r11, [rsp + 48]
     mov rcx, [rsp + 40]
-    add rsp, 56
+    add rsp, 104
     mov rsp, gs:[8208]
     sysretq
 vanta_syscall_yield_path:
-    mov rdi, [rsp + 40]
-    mov rsi, [rsp + 48]
-    mov rdx, gs:[8208]
+    mov rdi, rsp
+    mov rsi, gs:[8208]
     call vanta_syscall_yield
-    mov rcx, [rax]
-    mov r11, [rax + 8]
-    mov rsp, [rax + 16]
+    jmp vanta_syscall_restore_context
+vanta_syscall_wait_path:
+    mov rdi, rsp
+    mov rsi, gs:[8208]
+    call vanta_syscall_wait
+    jmp vanta_syscall_restore_context
+vanta_syscall_exec_path:
+    mov rdi, rsp
+    call vanta_syscall_exec
+    test rax, rax
+    jz vanta_syscall_exec_error
+    jmp vanta_syscall_restore_context
+vanta_syscall_exec_error:
+    mov r11, [rsp + 48]
+    mov rcx, [rsp + 40]
+    add rsp, 104
+    mov rsp, gs:[8208]
+    mov rax, -2
     sysretq
 vanta_syscall_exit_path:
     mov rdi, gs:[8216]
     call vanta_syscall_exit
-    mov rcx, [rax]
-    mov r11, [rax + 8]
-    mov rsp, [rax + 16]
+vanta_syscall_restore_context:
+    mov r10, rax
+    mov rbx, [r10 + 8]
+    mov rbp, [r10 + 16]
+    mov r12, [r10 + 24]
+    mov r13, [r10 + 32]
+    mov r14, [r10 + 40]
+    mov r15, [r10 + 48]
+    mov rcx, [r10 + 56]
+    mov r11, [r10 + 64]
+    mov rsp, [r10 + 72]
+    mov rax, [r10]
     sysretq
 "#
 );
@@ -170,8 +223,10 @@ extern "C" fn vanta_syscall_dispatch(
         SYS_DUP => duplicate_user(arg1),
         SYS_SPAWN => spawn_user(arg1, arg2),
         SYS_WAITPID => waitpid_user(arg1),
+        SYS_EXEC => SYSCALL_RETURN_EXEC,
         SYS_YIELD => SYSCALL_RETURN_YIELD,
         SYS_GETPID => crate::scheduler::current_pid(),
+        SYS_GETPPID => crate::scheduler::current_parent_pid(),
         SYS_EXIT => {
             current_cpu_local().exit_code = arg1;
             SYSCALL_RETURN_EXIT
@@ -268,7 +323,8 @@ fn spawn_user(pointer: u64, length: u64) -> u64 {
 fn waitpid_user(pid: u64) -> u64 {
     match crate::scheduler::wait_child_current(pid) {
         Ok(Some(code)) => code,
-        Ok(None) | Err(()) => SYSCALL_ERROR,
+        Ok(None) => SYSCALL_RETURN_WAIT,
+        Err(()) => SYSCALL_ERROR,
     }
 }
 
@@ -313,16 +369,50 @@ fn user_physical_address(address: u64, writable: bool) -> Result<u64, ()> {
 }
 
 #[no_mangle]
-extern "C" fn vanta_syscall_yield(
-    instruction_pointer: u64,
-    flags: u64,
-    stack_pointer: u64,
-) -> *const UserContext {
-    crate::scheduler::yield_current(UserContext {
-        instruction_pointer,
-        flags,
-        stack_pointer,
-    })
+extern "C" fn vanta_syscall_yield(frame: *const u64, stack_pointer: u64) -> *const UserContext {
+    crate::scheduler::yield_current(user_context(frame, stack_pointer))
+}
+
+#[no_mangle]
+extern "C" fn vanta_syscall_wait(frame: *const u64, stack_pointer: u64) -> *const UserContext {
+    let child_pid = unsafe { *frame.add(1) };
+    crate::scheduler::wait_current(child_pid, user_context(frame, stack_pointer))
+}
+
+#[no_mangle]
+extern "C" fn vanta_syscall_exec(frame: *const u64) -> *const UserContext {
+    let pointer = unsafe { *frame.add(1) };
+    let length = unsafe { *frame.add(2) };
+    let Ok(path) = copy_from_user(pointer, length, false) else {
+        return core::ptr::null();
+    };
+    let Ok(path) = core::str::from_utf8(&path) else {
+        return core::ptr::null();
+    };
+    let Ok(image) = crate::vfs::read_root(path) else {
+        return core::ptr::null();
+    };
+    let Ok(process) = crate::process::load_elf(&image) else {
+        return core::ptr::null();
+    };
+    crate::scheduler::exec_current(alloc::boxed::Box::new(process))
+}
+
+fn user_context(frame: *const u64, stack_pointer: u64) -> UserContext {
+    unsafe {
+        UserContext {
+            return_value: 0,
+            rbx: *frame.add(7),
+            rbp: *frame.add(8),
+            r12: *frame.add(9),
+            r13: *frame.add(10),
+            r14: *frame.add(11),
+            r15: *frame.add(12),
+            instruction_pointer: *frame.add(5),
+            flags: *frame.add(6),
+            stack_pointer,
+        }
+    }
 }
 
 #[no_mangle]
