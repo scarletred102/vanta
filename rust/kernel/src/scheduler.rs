@@ -70,10 +70,18 @@ impl InterruptContext {
 
 struct Task {
     pid: u64,
+    parent_pid: Option<u64>,
+    state: TaskState,
     process: Option<Box<Process>>,
     context: UserContext,
     interrupt_context: InterruptContext,
     descriptors: Vec<Option<FileDescriptor>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TaskState {
+    Runnable,
+    Zombie { exit_code: u64 },
 }
 
 #[derive(Clone)]
@@ -116,6 +124,8 @@ unsafe fn start_on_current_cpu(processes: Vec<Box<Process>>, label: &str) -> ! {
         .enumerate()
         .map(|(index, process)| Task {
             pid: (index + 1) as u64,
+            parent_pid: None,
+            state: TaskState::Runnable,
             context: UserContext {
                 instruction_pointer: process.entry(),
                 flags: 0x202,
@@ -225,14 +235,16 @@ pub fn timer_tick(context: *mut InterruptContext) -> *const InterruptContext {
 }
 
 pub fn exit_current(code: u64) -> *const UserContext {
-    let (next, remaining, exited_process) = {
+    let (next, remaining, parent_pid, exited_process) = {
         let mut scheduler = SCHEDULER.lock();
         let scheduler = scheduler.as_mut().expect("process exit without scheduler");
         let current = scheduler.current;
+        let parent_pid = scheduler.tasks[current].parent_pid;
         let process = scheduler.tasks[current]
             .process
             .take()
             .expect("current task already exited");
+        scheduler.tasks[current].state = TaskState::Zombie { exit_code: code };
         let kernel_space = scheduler.kernel_space;
         unsafe {
             paging::activate(kernel_space);
@@ -251,12 +263,17 @@ pub fn exit_current(code: u64) -> *const UserContext {
                 .expect("scheduler selected an exited task");
             (task.context, process.address_space(), index)
         });
-        (next, remaining, process)
+        (next, remaining, parent_pid, process)
     };
 
     drop(exited_process);
 
-    crate::serial_println!("[sched] task exited: code={} remaining={}", code, remaining);
+    crate::serial_println!(
+        "[sched] task exited: code={} parent={} remaining={}",
+        code,
+        parent_pid.unwrap_or(0),
+        remaining
+    );
     let Some((context, space, next)) = next else {
         *SCHEDULER.lock() = None;
         if crate::smp::ap_user_task_active() {
@@ -284,7 +301,7 @@ fn current_target() -> (UserContext, AddressSpace) {
 fn next_alive(scheduler: &Scheduler, current: usize) -> Option<usize> {
     for offset in 1..=scheduler.tasks.len() {
         let index = (current + offset) % scheduler.tasks.len();
-        if scheduler.tasks[index].process.is_some() {
+        if scheduler.tasks[index].state == TaskState::Runnable {
             return Some(index);
         }
     }
