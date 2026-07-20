@@ -109,7 +109,8 @@ rust/
 - Writable VantaFS root mount with remount/persistence self-checks
 - Persistent VantaFS auto-format/mount on an attached legacy VirtIO disk,
   verified through an attached-disk write/read round trip and a second boot
-- In-kernel shell: prompt, echo, backspace, newline
+- In-kernel shell with editable input and `help`, `status`, `ls`, `cat`, and
+  `clear` commands over the mounted VFS root
 
 ## What does not (yet)
 

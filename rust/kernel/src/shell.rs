@@ -1,12 +1,15 @@
+use alloc::string::String;
+
 use crate::{keyboard, kprint, kprintln, serial_println};
 use pc_keyboard::{layouts::Us104Key, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
 use spin::Mutex;
 
 static KBD: Mutex<Option<Keyboard<Us104Key, ScancodeSet1>>> = Mutex::new(None);
+static INPUT: Mutex<String> = Mutex::new(String::new());
 
 fn banner() {
     kprintln!("vanta os | kernel terminal");
-    kprintln!("rust-rewrite session 1 — type to echo, Enter for newline, Backspace to delete");
+    kprintln!("type 'help' for available commands");
     kprintln!();
     prompt();
 }
@@ -21,6 +24,7 @@ pub fn run() -> ! {
         Us104Key,
         HandleControl::Ignore,
     ));
+    INPUT.lock().clear();
 
     banner();
     serial_println!("[shell] entering main loop");
@@ -45,17 +49,55 @@ fn handle_key(key: DecodedKey) {
     match key {
         DecodedKey::Unicode(c) => match c {
             '\n' | '\r' => {
+                let command = core::mem::take(&mut *INPUT.lock());
                 kprintln!();
+                execute(command.as_str());
                 prompt();
             }
             '\u{8}' | '\u{7f}' => {
-                kprint!("\x08");
+                if INPUT.lock().pop().is_some() {
+                    kprint!("\x08 \x08");
+                }
             }
             c if (c as u32) >= 0x20 => {
+                INPUT.lock().push(c);
                 kprint!("{}", c);
             }
             _ => {}
         },
         DecodedKey::RawKey(_) => {}
+    }
+}
+
+fn execute(command: &str) {
+    match command {
+        "" => {}
+        "help" => {
+            kprintln!("help  status  ls  cat /etc/config  cat /etc/persistent  clear");
+        }
+        "status" => {
+            kprintln!("kernel: rust-native | userspace: ring 3 | storage: VantaFS");
+        }
+        "ls" => {
+            kprintln!("/etc/config");
+            kprintln!("/etc/persistent");
+        }
+        "cat /etc/config" | "cat /etc/persistent" => {
+            let path = command.strip_prefix("cat ").expect("known cat command");
+            match crate::vfs::read_root(path) {
+                Ok(contents) => {
+                    let needs_newline = contents.last().copied() != Some(b'\n');
+                    for byte in contents {
+                        kprint!("{}", byte as char);
+                    }
+                    if needs_newline {
+                        kprintln!();
+                    }
+                }
+                Err(_) => kprintln!("{}: not found", path),
+            }
+        }
+        "clear" => kprint!("\x1b[2J\x1b[H"),
+        _ => kprintln!("{}: command not found", command),
     }
 }
