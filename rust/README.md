@@ -34,6 +34,7 @@ Run the checked QEMU regressions from PowerShell:
 ```powershell
 .\test-qemu.ps1          # RAM-root lifecycle and SMP checks
 .\test-qemu.ps1 -Virtio  # also require persistent legacy VirtIO storage
+.\test-qemu.ps1 -Network # require VirtIO-net ARP plus IPv4 ICMP gateway reply
 ```
 
 Requires:
@@ -127,6 +128,8 @@ rust/
 - Read-only CPIO `newc` initramfs with `/bin/init` and `/etc/motd` lookup
 - Filesystem-backed `/bin/init` loading through the ELF/process path
 - Sector block-device abstraction with RAM and legacy VirtIO PCI drivers
+- Legacy VirtIO-net polling driver with Ethernet ARP and IPv4 ICMP echo to
+  QEMU's NAT gateway
 - Legacy PCI configuration-space enumeration shared by platform diagnostics and
   the VirtIO block probe
 - Writable VantaFS root mount with remount/persistence self-checks
@@ -140,7 +143,7 @@ rust/
 
 - No copy-on-write `fork` yet
 - No slab allocator yet; the bootstrap free-list has fixed metadata capacity
-- No modern VirtIO PCI transport, filesystem journaling, directories, or networking
+- No modern VirtIO PCI transport, filesystem journaling, directories, TCP/UDP, or DNS
 - No mouse, no windowing — terminal only
 - No SMP task migration, load balancing, or idle-CPU wake IPIs yet
 

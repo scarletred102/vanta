@@ -76,11 +76,47 @@ fn execute(command: &str) {
         "" => {}
         "help" => {
             kprintln!("help  status  ls  cat <path>  write <path> <text>");
-            kprintln!("stat <path>  mv <old> <new>  rm <path>  run <path>  clear");
+            kprintln!("stat <path>  mv <old> <new>  rm <path>  run <path>  net  clear");
         }
         "status" => {
             kprintln!("kernel: rust-native | userspace: ring 3 spawn/wait/exec | storage: VantaFS");
         }
+        "net" => match crate::network::status() {
+            Some(info) => {
+                let gateway = info.gateway_mac.unwrap_or([0; 6]);
+                kprintln!(
+                    "net: {}.{}.{}.{} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    info.local_ip[0],
+                    info.local_ip[1],
+                    info.local_ip[2],
+                    info.local_ip[3],
+                    info.mac[0],
+                    info.mac[1],
+                    info.mac[2],
+                    info.mac[3],
+                    info.mac[4],
+                    info.mac[5]
+                );
+                kprintln!(
+                    "gateway: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    gateway[0],
+                    gateway[1],
+                    gateway[2],
+                    gateway[3],
+                    gateway[4],
+                    gateway[5]
+                );
+                kprintln!(
+                    "icmp: {}",
+                    if info.gateway_echoed {
+                        "ok"
+                    } else {
+                        "unavailable"
+                    }
+                );
+            }
+            None => kprintln!("net: unavailable"),
+        },
         "ls" => match crate::vfs::list_root() {
             Ok(paths) => {
                 for path in paths {
