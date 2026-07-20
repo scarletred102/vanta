@@ -103,6 +103,8 @@ rust/
   VFS opens beginning at `3`
 - `SYS_SPAWN` loads a VFS-backed ELF into a new address space with a distinct
   child PID and recorded parent PID
+- `SYS_WAITPID` reaps a completed child; the current user runtime polls with
+  `yield` until its child exits
 - Timer-preemptive round-robin scheduler with full user interrupt contexts
 - Per-CPU syscall stacks and return state selected through the kernel GS base
 - Round-robin address-space switching and per-process exit reclamation

@@ -82,6 +82,7 @@ struct Task {
 enum TaskState {
     Runnable,
     Zombie { exit_code: u64 },
+    Reaped,
 }
 
 #[derive(Clone)]
@@ -323,6 +324,22 @@ pub fn spawn_current(process: Box<Process>) -> Result<u64, ()> {
         .tasks
         .push(new_task(pid, Some(parent_pid), process));
     Ok(pid)
+}
+
+pub fn wait_child_current(pid: u64) -> Result<Option<u64>, ()> {
+    let mut scheduler = SCHEDULER.lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let parent_pid = scheduler.tasks[scheduler.current].pid;
+    let child = scheduler
+        .tasks
+        .iter_mut()
+        .find(|task| task.pid == pid && task.parent_pid == Some(parent_pid))
+        .ok_or(())?;
+    let TaskState::Zombie { exit_code } = child.state else {
+        return Ok(None);
+    };
+    child.state = TaskState::Reaped;
+    Ok(Some(exit_code))
 }
 
 fn new_task(pid: u64, parent_pid: Option<u64>, process: Box<Process>) -> Task {
