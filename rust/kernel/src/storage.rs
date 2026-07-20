@@ -9,6 +9,8 @@ pub const SECTOR_SIZE: usize = 512;
 pub enum StorageError {
     OutOfBounds,
     AllocationFailed,
+    DeviceUnavailable,
+    IoFailed,
 }
 
 pub trait BlockDevice {
