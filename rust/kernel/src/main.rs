@@ -356,6 +356,13 @@ pub extern "C" fn _start() -> ! {
     kprintln!("[ok] pic + sti");
     serial_println!("[boot] interrupts enabled");
     run_virtio_self_check();
+    if !init_image.is_empty() {
+        if vfs::write_root("/bin/init", &elf::CHILD_ELF).is_ok() {
+            serial_println!("[proc] staged /bin/init for user spawn");
+        } else {
+            serial_println!("[proc] WARNING: could not stage /bin/init for user spawn");
+        }
+    }
 
     match process::load_elf(init_image) {
         Ok(mut process) => {
@@ -377,7 +384,7 @@ pub extern "C" fn _start() -> ! {
             let data_writable = data_flags & paging::MAP_WRITABLE != 0;
             let data_no_execute = data_flags & paging::MAP_NO_EXECUTE != 0;
             let data_initialized = process.read_user_byte(elf::TEST_DATA_ADDRESS) == Some(b'/');
-            let data_bss_zero = process.read_user_byte(elf::TEST_DATA_ADDRESS + 11) == Some(0);
+            let data_bss_zero = process.read_user_byte(elf::TEST_DATA_ADDRESS + 20) == Some(0);
             if entry_translation.is_some()
                 && user
                 && executable
