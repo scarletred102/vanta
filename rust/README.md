@@ -34,7 +34,7 @@ Run the checked QEMU regressions from PowerShell:
 ```powershell
 .\test-qemu.ps1          # RAM-root lifecycle and SMP checks
 .\test-qemu.ps1 -Virtio  # also require persistent legacy VirtIO storage
-.\test-qemu.ps1 -Network # require VirtIO-net ARP, ICMP, and UDP DNS replies
+.\test-qemu.ps1 -Network # require VFS-configured ARP, ICMP, UDP DNS, and ring-3 TCP
 ```
 
 Requires:
@@ -75,8 +75,8 @@ rust/
       pci.rs                 # serialized legacy PCI configuration-space discovery
       heap.rs                # mapped free-list + global Rust allocator
       process.rs              # ELF PT_LOAD mapping + user stack lifecycle
-      scheduler.rs           # timer-preemptive task table + round-robin switching
-      syscall.rs              # per-CPU syscall/sysret entry + VFS/process ABI
+      scheduler.rs           # timer-preemptive task table + file/socket descriptors
+      syscall.rs              # per-CPU syscall/sysret entry + VFS/process/socket ABI
       keyboard.rs            # IRQ1 scancode queue
       shell.rs               # decoder + echo loop
   test-qemu.ps1              # checked two-vCPU QEMU boot regression
@@ -109,7 +109,7 @@ rust/
 - Reclaimable process mappings and a four-page user stack
 - Ring-3 entry through `iretq`, with a TSS privilege stack and syscall test
 - Per-CPU `syscall`/`sysretq` ABI with `open`, `read`, `write`, `close`,
-  `lseek`, `dup`, `getpid`, `yield`, and `exit` calls
+  `lseek`, `dup`, `getpid`, `yield`, `exit`, `socket`, and `connect` calls
 - Per-process descriptor tables with Linux-style shared open-file offsets for
   duplicated descriptors
 - Conventional descriptor numbers: `0` stdin, `1` stdout, `2` stderr, and
@@ -128,22 +128,48 @@ rust/
 - Read-only CPIO `newc` initramfs with `/bin/init` and `/etc/motd` lookup
 - Filesystem-backed `/bin/init` loading through the ELF/process path
 - Sector block-device abstraction with RAM and legacy VirtIO PCI drivers
-- Legacy VirtIO-net polling driver with Ethernet ARP, IPv4 ICMP echo, and UDP
-  DNS query/reply traffic through QEMU's NAT services
+- Legacy VirtIO-net polling driver with Ethernet ARP, IPv4 ICMP echo, UDP DNS,
+  and a bounded TCP stream path through QEMU's NAT services
+- VFS-backed `/etc/network.conf`, created on first boot and used for the guest
+  address, gateway, DNS server, and TCP probe target
+- Ring-3 TCP socket regression: `socket(AF_INET, SOCK_STREAM, 0)`,
+  `connect(sockaddr_in)`, `write("ping")`, `read("pong")`, and `close` with a
+  host-side FIN observation in QEMU
 - Legacy PCI configuration-space enumeration shared by platform diagnostics and
   the VirtIO block probe
 - Writable VantaFS root mount with remount/persistence self-checks
 - Persistent VantaFS auto-format/mount on an attached legacy VirtIO disk,
   verified through an attached-disk write/read round trip and a second boot
-- In-kernel shell with editable input and `help`, `status`, dynamic `ls`,
-  `cat`, `write`, `stat`, `mv`, `rm`, `run`, and `clear` commands over the
-  mounted VFS root; `run` launches a VFS-backed ring-3 ELF
+- In-kernel shell with editable input and `help`, `status`, `net`, dynamic
+  `ls`, `cat`, `write`, `stat`, `mv`, `rm`, `run`, and `clear` commands over
+  the mounted VFS root; `run` launches a VFS-backed ring-3 ELF
+
+## TCP user ABI
+
+Vanta currently supports one synchronous IPv4 stream operation at a time per
+socket descriptor. `socket(2, 1, 0)` creates a descriptor, and
+`connect(fd, sockaddr_in*, 16)` accepts the conventional 16-byte `sockaddr_in`
+layout. Existing `read`, `write`, `dup`, and `close` operate on that descriptor;
+`close` sends FIN when the last duplicate is closed. TCP payloads are limited to
+64 bytes, with no retransmission, receive queue, fragmentation, or listener API
+yet.
+
+The default configuration is:
+
+```text
+address=10.0.2.15
+gateway=10.0.2.2
+dns=10.0.2.3
+tcp_host=10.0.2.2
+tcp_port=18080
+```
 
 ## What does not (yet)
 
 - No copy-on-write `fork` yet
 - No slab allocator yet; the bootstrap free-list has fixed metadata capacity
-- No modern VirtIO PCI transport, filesystem journaling, directories, TCP/UDP, or DNS
+- No modern VirtIO PCI transport or filesystem journaling
+- No TCP retransmission, listener/accept path, UDP socket ABI, DHCP, or DNS resolver
 - No mouse, no windowing — terminal only
 - No SMP task migration, load balancing, or idle-CPU wake IPIs yet
 
