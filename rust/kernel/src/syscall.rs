@@ -161,7 +161,7 @@ extern "C" fn vanta_syscall_dispatch(
 ) -> u64 {
     match number {
         SYS_READ => read_user(arg1, arg2, arg3),
-        SYS_WRITE => write_user(arg1, arg2),
+        SYS_WRITE => write_user(arg1, arg2, arg3),
         SYS_OPEN => open_user(arg1, arg2),
         SYS_CLOSE => close_user(arg1),
         SYS_LSEEK => seek_user(arg1, arg2 as i64, arg3),
@@ -192,7 +192,10 @@ fn current_cpu_local() -> &'static mut CpuLocal {
     }
 }
 
-fn write_user(pointer: u64, length: u64) -> u64 {
+fn write_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
+    if descriptor != 1 && descriptor != 2 {
+        return SYSCALL_ERROR;
+    }
     let Ok(bytes) = copy_from_user(pointer, length, false) else {
         return SYSCALL_ERROR;
     };
