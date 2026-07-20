@@ -225,7 +225,7 @@ pub fn timer_tick(context: *mut InterruptContext) -> *const InterruptContext {
 }
 
 pub fn exit_current(code: u64) -> *const UserContext {
-    let (next, remaining) = {
+    let (next, remaining, exited_process) = {
         let mut scheduler = SCHEDULER.lock();
         let scheduler = scheduler.as_mut().expect("process exit without scheduler");
         let current = scheduler.current;
@@ -237,7 +237,6 @@ pub fn exit_current(code: u64) -> *const UserContext {
         unsafe {
             paging::activate(kernel_space);
         }
-        drop(process);
         let remaining = scheduler
             .tasks
             .iter()
@@ -252,8 +251,10 @@ pub fn exit_current(code: u64) -> *const UserContext {
                 .expect("scheduler selected an exited task");
             (task.context, process.address_space(), index)
         });
-        (next, remaining)
+        (next, remaining, process)
     };
+
+    drop(exited_process);
 
     crate::serial_println!("[sched] task exited: code={} remaining={}", code, remaining);
     let Some((context, space, next)) = next else {
