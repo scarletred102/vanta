@@ -192,6 +192,23 @@ const fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
     }
 }
 
+const fn emit_bytes(bytes: &mut [u8], offset: &mut usize, source: &[u8]) {
+    let mut index = 0;
+    while index < source.len() {
+        bytes[*offset + index] = source[index];
+        index += 1;
+    }
+    *offset += source.len();
+}
+
+const fn jump_to(bytes: &mut [u8], offset: &mut usize, condition: u8, target: usize) {
+    bytes[*offset] = 0x0f;
+    bytes[*offset + 1] = condition;
+    let next = *offset + 6;
+    put_u32(bytes, *offset + 2, (target - next) as u32);
+    *offset = next;
+}
+
 pub const TEST_DATA_ADDRESS: u64 = 0x0040_1000;
 
 const fn make_test_elf() -> [u8; 0x300] {
@@ -396,6 +413,193 @@ const fn make_test_elf() -> [u8; 0x300] {
     image
 }
 
+const fn make_network_elf() -> [u8; 0x300] {
+    const TEXT: usize = 0x100;
+    const DATA: usize = 0x200;
+    const FAILURE: usize = 0x1e0;
+    let mut image = [0u8; 0x300];
+    image[0] = 0x7f;
+    image[1] = b'E';
+    image[2] = b'L';
+    image[3] = b'F';
+    image[4] = ELFCLASS64;
+    image[5] = ELFDATA2LSB;
+    image[6] = 1;
+    put_u16(&mut image, 16, ET_EXEC);
+    put_u16(&mut image, 18, EM_X86_64);
+    put_u32(&mut image, 20, 1);
+    put_u64(&mut image, 24, 0x0040_0000);
+    put_u64(&mut image, 32, ELF_HEADER_SIZE as u64);
+    put_u16(&mut image, 52, ELF_HEADER_SIZE as u16);
+    put_u16(&mut image, 54, PROGRAM_HEADER_SIZE as u16);
+    put_u16(&mut image, 56, 2);
+
+    put_u32(&mut image, ELF_HEADER_SIZE, PT_LOAD);
+    put_u32(&mut image, ELF_HEADER_SIZE + 4, PF_X);
+    put_u64(&mut image, ELF_HEADER_SIZE + 8, TEXT as u64);
+    put_u64(&mut image, ELF_HEADER_SIZE + 16, 0x0040_0000);
+    put_u64(&mut image, ELF_HEADER_SIZE + 32, (DATA - TEXT) as u64);
+    put_u64(&mut image, ELF_HEADER_SIZE + 40, (DATA - TEXT) as u64);
+    put_u64(&mut image, ELF_HEADER_SIZE + 48, 0x1000);
+
+    let second_header = ELF_HEADER_SIZE + PROGRAM_HEADER_SIZE;
+    put_u32(&mut image, second_header, PT_LOAD);
+    put_u32(&mut image, second_header + 4, PF_W);
+    put_u64(&mut image, second_header + 8, DATA as u64);
+    put_u64(&mut image, second_header + 16, TEST_DATA_ADDRESS);
+    put_u64(&mut image, second_header + 32, 128);
+    put_u64(&mut image, second_header + 40, 128);
+    put_u64(&mut image, second_header + 48, 0x1000);
+
+    let mut cursor = TEXT;
+    // socket(AF_INET, SOCK_STREAM, 0)
+    emit_bytes(&mut image, &mut cursor, &[0xb8, 41, 0, 0, 0]);
+    emit_bytes(&mut image, &mut cursor, &[0xbf, 2, 0, 0, 0]);
+    emit_bytes(&mut image, &mut cursor, &[0xbe, 1, 0, 0, 0]);
+    emit_bytes(
+        &mut image,
+        &mut cursor,
+        &[0x31, 0xd2, 0x0f, 0x05, 0x48, 0x85, 0xc0],
+    );
+    jump_to(&mut image, &mut cursor, 0x88, FAILURE);
+    emit_bytes(&mut image, &mut cursor, &[0x48, 0x89, 0xc3]);
+
+    // connect(fd, sockaddr_in*, sizeof(sockaddr_in))
+    emit_bytes(
+        &mut image,
+        &mut cursor,
+        &[0xb8, 42, 0, 0, 0, 0x48, 0x89, 0xdf, 0x48, 0xbe],
+    );
+    put_u64(&mut image, cursor, TEST_DATA_ADDRESS);
+    cursor += 8;
+    emit_bytes(
+        &mut image,
+        &mut cursor,
+        &[0xba, 16, 0, 0, 0, 0x0f, 0x05, 0x48, 0x85, 0xc0],
+    );
+    jump_to(&mut image, &mut cursor, 0x88, FAILURE);
+
+    // write(fd, "ping", 4)
+    emit_bytes(
+        &mut image,
+        &mut cursor,
+        &[0xb8, 1, 0, 0, 0, 0x48, 0x89, 0xdf, 0x48, 0xbe],
+    );
+    put_u64(&mut image, cursor, TEST_DATA_ADDRESS + 32);
+    cursor += 8;
+    emit_bytes(
+        &mut image,
+        &mut cursor,
+        &[0xba, 4, 0, 0, 0, 0x0f, 0x05, 0x48, 0x83, 0xf8, 4],
+    );
+    jump_to(&mut image, &mut cursor, 0x85, FAILURE);
+
+    // read(fd, response, 4), then compare the bytes with "pong".
+    emit_bytes(
+        &mut image,
+        &mut cursor,
+        &[0xb8, 0, 0, 0, 0, 0x48, 0x89, 0xdf, 0x48, 0xbe],
+    );
+    put_u64(&mut image, cursor, TEST_DATA_ADDRESS + 48);
+    cursor += 8;
+    emit_bytes(
+        &mut image,
+        &mut cursor,
+        &[0xba, 4, 0, 0, 0, 0x0f, 0x05, 0x48, 0x83, 0xf8, 4],
+    );
+    jump_to(&mut image, &mut cursor, 0x85, FAILURE);
+    emit_bytes(&mut image, &mut cursor, &[0x48, 0xbe]);
+    put_u64(&mut image, cursor, TEST_DATA_ADDRESS + 48);
+    cursor += 8;
+    emit_bytes(
+        &mut image,
+        &mut cursor,
+        &[0x81, 0x3e, b'p', b'o', b'n', b'g'],
+    );
+    jump_to(&mut image, &mut cursor, 0x85, FAILURE);
+
+    // close(fd), report completion through stdout, then exit(0).
+    emit_bytes(
+        &mut image,
+        &mut cursor,
+        &[
+            0xb8, 3, 0, 0, 0, 0x48, 0x89, 0xdf, 0x0f, 0x05, 0x48, 0x85, 0xc0,
+        ],
+    );
+    jump_to(&mut image, &mut cursor, 0x88, FAILURE);
+    emit_bytes(
+        &mut image,
+        &mut cursor,
+        &[0xb8, 1, 0, 0, 0, 0xbf, 1, 0, 0, 0, 0x48, 0xbe],
+    );
+    put_u64(&mut image, cursor, TEST_DATA_ADDRESS + 64);
+    cursor += 8;
+    emit_bytes(&mut image, &mut cursor, &[0xba, 35, 0, 0, 0, 0x0f, 0x05]);
+    emit_bytes(
+        &mut image,
+        &mut cursor,
+        &[0xb8, 60, 0, 0, 0, 0x31, 0xff, 0x0f, 0x05, 0x0f, 0x0b],
+    );
+
+    // Every failure exits through the ordinary scheduler path with code 1.
+    image[FAILURE] = 0xb8;
+    put_u32(&mut image, FAILURE + 1, 60);
+    image[FAILURE + 5] = 0xbf;
+    put_u32(&mut image, FAILURE + 6, 1);
+    image[FAILURE + 10] = 0x0f;
+    image[FAILURE + 11] = 0x05;
+    image[FAILURE + 12] = 0x0f;
+    image[FAILURE + 13] = 0x0b;
+
+    // sockaddr_in { AF_INET, htons(18080), 10.0.2.2 } plus TCP probe buffers.
+    image[DATA] = 2;
+    image[DATA + 2] = 0x46;
+    image[DATA + 3] = 0xa0;
+    image[DATA + 4] = 10;
+    image[DATA + 6] = 2;
+    image[DATA + 7] = 2;
+    image[DATA + 32] = b'p';
+    image[DATA + 33] = b'i';
+    image[DATA + 34] = b'n';
+    image[DATA + 35] = b'g';
+    image[DATA + 64] = b'[';
+    image[DATA + 65] = b'n';
+    image[DATA + 66] = b'e';
+    image[DATA + 67] = b't';
+    image[DATA + 68] = b']';
+    image[DATA + 69] = b' ';
+    image[DATA + 70] = b't';
+    image[DATA + 71] = b'c';
+    image[DATA + 72] = b'p';
+    image[DATA + 73] = b' ';
+    image[DATA + 74] = b'u';
+    image[DATA + 75] = b's';
+    image[DATA + 76] = b'e';
+    image[DATA + 77] = b'r';
+    image[DATA + 78] = b' ';
+    image[DATA + 79] = b's';
+    image[DATA + 80] = b'o';
+    image[DATA + 81] = b'c';
+    image[DATA + 82] = b'k';
+    image[DATA + 83] = b'e';
+    image[DATA + 84] = b't';
+    image[DATA + 85] = b' ';
+    image[DATA + 86] = b'p';
+    image[DATA + 87] = b'r';
+    image[DATA + 88] = b'o';
+    image[DATA + 89] = b'b';
+    image[DATA + 90] = b'e';
+    image[DATA + 91] = b' ';
+    image[DATA + 92] = b'p';
+    image[DATA + 93] = b'a';
+    image[DATA + 94] = b's';
+    image[DATA + 95] = b's';
+    image[DATA + 96] = b'e';
+    image[DATA + 97] = b'd';
+    image[DATA + 98] = b'\n';
+    image
+}
+
 const fn make_spawner_elf() -> [u8; 0x300] {
     let mut image = make_test_elf();
     put_u64(&mut image, ELF_HEADER_SIZE + 32, 247);
@@ -494,3 +698,11 @@ const fn make_exec_elf() -> [u8; 0x300] {
 pub const CHILD_ELF: [u8; 0x300] = make_test_elf();
 pub const TEST_ELF: [u8; 0x300] = make_spawner_elf();
 pub const EXEC_ELF: [u8; 0x300] = make_exec_elf();
+pub const NETWORK_ELF: [u8; 0x300] = make_network_elf();
+
+pub fn network_probe_elf(remote_ip: [u8; 4], remote_port: u16) -> [u8; 0x300] {
+    let mut image = NETWORK_ELF;
+    image[0x202..0x204].copy_from_slice(&remote_port.to_be_bytes());
+    image[0x204..0x208].copy_from_slice(&remote_ip);
+    image
+}

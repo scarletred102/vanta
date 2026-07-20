@@ -439,31 +439,38 @@ pub extern "C" fn _start() -> ! {
     kprintln!("[ok] pic + sti");
     serial_println!("[boot] interrupts enabled");
     run_virtio_self_check();
-    match network::initialize() {
-        Ok(info) => serial_println!(
-            "[net] udp dns reply local={}.{}.{}.{} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} gateway={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            info.local_ip[0],
-            info.local_ip[1],
-            info.local_ip[2],
-            info.local_ip[3],
-            info.mac[0],
-            info.mac[1],
-            info.mac[2],
-            info.mac[3],
-            info.mac[4],
-            info.mac[5],
-            info.gateway_mac.expect("resolved gateway MAC")[0],
-            info.gateway_mac.expect("resolved gateway MAC")[1],
-            info.gateway_mac.expect("resolved gateway MAC")[2],
-            info.gateway_mac.expect("resolved gateway MAC")[3],
-            info.gateway_mac.expect("resolved gateway MAC")[4],
-            info.gateway_mac.expect("resolved gateway MAC")[5],
-        ),
-        Err(network::NetworkError::Device(virtio_net::VirtioNetError::NotFound)) => {
-            serial_println!("[net] no legacy VirtIO-net device")
+    let network_info = match network::initialize() {
+        Ok(info) => {
+            serial_println!(
+                "[net] udp dns reply local={}.{}.{}.{} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} gateway={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                info.local_ip[0],
+                info.local_ip[1],
+                info.local_ip[2],
+                info.local_ip[3],
+                info.mac[0],
+                info.mac[1],
+                info.mac[2],
+                info.mac[3],
+                info.mac[4],
+                info.mac[5],
+                info.gateway_mac.expect("resolved gateway MAC")[0],
+                info.gateway_mac.expect("resolved gateway MAC")[1],
+                info.gateway_mac.expect("resolved gateway MAC")[2],
+                info.gateway_mac.expect("resolved gateway MAC")[3],
+                info.gateway_mac.expect("resolved gateway MAC")[4],
+                info.gateway_mac.expect("resolved gateway MAC")[5],
+            );
+            Some(info)
         }
-        Err(error) => serial_println!("[net] WARNING: bring-up failed: {:?}", error),
-    }
+        Err(network::NetworkError::Device(virtio_net::VirtioNetError::NotFound)) => {
+            serial_println!("[net] no legacy VirtIO-net device");
+            None
+        }
+        Err(error) => {
+            serial_println!("[net] WARNING: bring-up failed: {:?}", error);
+            None
+        }
+    };
     if !init_image.is_empty() {
         let _ = vfs::create_dir_root("/bin");
         if vfs::write_root("/bin/init", &elf::CHILD_ELF).is_ok() {
@@ -544,9 +551,18 @@ pub extern "C" fn _start() -> ! {
         }
         match (process::load_elf(init_image), process::load_elf(init_image)) {
             (Ok(first), Ok(second)) => {
-                let mut tasks = Vec::with_capacity(2);
+                let mut tasks = Vec::with_capacity(if network_info.is_some() { 3 } else { 2 });
                 tasks.push(Box::new(first));
                 tasks.push(Box::new(second));
+                if let Some(info) = network_info {
+                    let probe_image = elf::network_probe_elf(info.tcp_host, info.tcp_port);
+                    match process::load_elf(&probe_image) {
+                        Ok(probe) => tasks.push(Box::new(probe)),
+                        Err(error) => {
+                            serial_println!("[net] TCP probe ELF load failed: {:?}", error)
+                        }
+                    }
+                }
                 unsafe { scheduler::start(tasks) }
             }
             (Err(error), _) | (_, Err(error)) => {

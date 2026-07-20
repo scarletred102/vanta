@@ -90,12 +90,22 @@ enum TaskState {
 
 #[derive(Clone)]
 struct FileDescriptor {
-    file: Arc<Mutex<OpenFile>>,
+    resource: DescriptorResource,
+}
+
+#[derive(Clone)]
+enum DescriptorResource {
+    File(Arc<Mutex<OpenFile>>),
+    Socket(Arc<Mutex<OpenSocket>>),
 }
 
 struct OpenFile {
     contents: Vec<u8>,
     offset: usize,
+}
+
+struct OpenSocket {
+    connection: Option<crate::network::TcpConnection>,
 }
 
 struct Scheduler {
@@ -502,12 +512,42 @@ pub fn open_current(contents: Vec<u8>) -> Result<u64, ()> {
     install_descriptor(
         descriptors,
         FileDescriptor {
-            file: Arc::new(Mutex::new(OpenFile {
+            resource: DescriptorResource::File(Arc::new(Mutex::new(OpenFile {
                 contents,
                 offset: 0,
-            })),
+            }))),
         },
     )
+}
+
+pub fn open_socket_current() -> Result<u64, ()> {
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let descriptors = &mut scheduler.tasks[scheduler.current].descriptors;
+    install_descriptor(
+        descriptors,
+        FileDescriptor {
+            resource: DescriptorResource::Socket(Arc::new(Mutex::new(OpenSocket {
+                connection: None,
+            }))),
+        },
+    )
+}
+
+pub fn connect_socket_current(
+    descriptor: u64,
+    remote_ip: crate::net::Ipv4Address,
+    remote_port: u16,
+) -> Result<(), ()> {
+    let DescriptorResource::Socket(socket) = current_descriptor(descriptor)?.resource else {
+        return Err(());
+    };
+    let mut socket = socket.lock();
+    if socket.connection.is_some() {
+        return Err(());
+    }
+    socket.connection = Some(crate::network::tcp_connect(remote_ip, remote_port).map_err(|_| ())?);
+    Ok(())
 }
 
 pub fn duplicate_current(descriptor: u64) -> Result<u64, ()> {
@@ -524,15 +564,10 @@ pub fn duplicate_current(descriptor: u64) -> Result<u64, ()> {
 }
 
 pub fn seek_current(descriptor: u64, offset: i64, whence: u64) -> Result<u64, ()> {
-    let index: usize = descriptor.try_into().map_err(|_| ())?;
-    let mut scheduler = current_scheduler().lock();
-    let scheduler = scheduler.as_mut().ok_or(())?;
-    let descriptor = scheduler.tasks[scheduler.current]
-        .descriptors
-        .get_mut(index)
-        .and_then(Option::as_mut)
-        .ok_or(())?;
-    let mut file = descriptor.file.lock();
+    let DescriptorResource::File(file) = current_descriptor(descriptor)?.resource else {
+        return Err(());
+    };
+    let mut file = file.lock();
     let base = match whence {
         0 => 0,
         1 => file.offset,
@@ -573,34 +608,64 @@ fn install_descriptor(
 }
 
 pub fn read_current(descriptor: u64, length: usize) -> Result<Vec<u8>, ()> {
-    let index: usize = descriptor.try_into().map_err(|_| ())?;
-    let mut scheduler = current_scheduler().lock();
-    let scheduler = scheduler.as_mut().ok_or(())?;
-    let descriptor = scheduler.tasks[scheduler.current]
-        .descriptors
-        .get_mut(index)
-        .and_then(Option::as_mut)
-        .ok_or(())?;
-    let mut file = descriptor.file.lock();
-    let end = file.offset.saturating_add(length).min(file.contents.len());
-    let bytes = file.contents[file.offset..end].to_vec();
-    file.offset = end;
-    Ok(bytes)
+    match current_descriptor(descriptor)?.resource {
+        DescriptorResource::File(file) => {
+            let mut file = file.lock();
+            let end = file.offset.saturating_add(length).min(file.contents.len());
+            let bytes = file.contents[file.offset..end].to_vec();
+            file.offset = end;
+            Ok(bytes)
+        }
+        DescriptorResource::Socket(socket) => {
+            let mut socket = socket.lock();
+            let connection = socket.connection.as_mut().ok_or(())?;
+            crate::network::tcp_receive(connection, length).map_err(|_| ())
+        }
+    }
 }
 
 pub fn close_current(descriptor: u64) -> Result<(), ()> {
     let index: usize = descriptor.try_into().map_err(|_| ())?;
-    let mut scheduler = current_scheduler().lock();
-    let scheduler = scheduler.as_mut().ok_or(())?;
-    let descriptor = scheduler.tasks[scheduler.current]
-        .descriptors
-        .get_mut(index)
-        .ok_or(())?;
-    if descriptor.is_none() {
-        return Err(());
+    let descriptor = {
+        let mut scheduler = current_scheduler().lock();
+        let scheduler = scheduler.as_mut().ok_or(())?;
+        scheduler.tasks[scheduler.current]
+            .descriptors
+            .get_mut(index)
+            .ok_or(())?
+            .take()
+            .ok_or(())?
+    };
+    let DescriptorResource::Socket(socket) = descriptor.resource else {
+        return Ok(());
+    };
+    if Arc::strong_count(&socket) != 1 {
+        return Ok(());
     }
-    *descriptor = None;
+    if let Some(connection) = socket.lock().connection.take() {
+        crate::network::tcp_close(connection).map_err(|_| ())?;
+    }
     Ok(())
+}
+
+pub fn write_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
+    let DescriptorResource::Socket(socket) = current_descriptor(descriptor)?.resource else {
+        return Err(());
+    };
+    let mut socket = socket.lock();
+    let connection = socket.connection.as_mut().ok_or(())?;
+    crate::network::tcp_send(connection, bytes).map_err(|_| ())
+}
+
+fn current_descriptor(descriptor: u64) -> Result<FileDescriptor, ()> {
+    let index: usize = descriptor.try_into().map_err(|_| ())?;
+    let scheduler = current_scheduler().lock();
+    scheduler
+        .as_ref()
+        .and_then(|scheduler| scheduler.tasks[scheduler.current].descriptors.get(index))
+        .and_then(Option::as_ref)
+        .cloned()
+        .ok_or(())
 }
 
 fn scheduler_pid(index: usize) -> u64 {

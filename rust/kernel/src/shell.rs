@@ -80,7 +80,9 @@ fn execute(command: &str) {
             kprintln!("run <path>  net  clear");
         }
         "status" => {
-            kprintln!("kernel: rust-native | userspace: ring 3 spawn/wait/exec | storage: VantaFS");
+            kprintln!(
+                "kernel: rust-native | userspace: ring 3 spawn/wait/exec/socket | storage: VantaFS"
+            );
         }
         "net" => match crate::network::status() {
             Some(info) => {
@@ -108,6 +110,21 @@ fn execute(command: &str) {
                     gateway[5]
                 );
                 kprintln!(
+                    "dns: {}.{}.{}.{}",
+                    info.dns_server[0],
+                    info.dns_server[1],
+                    info.dns_server[2],
+                    info.dns_server[3]
+                );
+                kprintln!(
+                    "tcp target: {}.{}.{}.{}:{}",
+                    info.tcp_host[0],
+                    info.tcp_host[1],
+                    info.tcp_host[2],
+                    info.tcp_host[3],
+                    info.tcp_port
+                );
+                kprintln!(
                     "icmp: {}",
                     if info.gateway_echoed {
                         "ok"
@@ -121,6 +138,14 @@ fn execute(command: &str) {
                         "ok"
                     } else {
                         "unavailable"
+                    }
+                );
+                kprintln!(
+                    "tcp socket: {}",
+                    if info.tcp_connected {
+                        "last connection ok"
+                    } else {
+                        "not connected"
                     }
                 );
             }
