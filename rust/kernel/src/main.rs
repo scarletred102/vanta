@@ -23,6 +23,8 @@ mod interrupts;
 mod ioapic;
 mod keyboard;
 mod memory;
+mod net;
+mod network;
 mod paging;
 mod pci;
 mod process;
@@ -34,6 +36,7 @@ mod storage;
 mod syscall;
 mod vfs;
 mod virtio;
+mod virtio_net;
 
 #[used]
 #[link_section = ".requests"]
@@ -435,6 +438,31 @@ pub extern "C" fn _start() -> ! {
     kprintln!("[ok] pic + sti");
     serial_println!("[boot] interrupts enabled");
     run_virtio_self_check();
+    match network::initialize() {
+        Ok(info) => serial_println!(
+            "[net] icmp gateway reply local={}.{}.{}.{} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} gateway={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            info.local_ip[0],
+            info.local_ip[1],
+            info.local_ip[2],
+            info.local_ip[3],
+            info.mac[0],
+            info.mac[1],
+            info.mac[2],
+            info.mac[3],
+            info.mac[4],
+            info.mac[5],
+            info.gateway_mac.expect("resolved gateway MAC")[0],
+            info.gateway_mac.expect("resolved gateway MAC")[1],
+            info.gateway_mac.expect("resolved gateway MAC")[2],
+            info.gateway_mac.expect("resolved gateway MAC")[3],
+            info.gateway_mac.expect("resolved gateway MAC")[4],
+            info.gateway_mac.expect("resolved gateway MAC")[5],
+        ),
+        Err(network::NetworkError::Device(virtio_net::VirtioNetError::NotFound)) => {
+            serial_println!("[net] no legacy VirtIO-net device")
+        }
+        Err(error) => serial_println!("[net] WARNING: bring-up failed: {:?}", error),
+    }
     if !init_image.is_empty() {
         if vfs::write_root("/bin/init", &elf::CHILD_ELF).is_ok() {
             serial_println!("[proc] staged /bin/init for user spawn");

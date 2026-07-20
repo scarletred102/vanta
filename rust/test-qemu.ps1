@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$Virtio,
+    [switch]$Network,
     [ValidateRange(5, 60)]
     [int]$TimeoutSeconds = 12
 )
@@ -17,6 +18,9 @@ $disk = Join-Path $env:TEMP "vanta-qemu-test-virtio.img"
 $env:BUILD_ONLY = "1"
 try {
     & .\run.ps1
+    if ($LASTEXITCODE -ne 0) {
+        throw "kernel build failed with exit code $LASTEXITCODE"
+    }
 } finally {
     Remove-Item Env:BUILD_ONLY -ErrorAction SilentlyContinue
 }
@@ -49,6 +53,12 @@ if ($Virtio) {
         "-device", "virtio-blk-pci,disable-modern=on,ioeventfd=off,drive=vd0"
     )
 }
+if ($Network) {
+    $arguments += @(
+        "-netdev", "user,id=net0",
+        "-device", "virtio-net-pci,disable-modern=on,ioeventfd=off,netdev=net0"
+    )
+}
 
 function Invoke-QemuBoot {
     Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
@@ -76,6 +86,9 @@ $required = @(
 if ($Virtio) {
     $required += "[storage] virtio-blk ready:"
 }
+if ($Network) {
+    $required += "[net] icmp gateway reply"
+}
 
 foreach ($marker in $required) {
     if (!$output.Contains($marker)) {
@@ -90,4 +103,4 @@ if ($Virtio) {
     }
 }
 
-Write-Host "[test] QEMU regression passed (virtio=$Virtio)"
+Write-Host "[test] QEMU regression passed (virtio=$Virtio network=$Network)"
