@@ -396,4 +396,48 @@ const fn make_test_elf() -> [u8; 0x300] {
     image
 }
 
-pub const TEST_ELF: [u8; 0x300] = make_test_elf();
+const fn make_spawner_elf() -> [u8; 0x300] {
+    let mut image = make_test_elf();
+    put_u64(&mut image, ELF_HEADER_SIZE + 32, 220);
+    put_u64(&mut image, ELF_HEADER_SIZE + 40, 220);
+    let second_header = ELF_HEADER_SIZE + PROGRAM_HEADER_SIZE;
+    put_u64(&mut image, second_header + 32, 20);
+
+    // spawn("/bin/init"); trap on failure; exit without running the child payload.
+    image[0x1b9] = 0xb8;
+    put_u32(&mut image, 0x1ba, 400);
+    image[0x1be] = 0xbf;
+    put_u32(&mut image, 0x1bf, (TEST_DATA_ADDRESS + 11) as u32);
+    image[0x1c3] = 0xbe;
+    put_u32(&mut image, 0x1c4, 9);
+    image[0x1c8] = 0x0f;
+    image[0x1c9] = 0x05;
+    image[0x1ca] = 0x48;
+    image[0x1cb] = 0x85;
+    image[0x1cc] = 0xc0;
+    image[0x1cd] = 0x79;
+    image[0x1ce] = 2;
+    image[0x1cf] = 0x0f;
+    image[0x1d0] = 0x0b;
+    image[0x1d1] = 0xb8;
+    put_u32(&mut image, 0x1d2, 60);
+    image[0x1d6] = 0x31;
+    image[0x1d7] = 0xff;
+    image[0x1d8] = 0x0f;
+    image[0x1d9] = 0x05;
+    image[0x1da] = 0x0f;
+    image[0x1db] = 0x0b;
+    image[0x20b] = b'/';
+    image[0x20c] = b'b';
+    image[0x20d] = b'i';
+    image[0x20e] = b'n';
+    image[0x20f] = b'/';
+    image[0x210] = b'i';
+    image[0x211] = b'n';
+    image[0x212] = b'i';
+    image[0x213] = b't';
+    image
+}
+
+pub const CHILD_ELF: [u8; 0x300] = make_test_elf();
+pub const TEST_ELF: [u8; 0x300] = make_spawner_elf();

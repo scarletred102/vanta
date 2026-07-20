@@ -101,6 +101,8 @@ rust/
   duplicated descriptors
 - Conventional descriptor numbers: `0` stdin, `1` stdout, `2` stderr, and
   VFS opens beginning at `3`
+- `SYS_SPAWN` loads a VFS-backed ELF into a new address space with a distinct
+  child PID and recorded parent PID
 - Timer-preemptive round-robin scheduler with full user interrupt contexts
 - Per-CPU syscall stacks and return state selected through the kernel GS base
 - Round-robin address-space switching and per-process exit reclamation
@@ -116,7 +118,8 @@ rust/
 
 ## What does not (yet)
 
-- No fork/exec or process creation beyond the boot-time test workload yet
+- No copy-on-write `fork`, blocking `waitpid`, or user-controlled `exec` image
+  replacement yet
 - No slab allocator yet; the bootstrap free-list has fixed metadata capacity
 - No modern VirtIO PCI transport, filesystem journaling, or networking
 - No mouse, no windowing — terminal only

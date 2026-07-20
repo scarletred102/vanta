@@ -19,6 +19,7 @@ pub const SYS_YIELD: u64 = 24;
 pub const SYS_DUP: u64 = 32;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_EXIT: u64 = 60;
+pub const SYS_SPAWN: u64 = 400;
 const SYSCALL_RETURN_EXIT: u64 = u64::MAX;
 const SYSCALL_RETURN_YIELD: u64 = u64::MAX - 2;
 const SYSCALL_ERROR: u64 = u64::MAX - 1;
@@ -166,6 +167,7 @@ extern "C" fn vanta_syscall_dispatch(
         SYS_CLOSE => close_user(arg1),
         SYS_LSEEK => seek_user(arg1, arg2 as i64, arg3),
         SYS_DUP => duplicate_user(arg1),
+        SYS_SPAWN => spawn_user(arg1, arg2),
         SYS_YIELD => SYSCALL_RETURN_YIELD,
         SYS_GETPID => crate::scheduler::current_pid(),
         SYS_EXIT => {
@@ -243,6 +245,22 @@ fn seek_user(descriptor: u64, offset: i64, whence: u64) -> u64 {
 
 fn duplicate_user(descriptor: u64) -> u64 {
     crate::scheduler::duplicate_current(descriptor).unwrap_or(SYSCALL_ERROR)
+}
+
+fn spawn_user(pointer: u64, length: u64) -> u64 {
+    let Ok(path) = copy_from_user(pointer, length, false) else {
+        return SYSCALL_ERROR;
+    };
+    let Ok(path) = core::str::from_utf8(&path) else {
+        return SYSCALL_ERROR;
+    };
+    let Ok(image) = crate::vfs::read_root(path) else {
+        return SYSCALL_ERROR;
+    };
+    let Ok(process) = crate::process::load_elf(&image) else {
+        return SYSCALL_ERROR;
+    };
+    crate::scheduler::spawn_current(alloc::boxed::Box::new(process)).unwrap_or(SYSCALL_ERROR)
 }
 
 fn copy_from_user(pointer: u64, length: u64, writable: bool) -> Result<Vec<u8>, ()> {

@@ -122,19 +122,7 @@ unsafe fn start_on_current_cpu(processes: Vec<Box<Process>>, label: &str) -> ! {
     let tasks = processes
         .into_iter()
         .enumerate()
-        .map(|(index, process)| Task {
-            pid: (index + 1) as u64,
-            parent_pid: None,
-            state: TaskState::Runnable,
-            context: UserContext {
-                instruction_pointer: process.entry(),
-                flags: 0x202,
-                stack_pointer: process.user_stack_top(),
-            },
-            interrupt_context: InterruptContext::initial(process.entry(), process.user_stack_top()),
-            process: Some(process),
-            descriptors: alloc::vec![None, None, None],
-        })
+        .map(|(index, process)| new_task((index + 1) as u64, None, process))
         .collect();
     *SCHEDULER.lock() = Some(Scheduler {
         tasks,
@@ -314,6 +302,43 @@ pub fn current_pid() -> u64 {
         .as_ref()
         .map(|scheduler| scheduler.tasks[scheduler.current].pid)
         .unwrap_or(0)
+}
+
+pub fn spawn_current(process: Box<Process>) -> Result<u64, ()> {
+    const MAX_TASKS: usize = 8;
+    let mut scheduler = SCHEDULER.lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    if scheduler.tasks.len() == MAX_TASKS {
+        return Err(());
+    }
+    let parent_pid = scheduler.tasks[scheduler.current].pid;
+    let pid = scheduler
+        .tasks
+        .iter()
+        .map(|task| task.pid)
+        .max()
+        .and_then(|pid| pid.checked_add(1))
+        .ok_or(())?;
+    scheduler
+        .tasks
+        .push(new_task(pid, Some(parent_pid), process));
+    Ok(pid)
+}
+
+fn new_task(pid: u64, parent_pid: Option<u64>, process: Box<Process>) -> Task {
+    Task {
+        pid,
+        parent_pid,
+        state: TaskState::Runnable,
+        context: UserContext {
+            instruction_pointer: process.entry(),
+            flags: 0x202,
+            stack_pointer: process.user_stack_top(),
+        },
+        interrupt_context: InterruptContext::initial(process.entry(), process.user_stack_top()),
+        process: Some(process),
+        descriptors: alloc::vec![None, None, None],
+    }
 }
 
 pub fn open_current(contents: Vec<u8>) -> Result<u64, ()> {
