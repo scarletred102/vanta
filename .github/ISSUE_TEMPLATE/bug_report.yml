@@ -1,0 +1,55 @@
+name: Bug report
+description: Report a reproducible problem in Vanta.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: input
+    id: track
+    attributes:
+      label: Track
+      description: Is this the active Rust track or the preserved Zig track?
+      placeholder: Rust or Zig
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: Commit SHA or release being tested.
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Host
+      description: OS, architecture, and relevant tool versions.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Exact repro steps
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Include complete relevant output; redact secrets.
+    validations:
+      required: true
