@@ -218,6 +218,7 @@ try {
     if ($Virtio) {
         if ($Gpt) {
             $required += "[storage] Vanta GPT root:"
+            $required += "[storage] RedoxFS root mounted"
         } else {
             $required += "[storage] no Vanta GPT root; using legacy VantaFS fallback"
         }

@@ -115,6 +115,14 @@ pub fn inspect_current() -> PageTableSummary {
     }
 }
 
+/// Reserve the frames holding Limine's currently active page tables.
+///
+/// Limine may describe those frames as usable memory. They must be excluded
+/// before Vanta uses physical frames for page tables, heap pages, or DMA.
+pub fn reserve_active_page_tables() -> usize {
+    reserve_table_frames(current_cr3(), 4)
+}
+
 pub fn translate(virtual_address: u64) -> Option<Translation> {
     translate_in(current_address_space(), virtual_address)
 }
@@ -383,6 +391,26 @@ fn read_entry(table_physical_address: u64, index: usize) -> Option<u64> {
     let table_virtual_address = phys_to_virt(table_physical_address)?;
     let entry_address = table_virtual_address.checked_add((index * 8) as u64)?;
     Some(unsafe { (entry_address as *const u64).read_volatile() })
+}
+
+fn reserve_table_frames(table_physical_address: u64, levels: usize) -> usize {
+    let mut reserved = usize::from(memory::reserve_frame(memory::PhysFrame(
+        table_physical_address,
+    )));
+    if levels <= 1 {
+        return reserved;
+    }
+
+    for index in 0..512 {
+        let Some(entry) = read_entry(table_physical_address, index) else {
+            continue;
+        };
+        if entry & PRESENT == 0 || entry & HUGE_PAGE != 0 {
+            continue;
+        }
+        reserved += reserve_table_frames(entry & ADDRESS_MASK, levels - 1);
+    }
+    reserved
 }
 
 fn write_entry(table_physical_address: u64, index: usize, value: u64) -> bool {

@@ -4,6 +4,8 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
+use vanta_gpt::RootPartition;
+use vanta_redoxfs_adapter::{RedoxFsBackend, SectorError, SectorIo};
 
 use crate::storage::{BlockDevice, RamDisk, StorageError, SECTOR_SIZE};
 use crate::virtio::VirtioBlock;
@@ -17,6 +19,7 @@ const DIRECTORY_ENTRY_SIZE: usize = 64;
 const MAX_PATH_LENGTH: usize = 48;
 
 static ROOT: Mutex<Vfs<RootDevice>> = Mutex::new(Vfs::new());
+static REDOX_ROOT: Mutex<Option<RedoxFsBackend<RootDevice>>> = Mutex::new(None);
 static TMP: Mutex<Option<VantaFs<RamDisk>>> = Mutex::new(None);
 
 pub enum RootDevice {
@@ -51,6 +54,24 @@ impl BlockDevice for RootDevice {
     }
 }
 
+impl SectorIo for RootDevice {
+    fn sector_count(&self) -> u64 {
+        BlockDevice::sector_count(self)
+    }
+
+    fn read_sector(
+        &mut self,
+        sector: u64,
+        buffer: &mut [u8; SECTOR_SIZE],
+    ) -> Result<(), SectorError> {
+        BlockDevice::read_sector(self, sector, buffer).map_err(|_| SectorError::Io)
+    }
+
+    fn write_sector(&mut self, sector: u64, buffer: &[u8; SECTOR_SIZE]) -> Result<(), SectorError> {
+        BlockDevice::write_sector(self, sector, buffer).map_err(|_| SectorError::Io)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VfsError {
     Storage(StorageError),
@@ -64,6 +85,7 @@ pub enum VfsError {
     NotEmpty,
     NoSpace,
     FileTooLarge,
+    RedoxFs,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -519,7 +541,37 @@ pub fn mount_virtio_root(device: VirtioBlock) -> Result<bool, VfsError> {
     Ok(existed)
 }
 
+/// Mount a validated GPT partition as the persistent RedoxFS root.
+///
+/// The RAM VantaFS mount remains intact as the recovery fallback until this
+/// succeeds. RedoxFS owns the block device after a successful mount.
+pub fn mount_virtio_redox_root(
+    device: VirtioBlock,
+    partition: RootPartition,
+) -> Result<(), VfsError> {
+    let backend = RedoxFsBackend::open(RootDevice::Virtio(device), partition)
+        .map_err(|_| VfsError::RedoxFs)?;
+    *REDOX_ROOT.lock() = Some(backend);
+    Ok(())
+}
+
 pub fn remount_root() -> Result<(), VfsError> {
+    let mut redox_root = REDOX_ROOT.lock();
+    if let Some(backend) = redox_root.take() {
+        let device = backend.into_inner();
+        let partition = match &device {
+            RootDevice::Ram(_) => return Err(VfsError::RedoxFs),
+            RootDevice::Virtio(_) => {
+                // The RedoxFS root is always mounted from the validated GPT
+                // partition, which is retained by the backend disk.
+                // Re-discover it before reopening so remount validates media.
+                crate::storage::discover_vanta_root(&device).map_err(VfsError::Storage)?
+            }
+        };
+        *redox_root = Some(RedoxFsBackend::open(device, partition).map_err(|_| VfsError::RedoxFs)?);
+        return Ok(());
+    }
+    drop(redox_root);
     let mut root = ROOT.lock();
     let filesystem = root.unmount_root()?;
     root.mount_root(VantaFs::mount(filesystem.into_device())?)
@@ -533,6 +585,9 @@ pub fn read_root(path: &str) -> Result<Vec<u8>, VfsError> {
             .ok_or(VfsError::NotMounted)?
             .read_file(path);
     }
+    if let Some(root) = REDOX_ROOT.lock().as_mut() {
+        return root.read_file(path).map_err(|_| VfsError::RedoxFs);
+    }
     ROOT.lock().read(path)
 }
 
@@ -544,11 +599,26 @@ pub fn write_root(path: &str, data: &[u8]) -> Result<(), VfsError> {
             .ok_or(VfsError::NotMounted)?
             .write_file(path, data);
     }
+    if let Some(root) = REDOX_ROOT.lock().as_mut() {
+        return root.write_file(path, data).map_err(|_| VfsError::RedoxFs);
+    }
     ROOT.lock().write(path, data)
 }
 
 pub fn list_root() -> Result<Vec<String>, VfsError> {
-    let mut paths = ROOT.lock().list()?;
+    let mut paths = if let Some(root) = REDOX_ROOT.lock().as_mut() {
+        root.list_dir("/")
+            .map_err(|_| VfsError::RedoxFs)?
+            .into_iter()
+            .map(|name| {
+                let mut path = String::from("/");
+                path.push_str(&name);
+                path
+            })
+            .collect()
+    } else {
+        ROOT.lock().list()?
+    };
     paths.push(String::from("/tmp/"));
     let mut tmp = TMP.lock();
     for path in tmp.as_mut().ok_or(VfsError::NotMounted)?.list_files()? {
@@ -567,6 +637,9 @@ pub fn remove_root(path: &str) -> Result<(), VfsError> {
             .ok_or(VfsError::NotMounted)?
             .remove_file(path);
     }
+    if let Some(root) = REDOX_ROOT.lock().as_mut() {
+        return root.remove_file(path).map_err(|_| VfsError::RedoxFs);
+    }
     ROOT.lock().remove(path)
 }
 
@@ -581,6 +654,11 @@ pub fn rename_root(old_path: &str, new_path: &str) -> Result<(), VfsError> {
         }
         (Some(_), None) | (None, Some(_)) => return Err(VfsError::InvalidPath),
         (None, None) => {}
+    }
+    if let Some(root) = REDOX_ROOT.lock().as_mut() {
+        return root
+            .rename(old_path, new_path)
+            .map_err(|_| VfsError::RedoxFs);
     }
     ROOT.lock().rename(old_path, new_path)
 }
@@ -600,6 +678,14 @@ pub fn file_info_root(path: &str) -> Result<FileInfo, VfsError> {
             .ok_or(VfsError::NotMounted)?
             .file_info(path);
     }
+    if let Some(root) = REDOX_ROOT.lock().as_mut() {
+        let info = root.file_info(path).map_err(|_| VfsError::RedoxFs)?;
+        return Ok(FileInfo {
+            length: info.length.try_into().map_err(|_| VfsError::FileTooLarge)?,
+            allocated_sectors: 0,
+            is_directory: info.is_directory,
+        });
+    }
     ROOT.lock().info(path)
 }
 
@@ -613,6 +699,9 @@ pub fn create_dir_root(path: &str) -> Result<(), VfsError> {
             .as_mut()
             .ok_or(VfsError::NotMounted)?
             .create_dir(path);
+    }
+    if let Some(root) = REDOX_ROOT.lock().as_mut() {
+        return root.create_dir_all(path).map_err(|_| VfsError::RedoxFs);
     }
     ROOT.lock().create_dir(path)
 }

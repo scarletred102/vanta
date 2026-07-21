@@ -79,8 +79,16 @@ vanta_timer_entry:
     push r13
     push r14
     push r15
+    test byte ptr [rsp + 128], 3
+    jz 1f
+    swapgs
+1:
     mov rdi, rsp
     call vanta_timer_tick
+    test byte ptr [rsp + 128], 3
+    jz 2f
+    swapgs
+2:
     mov rsp, rax
     pop r15
     pop r14
@@ -120,8 +128,10 @@ extern "x86-interrupt" fn gp_handler(frame: InterruptStackFrame, code: u64) {
 extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: PageFaultErrorCode) {
     let addr = x86_64::registers::control::Cr2::read();
     panic!(
-        "PAGE FAULT addr={:?} code={:?} frame={:#?}",
-        addr, code, frame
+        "PAGE FAULT addr={:#x} code={:#x} instruction={:#x}",
+        addr.map_or(0, |value| value.as_u64()),
+        code.bits(),
+        frame.instruction_pointer.as_u64()
     );
 }
 

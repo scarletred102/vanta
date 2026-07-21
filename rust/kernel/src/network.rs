@@ -77,8 +77,10 @@ impl From<VirtioNetError> for NetworkError {
 }
 
 pub fn initialize() -> Result<NetworkInfo, NetworkError> {
-    let configuration = load_configuration()?;
+    crate::serial_println!("[net] probing VirtIO network device");
     let mut device = VirtioNet::probe()?;
+    crate::serial_println!("[net] loading VFS configuration");
+    let configuration = load_configuration()?;
     let mac = device.mac();
     let request = net::arp_request(mac, configuration.address, configuration.gateway);
     device.transmit(&request)?;

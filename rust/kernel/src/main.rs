@@ -7,6 +7,7 @@ extern crate alloc;
 
 use alloc::{boxed::Box, vec::Vec};
 use core::alloc::Layout;
+use core::arch::asm;
 use core::panic::PanicInfo;
 use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, MpRequest, RsdpRequest};
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
@@ -70,8 +71,34 @@ static REQUESTS_START: RequestsStartMarker = RequestsStartMarker::new();
 #[link_section = ".requests_end_marker"]
 static REQUESTS_END: RequestsEndMarker = RequestsEndMarker::new();
 
+const BOOTSTRAP_STACK_SIZE: usize = 128 * 1024;
+
+#[repr(align(16))]
+#[allow(dead_code)]
+struct BootstrapStack([u8; BOOTSTRAP_STACK_SIZE]);
+
+static mut BOOTSTRAP_STACK: BootstrapStack = BootstrapStack([0; BOOTSTRAP_STACK_SIZE]);
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    let stack_top = unsafe {
+        core::ptr::addr_of!(BOOTSTRAP_STACK)
+            .cast::<u8>()
+            .add(BOOTSTRAP_STACK_SIZE) as u64
+    };
+    unsafe {
+        asm!(
+            "mov rsp, {stack_top}",
+            "xor rbp, rbp",
+            "jmp {entry}",
+            stack_top = in(reg) stack_top,
+            entry = sym bootstrap_main,
+            options(noreturn)
+        );
+    }
+}
+
+extern "C" fn bootstrap_main() -> ! {
     serial::init();
     serial_println!("[boot] vanta kernel: limine entry");
 
@@ -136,12 +163,14 @@ pub extern "C" fn _start() -> ! {
 
     if let Some(hhdm_resp) = HHDM_REQUEST.response() {
         paging::init(hhdm_resp.offset);
+        let reserved_page_tables = paging::reserve_active_page_tables();
         let summary = paging::inspect_current();
         serial_println!(
-            "[vm] hhdm={:#x} cr3={:#x} pml4-present={}",
+            "[vm] hhdm={:#x} cr3={:#x} pml4-present={} reserved-page-tables={}",
             summary.hhdm_offset,
             summary.cr3,
-            summary.present_pml4_entries
+            summary.present_pml4_entries,
+            reserved_page_tables
         );
 
         let hhdm_roundtrip = paging::phys_to_virt(0x2000)
@@ -439,6 +468,7 @@ pub extern "C" fn _start() -> ! {
     kprintln!("[ok] pic + sti");
     serial_println!("[boot] interrupts enabled");
     run_virtio_self_check();
+    serial_println!("[boot] initializing network");
     let network_info = match network::initialize() {
         Ok(info) => {
             serial_println!(
@@ -471,7 +501,9 @@ pub extern "C" fn _start() -> ! {
             None
         }
     };
+    serial_println!("[boot] network initialization complete");
     if !init_image.is_empty() {
+        serial_println!("[boot] staging init image");
         let _ = vfs::create_dir_root("/bin");
         if vfs::write_root("/bin/init", &elf::CHILD_ELF).is_ok() {
             serial_println!("[proc] staged /bin/init for user spawn");
@@ -585,10 +617,19 @@ fn run_virtio_self_check() {
                         root.start_lba,
                         root.sector_count()
                     );
-                    serial_println!("[storage] GPT root reserved for RedoxFS VFS backend");
+                    let mounted = match vfs::mount_virtio_redox_root(device, root) {
+                        Ok(()) => {
+                            serial_println!("[storage] RedoxFS root mounted");
+                            true
+                        }
+                        Err(error) => {
+                            serial_println!("[storage] RedoxFS root mount failed: {:?}", error);
+                            false
+                        }
+                    };
                     serial_println!(
-                        "[storage] virtio-blk ready: sectors={} write=false read=false equal=false root=false",
-                        sectors
+                        "[storage] virtio-blk ready: sectors={} write=false read=false equal=false root={}",
+                        sectors, mounted
                     );
                 }
                 Err(_) => {

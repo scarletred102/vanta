@@ -114,6 +114,20 @@ impl FrameAllocator {
         false
     }
 
+    fn reserve(&mut self, frame: PhysFrame) -> bool {
+        for index in 0..self.len {
+            if self.frames[index] != frame.start_address() {
+                continue;
+            }
+            if self.is_used(index) {
+                return false;
+            }
+            self.set_used(index, true);
+            return true;
+        }
+        false
+    }
+
     fn is_used(&self, index: usize) -> bool {
         self.used[index / 64] & (1 << (index % 64)) != 0
     }
@@ -167,4 +181,9 @@ pub fn alloc_frame() -> Option<PhysFrame> {
 
 pub fn free_frame(frame: PhysFrame) -> bool {
     FRAME_ALLOCATOR.lock().free(frame)
+}
+
+/// Mark a bootloader-owned frame unavailable to Vanta allocations.
+pub fn reserve_frame(frame: PhysFrame) -> bool {
+    FRAME_ALLOCATOR.lock().reserve(frame)
 }

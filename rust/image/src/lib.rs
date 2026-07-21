@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::rc::Rc;
 
-use redoxfs::{Disk, FileSystem, BLOCK_SIZE};
+use redoxfs::{Disk, FileSystem, Node, TreePtr, BLOCK_SIZE};
 use syscall::error::{Error as SyscallError, EIO};
 use vanta_gpt::{RootPartition, VANTA_ROOT_TYPE_GUID};
 
@@ -158,7 +158,19 @@ fn build_redoxfs(sectors: u64) -> Result<Vec<u8>, ImageError> {
             .ok_or(ImageError::InvalidLayout)?,
     )
     .map_err(|_| ImageError::InvalidLayout)?;
-    let fs = FileSystem::create(MemoryDisk::new(bytes), None, 0, 0).map_err(ImageError::RedoxFs)?;
+    let mut fs =
+        FileSystem::create(MemoryDisk::new(bytes), None, 0, 0).map_err(ImageError::RedoxFs)?;
+    fs.tx(|tx| {
+        let etc = tx
+            .create_node(TreePtr::root(), "etc", Node::MODE_DIR | 0o755, 0, 0)?
+            .ptr();
+        let config = tx
+            .create_node(etc, "config", Node::MODE_FILE | 0o644, 0, 0)?
+            .ptr();
+        tx.write_node(config, 0, b"vanta-vfs-syscall\n", 0, 0)?;
+        Ok(())
+    })
+    .map_err(ImageError::RedoxFs)?;
     Ok(fs.disk.into_bytes())
 }
 

@@ -32,7 +32,9 @@ const SYSCALL_RETURN_WAIT: u64 = u64::MAX - 3;
 const SYSCALL_RETURN_EXEC: u64 = u64::MAX - 4;
 const SYSCALL_ERROR: u64 = u64::MAX - 1;
 const USER_ADDRESS_LIMIT: u64 = 0x0000_8000_0000_0000;
-const SYSCALL_STACK_SIZE: usize = 4096 * 2;
+// RedoxFS transactions are stack-intensive, so descriptor syscalls require a
+// real kernel stack rather than the former 8 KiB bootstrap-sized buffer.
+const SYSCALL_STACK_SIZE: usize = 128 * 1024;
 const MAX_CPUS: usize = 8;
 
 #[repr(C)]
@@ -85,6 +87,10 @@ const EMPTY_CPU_LOCAL: CpuLocal = CpuLocal {
 
 static mut CPU_LOCALS: [CpuLocal; MAX_CPUS] = [EMPTY_CPU_LOCAL; MAX_CPUS];
 
+const SYSCALL_STACK_TOP_OFFSET: usize = core::mem::offset_of!(CpuLocal, syscall_stack_top);
+const USER_RSP_OFFSET: usize = core::mem::offset_of!(CpuLocal, user_rsp);
+const EXIT_CODE_OFFSET: usize = core::mem::offset_of!(CpuLocal, exit_code);
+
 global_asm!(
     r#"
     .global vanta_syscall_entry
@@ -94,8 +100,9 @@ global_asm!(
     .extern vanta_syscall_exec
     .extern vanta_syscall_exit
 vanta_syscall_entry:
-    mov gs:[8208], rsp
-    mov rsp, gs:[8200]
+    swapgs
+    mov gs:[{user_rsp_offset}], rsp
+    mov rsp, gs:[{syscall_stack_top_offset}]
     push r15
     push r14
     push r13
@@ -126,16 +133,17 @@ vanta_syscall_entry:
     mov r11, [rsp + 48]
     mov rcx, [rsp + 40]
     add rsp, 104
-    mov rsp, gs:[8208]
+    mov rsp, gs:[{user_rsp_offset}]
+    swapgs
     sysretq
 vanta_syscall_yield_path:
     mov rdi, rsp
-    mov rsi, gs:[8208]
+    mov rsi, gs:[{user_rsp_offset}]
     call vanta_syscall_yield
     jmp vanta_syscall_restore_context
 vanta_syscall_wait_path:
     mov rdi, rsp
-    mov rsi, gs:[8208]
+    mov rsi, gs:[{user_rsp_offset}]
     call vanta_syscall_wait
     jmp vanta_syscall_restore_context
 vanta_syscall_exec_path:
@@ -148,11 +156,12 @@ vanta_syscall_exec_error:
     mov r11, [rsp + 48]
     mov rcx, [rsp + 40]
     add rsp, 104
-    mov rsp, gs:[8208]
+    mov rsp, gs:[{user_rsp_offset}]
     mov rax, -2
+    swapgs
     sysretq
 vanta_syscall_exit_path:
-    mov rdi, gs:[8216]
+    mov rdi, gs:[{exit_code_offset}]
     call vanta_syscall_exit
 vanta_syscall_restore_context:
     mov r10, rax
@@ -166,8 +175,12 @@ vanta_syscall_restore_context:
     mov r11, [r10 + 64]
     mov rsp, [r10 + 72]
     mov rax, [r10]
+    swapgs
     sysretq
-"#
+"#,
+    syscall_stack_top_offset = const SYSCALL_STACK_TOP_OFFSET,
+    user_rsp_offset = const USER_RSP_OFFSET,
+    exit_code_offset = const EXIT_CODE_OFFSET,
 );
 
 extern "C" {
@@ -206,8 +219,10 @@ pub fn initialize_cpu_local(index: usize) -> bool {
         (*local).cpu_index = index;
     }
     let mut gs_base = x86_64::registers::model_specific::Msr::new(0xc000_0101);
+    let mut kernel_gs_base = x86_64::registers::model_specific::Msr::new(0xc000_0102);
     unsafe {
         gs_base.write(local as u64);
+        kernel_gs_base.write(0);
     }
     true
 }

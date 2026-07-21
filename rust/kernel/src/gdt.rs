@@ -12,7 +12,10 @@ use x86_64::VirtAddr;
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
 const MAX_CPUS: usize = 8;
-const STACK_SIZE: usize = 4096 * 5;
+// Ring-3 interrupts can traverse filesystem and scheduler state before
+// returning to userspace. Keep their per-CPU kernel stack independent from
+// Limine's bootstrap stack and large enough for RedoxFS-backed operations.
+const STACK_SIZE: usize = 128 * 1024;
 
 #[repr(align(16))]
 #[derive(Clone, Copy)]
@@ -149,6 +152,7 @@ pub unsafe fn enter_user(entry: u64, stack: u64) -> ! {
 
     unsafe {
         asm!(
+            "swapgs",
             "push {user_data}",
             "push {stack}",
             "push {rflags}",
