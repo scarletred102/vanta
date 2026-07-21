@@ -15,6 +15,8 @@ zigux/
 pluto/
 third_party/linux-6.18.39/
 third_party/linux-6.18.39.tar.xz
+third_party/redox/
+third_party/redox-sources/
 /.vanta-local/
 /zig/zig-out/
 /zig/zig-cache/
@@ -31,3 +33,4 @@ third_party/linux-6.18.39.tar.xz
 __pycache__/
 *.pyc
 actions-runner/
+.worktrees/
