@@ -1,0 +1,10 @@
+[package]
+name = "vanta-image"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc"] }
+redoxfs = { path = "../vendor/redoxfs", default-features = false }
+syscall = { package = "redox_syscall", version = "0.9.0" }
+vanta-gpt = { path = "../gpt" }

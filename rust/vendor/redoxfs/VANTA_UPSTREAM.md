@@ -12,5 +12,11 @@ Vanta consumes the filesystem core with default features disabled. Vanta-owned
 adapters live outside this subtree so that upstream changes and local changes
 remain separately reviewable.
 
+Vanta patches the formatter path so unencrypted `FileSystem::create` is
+available without RedoxFS's host-only `std` feature. In that profile encrypted
+formatting returns `EOPNOTSUPP`, and new headers use a zero UUID; the host
+image builder creates only unencrypted filesystems. The upstream `std` profile
+retains random UUID and encrypted-format support.
+
 To update, fetch the intended upstream commit, review its license and diff,
 then run `git subtree pull --prefix=rust/vendor/redoxfs <upstream> <commit> --squash`.

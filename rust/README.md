@@ -39,6 +39,18 @@ Run the checked QEMU regressions from PowerShell:
 .\test-qemu.ps1 -Network # require VFS-configured ARP, ICMP, UDP DNS, and ring-3 TCP
 ```
 
+Build the persistent GPT disk artifact:
+
+```powershell
+cargo xtask image
+```
+
+This writes `target/vanta-gpt.img` and `target/vanta-gpt.manifest`. The image
+has a FAT ESP containing Limine and the kernel plus a bounded, formatted
+RedoxFS root partition. The kernel currently detects that partition but keeps
+the legacy VantaFS mount as the runtime fallback until the RedoxFS VFS adapter
+is enabled.
+
 Requires:
 - rustup with a nightly toolchain (a `rust-toolchain.toml` pins this) on a
   `x86_64-pc-windows-gnu` host

@@ -7,3 +7,6 @@ rustflags = [
     "-C", "link-arg=max-page-size=0x1000",
     "-C", "relocation-model=static",
 ]
+
+[alias]
+xtask = "run -p xtask --"

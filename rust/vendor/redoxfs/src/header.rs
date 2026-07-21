@@ -43,10 +43,19 @@ impl Header {
     #[cfg(feature = "std")]
     pub fn new(size: u64) -> Header {
         let uuid = uuid::Uuid::new_v4();
+        Self::new_with_uuid(size, *uuid.as_bytes())
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn new(size: u64) -> Header {
+        Self::new_with_uuid(size, [0; 16])
+    }
+
+    fn new_with_uuid(size: u64, uuid: [u8; 16]) -> Header {
         let mut header = Header {
             signature: *SIGNATURE,
             version: VERSION.into(),
-            uuid: *uuid.as_bytes(),
+            uuid,
             size: size.into(),
             ..Default::default()
         };
