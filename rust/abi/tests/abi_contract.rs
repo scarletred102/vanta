@@ -1,4 +1,4 @@
-use vanta_abi::{Credentials, Errno, Rights, Syscall, ABI_VERSION};
+use vanta_abi::{CapabilityId, Credentials, Errno, Rights, Syscall, ABI_VERSION};
 
 #[test]
 fn abi_v0_uses_vanta_owned_numbers() {
@@ -42,4 +42,14 @@ fn rights_are_composable_without_granting_unrelated_authority() {
     assert!(file_rights.contains(Rights::READ));
     assert!(file_rights.contains(Rights::WRITE));
     assert!(!file_rights.contains(Rights::MOUNT));
+}
+
+#[test]
+fn capability_ids_preserve_slot_and_generation() {
+    let capability = CapabilityId::from_parts(42, 7);
+
+    assert_eq!(capability.slot(), 42);
+    assert_eq!(capability.generation(), 7);
+    assert!(!capability.is_invalid());
+    assert!(CapabilityId::INVALID.is_invalid());
 }

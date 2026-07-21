@@ -78,6 +78,7 @@ impl Rights {
     pub const MOUNT: Self = Self(1 << 4);
     pub const DEVICE: Self = Self(1 << 5);
     pub const PROCESS_ADMIN: Self = Self(1 << 6);
+    pub const CONNECT: Self = Self(1 << 7);
 
     pub const fn contains(self, required: Self) -> bool {
         self.0 & required.0 == required.0
@@ -95,6 +96,30 @@ impl BitOr for Rights {
 impl BitOrAssign for Rights {
     fn bitor_assign(&mut self, rhs: Self) {
         self.0 |= rhs.0;
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CapabilityId(u64);
+
+impl CapabilityId {
+    pub const INVALID: Self = Self(0);
+
+    pub const fn from_parts(slot: u32, generation: u32) -> Self {
+        Self(((generation as u64) << 32) | slot as u64)
+    }
+
+    pub const fn slot(self) -> u32 {
+        self.0 as u32
+    }
+
+    pub const fn generation(self) -> u32 {
+        (self.0 >> 32) as u32
+    }
+
+    pub const fn is_invalid(self) -> bool {
+        self.0 == 0
     }
 }
 

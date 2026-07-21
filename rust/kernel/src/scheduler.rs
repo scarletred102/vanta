@@ -5,6 +5,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
+use vanta_abi::{CapabilityId, Credentials, Rights};
 
 use crate::paging::{self, AddressSpace};
 use crate::process::Process;
@@ -78,6 +79,7 @@ struct Task {
     context: UserContext,
     interrupt_context: InterruptContext,
     descriptors: Vec<Option<FileDescriptor>>,
+    credentials: Credentials,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,6 +92,8 @@ enum TaskState {
 
 #[derive(Clone)]
 struct FileDescriptor {
+    capability: CapabilityId,
+    rights: Rights,
     resource: DescriptorResource,
 }
 
@@ -118,6 +122,7 @@ struct Scheduler {
 
 static SCHEDULERS: [Mutex<Option<Scheduler>>; MAX_CPUS] = [const { Mutex::new(None) }; MAX_CPUS];
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
+static NEXT_CAPABILITY_SLOT: AtomicU64 = AtomicU64::new(1);
 
 fn current_scheduler() -> &'static Mutex<Option<Scheduler>> {
     let index = crate::syscall::current_cpu_index();
@@ -126,6 +131,13 @@ fn current_scheduler() -> &'static Mutex<Option<Scheduler>> {
 
 fn allocate_pid() -> u64 {
     NEXT_PID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn allocate_capability() -> CapabilityId {
+    CapabilityId::from_parts(
+        NEXT_CAPABILITY_SLOT.fetch_add(1, Ordering::Relaxed) as u32,
+        1,
+    )
 }
 
 pub unsafe fn start(processes: Vec<Box<Process>>) -> ! {
@@ -143,7 +155,7 @@ unsafe fn start_on_current_cpu(processes: Vec<Box<Process>>, label: &str) -> ! {
     }
     let tasks = processes
         .into_iter()
-        .map(|process| new_task(allocate_pid(), None, process))
+        .map(|process| new_task(allocate_pid(), None, Credentials::vanta(), process))
         .collect();
     *current_scheduler().lock() = Some(Scheduler {
         tasks,
@@ -373,10 +385,11 @@ pub fn spawn_current(process: Box<Process>) -> Result<u64, ()> {
         return Err(());
     }
     let parent_pid = scheduler.tasks[scheduler.current].pid;
+    let credentials = scheduler.tasks[scheduler.current].credentials;
     let pid = allocate_pid();
     scheduler
         .tasks
-        .push(new_task(pid, Some(parent_pid), process));
+        .push(new_task(pid, Some(parent_pid), credentials, process));
     Ok(pid)
 }
 
@@ -482,7 +495,12 @@ pub fn wait_current(pid: u64, context: UserContext) -> *const UserContext {
     crate::syscall::prepare_user_return(next_context, next_space)
 }
 
-fn new_task(pid: u64, parent_pid: Option<u64>, process: Box<Process>) -> Task {
+fn new_task(
+    pid: u64,
+    parent_pid: Option<u64>,
+    credentials: Credentials,
+    process: Box<Process>,
+) -> Task {
     Task {
         pid,
         parent_pid,
@@ -502,6 +520,7 @@ fn new_task(pid: u64, parent_pid: Option<u64>, process: Box<Process>) -> Task {
         interrupt_context: InterruptContext::initial(process.entry(), process.user_stack_top()),
         process: Some(process),
         descriptors: alloc::vec![None, None, None],
+        credentials,
     }
 }
 
@@ -512,6 +531,8 @@ pub fn open_current(contents: Vec<u8>) -> Result<u64, ()> {
     install_descriptor(
         descriptors,
         FileDescriptor {
+            capability: allocate_capability(),
+            rights: Rights::READ | Rights::TRANSFER,
             resource: DescriptorResource::File(Arc::new(Mutex::new(OpenFile {
                 contents,
                 offset: 0,
@@ -527,6 +548,8 @@ pub fn open_socket_current() -> Result<u64, ()> {
     install_descriptor(
         descriptors,
         FileDescriptor {
+            capability: allocate_capability(),
+            rights: Rights::READ | Rights::WRITE | Rights::TRANSFER | Rights::CONNECT,
             resource: DescriptorResource::Socket(Arc::new(Mutex::new(OpenSocket {
                 connection: None,
             }))),
@@ -539,7 +562,11 @@ pub fn connect_socket_current(
     remote_ip: crate::net::Ipv4Address,
     remote_port: u16,
 ) -> Result<(), ()> {
-    let DescriptorResource::Socket(socket) = current_descriptor(descriptor)?.resource else {
+    let descriptor = current_descriptor(descriptor)?;
+    if !descriptor.rights.contains(Rights::CONNECT) {
+        return Err(());
+    }
+    let DescriptorResource::Socket(socket) = descriptor.resource else {
         return Err(());
     };
     let mut socket = socket.lock();
@@ -560,11 +587,18 @@ pub fn duplicate_current(descriptor: u64) -> Result<u64, ()> {
         .and_then(Option::as_ref)
         .cloned()
         .ok_or(())?;
+    if duplicate.capability.is_invalid() || !duplicate.rights.contains(Rights::TRANSFER) {
+        return Err(());
+    }
     install_descriptor(descriptors, duplicate)
 }
 
 pub fn seek_current(descriptor: u64, offset: i64, whence: u64) -> Result<u64, ()> {
-    let DescriptorResource::File(file) = current_descriptor(descriptor)?.resource else {
+    let descriptor = current_descriptor(descriptor)?;
+    if !descriptor.rights.contains(Rights::READ) {
+        return Err(());
+    }
+    let DescriptorResource::File(file) = descriptor.resource else {
         return Err(());
     };
     let mut file = file.lock();
@@ -608,7 +642,11 @@ fn install_descriptor(
 }
 
 pub fn read_current(descriptor: u64, length: usize) -> Result<Vec<u8>, ()> {
-    match current_descriptor(descriptor)?.resource {
+    let descriptor = current_descriptor(descriptor)?;
+    if !descriptor.rights.contains(Rights::READ) {
+        return Err(());
+    }
+    match descriptor.resource {
         DescriptorResource::File(file) => {
             let mut file = file.lock();
             let end = file.offset.saturating_add(length).min(file.contents.len());
@@ -649,7 +687,11 @@ pub fn close_current(descriptor: u64) -> Result<(), ()> {
 }
 
 pub fn write_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
-    let DescriptorResource::Socket(socket) = current_descriptor(descriptor)?.resource else {
+    let descriptor = current_descriptor(descriptor)?;
+    if !descriptor.rights.contains(Rights::WRITE) {
+        return Err(());
+    }
+    let DescriptorResource::Socket(socket) = descriptor.resource else {
         return Err(());
     };
     let mut socket = socket.lock();
