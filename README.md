@@ -30,6 +30,9 @@ From `rust/`, use the nightly pinned in `kernel/rust-toolchain.toml`:
 .\test-qemu.ps1
 ```
 
+The GitHub Actions Rust QEMU workflow runs on a Windows self-hosted runner,
+so CI requires QEMU and the edk2/OVMF firmware to be preinstalled there.
+
 For an interactive boot instead of the checked QEMU regression:
 
 ```powershell

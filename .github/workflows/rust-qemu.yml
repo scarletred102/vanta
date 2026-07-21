@@ -9,11 +9,10 @@ permissions:
 
 jobs:
   qemu:
-    runs-on: windows-latest
+    runs-on: self-hosted
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
-      - run: choco install qemu -y --no-progress
       - name: Resolve QEMU and OVMF
         shell: pwsh
         run: |
