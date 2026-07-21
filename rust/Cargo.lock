@@ -892,6 +892,7 @@ dependencies = [
  "spin",
  "uart_16550",
  "vanta-abi",
+ "vanta-gpt",
  "x86_64",
 ]
 

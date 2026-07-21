@@ -1,7 +1,12 @@
 #![no_std]
 
+extern crate alloc;
+
+use alloc::vec;
+
 const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
 const MIN_HEADER_SIZE: usize = 92;
+const SECTOR_SIZE: usize = 512;
 const TYPE_GUID_SIZE: usize = 16;
 const PARTITION_START_OFFSET: usize = 32;
 const PARTITION_END_OFFSET: usize = 40;
@@ -41,7 +46,68 @@ pub enum GptError {
     MissingRoot,
 }
 
+struct HeaderLayout {
+    first_usable_lba: u64,
+    last_usable_lba: u64,
+    entry_lba: u64,
+    entry_count: usize,
+    entry_size: usize,
+    entry_bytes: usize,
+    entries_crc: u32,
+}
+
+pub fn discover_vanta_root<F>(mut read_sector: F) -> Result<RootPartition, GptError>
+where
+    F: FnMut(u64, &mut [u8; SECTOR_SIZE]) -> Result<(), ()>,
+{
+    let mut header = [0_u8; SECTOR_SIZE];
+    read_sector(1, &mut header).map_err(|_| GptError::InvalidHeader)?;
+    let layout = parse_header(&header)?;
+    let sector_count = layout.entry_bytes.div_ceil(SECTOR_SIZE);
+    let mut entries = vec![0_u8; layout.entry_bytes];
+
+    for index in 0..sector_count {
+        let mut sector = [0_u8; SECTOR_SIZE];
+        read_sector(layout.entry_lba + index as u64, &mut sector)
+            .map_err(|_| GptError::InvalidHeader)?;
+        let start = index * SECTOR_SIZE;
+        let length = (layout.entry_bytes - start).min(SECTOR_SIZE);
+        entries[start..start + length].copy_from_slice(&sector[..length]);
+    }
+
+    find_vanta_root(&header, &entries)
+}
+
 pub fn find_vanta_root(header: &[u8], entries: &[u8]) -> Result<RootPartition, GptError> {
+    let layout = parse_header(header)?;
+    if entries.len() < layout.entry_bytes {
+        return Err(GptError::InvalidHeader);
+    }
+    if crc32(&entries[..layout.entry_bytes]) != layout.entries_crc {
+        return Err(GptError::InvalidPartitionArrayCrc);
+    }
+
+    for index in 0..layout.entry_count {
+        let offset = index * layout.entry_size;
+        let entry = &entries[offset..offset + layout.entry_size];
+        if entry[..TYPE_GUID_SIZE] != VANTA_ROOT_TYPE_GUID {
+            continue;
+        }
+        let start_lba = read_u64(entry, PARTITION_START_OFFSET)?;
+        let end_lba = read_u64(entry, PARTITION_END_OFFSET)?;
+        if start_lba < layout.first_usable_lba
+            || end_lba > layout.last_usable_lba
+            || start_lba > end_lba
+        {
+            return Err(GptError::InvalidPartitionLayout);
+        }
+        return Ok(RootPartition { start_lba, end_lba });
+    }
+
+    Err(GptError::MissingRoot)
+}
+
+fn parse_header(header: &[u8]) -> Result<HeaderLayout, GptError> {
     if header.get(..GPT_SIGNATURE.len()) != Some(GPT_SIGNATURE) {
         return Err(GptError::InvalidSignature);
     }
@@ -70,29 +136,18 @@ pub fn find_vanta_root(header: &[u8], entries: &[u8]) -> Result<RootPartition, G
         || backup_lba <= current_lba
         || first_usable_lba > last_usable_lba
         || entry_size < PARTITION_END_OFFSET + core::mem::size_of::<u64>()
-        || entries.len() < entry_bytes
     {
         return Err(GptError::InvalidHeader);
     }
-    if crc32(&entries[..entry_bytes]) != expected_entries_crc {
-        return Err(GptError::InvalidPartitionArrayCrc);
-    }
-
-    for index in 0..entry_count {
-        let offset = index * entry_size;
-        let entry = &entries[offset..offset + entry_size];
-        if entry[..TYPE_GUID_SIZE] != VANTA_ROOT_TYPE_GUID {
-            continue;
-        }
-        let start_lba = read_u64(entry, PARTITION_START_OFFSET)?;
-        let end_lba = read_u64(entry, PARTITION_END_OFFSET)?;
-        if start_lba < first_usable_lba || end_lba > last_usable_lba || start_lba > end_lba {
-            return Err(GptError::InvalidPartitionLayout);
-        }
-        return Ok(RootPartition { start_lba, end_lba });
-    }
-
-    Err(GptError::MissingRoot)
+    Ok(HeaderLayout {
+        first_usable_lba,
+        last_usable_lba,
+        entry_lba: read_u64(header, 72)?,
+        entry_count,
+        entry_size,
+        entry_bytes,
+        entries_crc: expected_entries_crc,
+    })
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, GptError> {

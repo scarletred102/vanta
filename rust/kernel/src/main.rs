@@ -583,6 +583,16 @@ fn run_virtio_self_check() {
             let write_ok = device.write_sector(32, &written).is_ok();
             let mut read_back = [0u8; storage::SECTOR_SIZE];
             let read_ok = device.read_sector(32, &mut read_back).is_ok();
+            match storage::discover_vanta_root(&device) {
+                Ok(root) => serial_println!(
+                    "[storage] Vanta GPT root: start={} sectors={}",
+                    root.start_lba,
+                    root.sector_count()
+                ),
+                Err(_) => {
+                    serial_println!("[storage] no Vanta GPT root; using legacy VantaFS fallback")
+                }
+            }
             let mount = vfs::mount_virtio_root(device);
             let root_ready = match mount {
                 Ok(existed) => {

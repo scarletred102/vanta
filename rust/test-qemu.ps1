@@ -204,6 +204,7 @@ try {
         "[shell] entering main loop"
     )
     if ($Virtio) {
+        $required += "[storage] no Vanta GPT root; using legacy VantaFS fallback"
         $required += "[storage] virtio-blk ready:"
     }
     if ($Network) {

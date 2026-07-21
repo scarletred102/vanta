@@ -2,6 +2,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec;
+use vanta_gpt::RootPartition;
 
 pub const SECTOR_SIZE: usize = 512;
 
@@ -18,6 +19,13 @@ pub trait BlockDevice {
     fn read_sector(&self, sector: u64, buffer: &mut [u8; SECTOR_SIZE]) -> Result<(), StorageError>;
     fn write_sector(&mut self, sector: u64, buffer: &[u8; SECTOR_SIZE])
         -> Result<(), StorageError>;
+}
+
+pub fn discover_vanta_root<D: BlockDevice>(device: &D) -> Result<RootPartition, StorageError> {
+    vanta_gpt::discover_vanta_root(|sector, buffer| {
+        device.read_sector(sector, buffer).map_err(|_| ())
+    })
+    .map_err(|_| StorageError::IoFailed)
 }
 
 pub struct RamDisk {
