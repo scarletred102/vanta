@@ -100,6 +100,8 @@ struct FileDescriptor {
 #[derive(Clone)]
 enum DescriptorResource {
     File(Arc<Mutex<OpenFile>>),
+    PipeRead(Arc<Mutex<PipeReader>>),
+    PipeWrite(Arc<Mutex<PipeWriter>>),
     Socket(Arc<Mutex<OpenSocket>>),
 }
 
@@ -110,6 +112,57 @@ struct OpenFile {
 
 struct OpenSocket {
     connection: Option<crate::network::TcpConnection>,
+}
+
+struct Pipe;
+
+struct PipeReader {
+    state: Arc<Mutex<PipeState>>,
+}
+
+struct PipeWriter {
+    state: Arc<Mutex<PipeState>>,
+}
+
+struct PipeState {
+    bytes: Vec<u8>,
+    writer_open: bool,
+}
+
+impl Pipe {
+    fn new() -> (PipeReader, PipeWriter) {
+        let state = Arc::new(Mutex::new(PipeState {
+            bytes: Vec::new(),
+            writer_open: true,
+        }));
+        (
+            PipeReader {
+                state: Arc::clone(&state),
+            },
+            PipeWriter { state },
+        )
+    }
+}
+
+impl PipeReader {
+    fn read(&mut self, length: usize) -> Vec<u8> {
+        let mut state = self.state.lock();
+        let length = length.min(state.bytes.len());
+        state.bytes.drain(..length).collect()
+    }
+}
+
+impl PipeWriter {
+    fn write(&mut self, bytes: &[u8]) {
+        let mut state = self.state.lock();
+        if state.writer_open {
+            state.bytes.extend_from_slice(bytes);
+        }
+    }
+
+    fn close(&mut self) {
+        self.state.lock().writer_open = false;
+    }
 }
 
 struct Scheduler {
@@ -123,6 +176,21 @@ struct Scheduler {
 static SCHEDULERS: [Mutex<Option<Scheduler>>; MAX_CPUS] = [const { Mutex::new(None) }; MAX_CPUS];
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 static NEXT_CAPABILITY_SLOT: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(test)]
+mod tests {
+    use super::Pipe;
+
+    #[test]
+    fn pipe_preserves_order_then_reports_eof_after_writer_close() {
+        let (mut reader, mut writer) = Pipe::new();
+        writer.write(b"hello");
+        assert_eq!(reader.read(2), b"he");
+        writer.close();
+        assert_eq!(reader.read(8), b"llo");
+        assert!(reader.read(8).is_empty());
+    }
+}
 
 fn current_scheduler() -> &'static Mutex<Option<Scheduler>> {
     let index = crate::syscall::current_cpu_index();
@@ -593,6 +661,30 @@ pub fn duplicate_current(descriptor: u64) -> Result<u64, ()> {
     install_descriptor(descriptors, duplicate)
 }
 
+pub fn open_pipe_current() -> Result<(u64, u64), ()> {
+    let (reader, writer) = Pipe::new();
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let descriptors = &mut scheduler.tasks[scheduler.current].descriptors;
+    let reader = install_descriptor(
+        descriptors,
+        FileDescriptor {
+            capability: allocate_capability(),
+            rights: Rights::READ | Rights::TRANSFER,
+            resource: DescriptorResource::PipeRead(Arc::new(Mutex::new(reader))),
+        },
+    )?;
+    let writer = install_descriptor(
+        descriptors,
+        FileDescriptor {
+            capability: allocate_capability(),
+            rights: Rights::WRITE | Rights::TRANSFER,
+            resource: DescriptorResource::PipeWrite(Arc::new(Mutex::new(writer))),
+        },
+    )?;
+    Ok((reader, writer))
+}
+
 pub fn seek_current(descriptor: u64, offset: i64, whence: u64) -> Result<u64, ()> {
     let descriptor = current_descriptor(descriptor)?;
     if !descriptor.rights.contains(Rights::READ) {
@@ -659,6 +751,8 @@ pub fn read_current(descriptor: u64, length: usize) -> Result<Vec<u8>, ()> {
             let connection = socket.connection.as_mut().ok_or(())?;
             crate::network::tcp_receive(connection, length).map_err(|_| ())
         }
+        DescriptorResource::PipeRead(reader) => Ok(reader.lock().read(length)),
+        DescriptorResource::PipeWrite(_) => Err(()),
     }
 }
 
@@ -674,14 +768,16 @@ pub fn close_current(descriptor: u64) -> Result<(), ()> {
             .take()
             .ok_or(())?
     };
-    let DescriptorResource::Socket(socket) = descriptor.resource else {
-        return Ok(());
-    };
-    if Arc::strong_count(&socket) != 1 {
-        return Ok(());
-    }
-    if let Some(connection) = socket.lock().connection.take() {
-        crate::network::tcp_close(connection).map_err(|_| ())?;
+    match descriptor.resource {
+        DescriptorResource::Socket(socket) => {
+            if Arc::strong_count(&socket) == 1 {
+                if let Some(connection) = socket.lock().connection.take() {
+                    crate::network::tcp_close(connection).map_err(|_| ())?;
+                }
+            }
+        }
+        DescriptorResource::PipeWrite(writer) => writer.lock().close(),
+        DescriptorResource::File(_) | DescriptorResource::PipeRead(_) => {}
     }
     Ok(())
 }
@@ -691,12 +787,18 @@ pub fn write_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
     if !descriptor.rights.contains(Rights::WRITE) {
         return Err(());
     }
-    let DescriptorResource::Socket(socket) = descriptor.resource else {
-        return Err(());
-    };
-    let mut socket = socket.lock();
-    let connection = socket.connection.as_mut().ok_or(())?;
-    crate::network::tcp_send(connection, bytes).map_err(|_| ())
+    match descriptor.resource {
+        DescriptorResource::Socket(socket) => {
+            let mut socket = socket.lock();
+            let connection = socket.connection.as_mut().ok_or(())?;
+            crate::network::tcp_send(connection, bytes).map_err(|_| ())
+        }
+        DescriptorResource::PipeWrite(writer) => {
+            writer.lock().write(bytes);
+            Ok(())
+        }
+        DescriptorResource::File(_) | DescriptorResource::PipeRead(_) => Err(()),
+    }
 }
 
 fn current_descriptor(descriptor: u64) -> Result<FileDescriptor, ()> {

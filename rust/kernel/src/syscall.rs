@@ -18,6 +18,7 @@ pub const SYS_CLOSE: u64 = Syscall::Close.number() as u64;
 pub const SYS_LSEEK: u64 = Syscall::LSeek.number() as u64;
 pub const SYS_YIELD: u64 = Syscall::Yield.number() as u64;
 pub const SYS_DUP: u64 = Syscall::Dup3.number() as u64;
+pub const SYS_PIPE: u64 = Syscall::Pipe2.number() as u64;
 pub const SYS_GETPID: u64 = Syscall::GetPid.number() as u64;
 pub const SYS_SOCKET: u64 = Syscall::Socket.number() as u64;
 pub const SYS_CONNECT: u64 = Syscall::Connect.number() as u64;
@@ -246,6 +247,7 @@ extern "C" fn vanta_syscall_dispatch(
         SYS_CLOSE => close_user(arg1),
         SYS_LSEEK => seek_user(arg1, arg2 as i64, arg3),
         SYS_DUP => duplicate_user(arg1),
+        SYS_PIPE => pipe_user(arg1, arg2),
         SYS_SOCKET => socket_user(arg1, arg2, arg3),
         SYS_CONNECT => connect_user(arg1, arg2, arg3),
         SYS_SPAWN => spawn_user(arg1, arg2),
@@ -331,6 +333,21 @@ fn seek_user(descriptor: u64, offset: i64, whence: u64) -> u64 {
 
 fn duplicate_user(descriptor: u64) -> u64 {
     crate::scheduler::duplicate_current(descriptor).unwrap_or(SYSCALL_ERROR)
+}
+
+fn pipe_user(pointer: u64, flags: u64) -> u64 {
+    if flags != 0 {
+        return SYSCALL_ERROR;
+    }
+    let Ok((reader, writer)) = crate::scheduler::open_pipe_current() else {
+        return SYSCALL_ERROR;
+    };
+    let mut descriptors = [0_u8; 8];
+    descriptors[..4].copy_from_slice(&(reader as u32).to_ne_bytes());
+    descriptors[4..].copy_from_slice(&(writer as u32).to_ne_bytes());
+    copy_to_user(pointer, &descriptors)
+        .map(|()| 0)
+        .unwrap_or(SYSCALL_ERROR)
 }
 
 fn socket_user(domain: u64, socket_type: u64, protocol: u64) -> u64 {
