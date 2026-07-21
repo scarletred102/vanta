@@ -30,3 +30,4 @@ third_party/linux-6.18.39.tar.xz
 /zig/tools/__pycache__/
 __pycache__/
 *.pyc
+actions-runner/
