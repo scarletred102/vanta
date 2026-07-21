@@ -1,5 +1,8 @@
 # Vanta — Rust kernel rewrite
 
+This is the active Rust-native rewrite. For the project overview and the Zig
+capability kernel track, see the [repository README](../README.md).
+
 Rust x86_64 kernel foundation. It boots via UEFI + Limine, draws an in-kernel
 terminal to the framebuffer, and echoes PS/2 keystrokes. The rewrite follows
 Linux-style subsystem boundaries while retaining Vanta's own microkernel and
@@ -7,11 +10,10 @@ capability model; it is not a copy of Linux.
 
 ## Linux reference source
 
-The pinned reference is Linux 6.18.39, the current long-term branch selected
-for a stable architecture baseline. Fetch it outside git with:
+Vanta's pinned Linux reference is version 6.18.39. Fetch it outside git with:
 
 ```powershell
-.\scripts\fetch-linux.ps1
+..\scripts\fetch-linux.ps1
 ```
 
 The script verifies the official archive checksum before extraction. The
