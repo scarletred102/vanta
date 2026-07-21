@@ -16,3 +16,17 @@ pluto/
 third_party/linux-6.18.39/
 third_party/linux-6.18.39.tar.xz
 /.vanta-local/
+/zig/zig-out/
+/zig/zig-cache/
+/zig/.zig-cache/
+/zig/iso_root/
+/zig/limine/
+/zig/limine-bin/
+/zig/vanta.iso
+/zig/qemu.log
+/zig/serial_*.log
+/zig/kernel/bin/
+/zig/scripts/__pycache__/
+/zig/tools/__pycache__/
+__pycache__/
+*.pyc
