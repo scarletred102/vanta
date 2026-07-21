@@ -1,4 +1,4 @@
-use alloc::vec;
+use alloc::{vec, vec::Vec};
 use core::ops;
 
 use crate::{BlockLevel, BlockTrait, RECORD_LEVEL};
