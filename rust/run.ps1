@@ -15,6 +15,7 @@ Push-Location kernel
 & $cargo build --release
 if ($LASTEXITCODE -ne 0) { Pop-Location; exit $LASTEXITCODE }
 Pop-Location
+New-Item -ItemType Directory -Force -Path esp\boot | Out-Null
 Copy-Item -Force kernel\target\x86_64-unknown-none\release\vanta-kernel esp\boot\vanta-kernel
 
 if ($env:BUILD_ONLY) {
