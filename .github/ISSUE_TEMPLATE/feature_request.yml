@@ -1,0 +1,36 @@
+name: Feature request
+description: Propose a focused improvement to Vanta.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: dropdown
+    id: track
+    attributes:
+      label: Affected track
+      options:
+        - Rust (active)
+        - Zig (preserved)
+        - Both
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or developer problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_behavior
+    attributes:
+      label: Proposed behavior
+      description: Describe the observable result.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include workarounds or other approaches.
+    validations:
+      required: true
