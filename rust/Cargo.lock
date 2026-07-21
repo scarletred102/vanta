@@ -148,6 +148,10 @@ name = "vanta-abi"
 version = "0.1.0"
 
 [[package]]
+name = "vanta-gpt"
+version = "0.1.0"
+
+[[package]]
 name = "vanta-kernel"
 version = "0.1.0"
 dependencies = [
