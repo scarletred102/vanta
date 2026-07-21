@@ -17,15 +17,9 @@ focused, and candid about the maturity and limitations of the affected track.
 
 ## Verify the affected track
 
-For a Zig change, run from `zig/` with Zig 0.16.0:
-
-```powershell
-zig build
-.\run.ps1 -NoDisplay
-```
-
-The QEMU run needs its documented QEMU, Python, ISO-tooling, and Limine
-prerequisites.
+For a Zig change, first establish and report the current build status for the
+affected code. The Zig track is not part of the release-verification matrix,
+so do not present an exploratory result as a supported baseline.
 
 For a Rust change, run from `rust/` with the nightly pinned in
 `kernel/rust-toolchain.toml`:

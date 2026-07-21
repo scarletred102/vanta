@@ -17,17 +17,10 @@ operating system.
 
 ### Zig capability kernel
 
-From `zig/`, with Zig 0.16.0 installed:
-
-```powershell
-zig build
-./run.ps1 -NoDisplay
-```
-
-`zig build` is the available compile check. `run.ps1` builds the related
-userspace programs, creates a bootable ISO, and starts the QEMU smoke run; it
-requires QEMU, Python, ISO tooling, and the Limine payload download described
-in the [Zig README](zig/README.md).
+The Zig source is preserved as a separate experimental track. It is not part
+of the current release-verification matrix; see the [Zig README](zig/README.md)
+for its scope and prerequisites. Do not treat it as a supported or
+release-verified boot path.
 
 ### Rust-native rewrite
 
