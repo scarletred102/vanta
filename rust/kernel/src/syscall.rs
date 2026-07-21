@@ -284,12 +284,6 @@ fn write_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
     let Ok(bytes) = copy_from_user(pointer, length, false) else {
         return SYSCALL_ERROR;
     };
-    if descriptor == 1 || descriptor == 2 {
-        for byte in bytes {
-            crate::serial::_print(format_args!("{}", byte as char));
-        }
-        return length;
-    }
     crate::scheduler::write_current(descriptor, &bytes)
         .map(|()| length)
         .unwrap_or(SYSCALL_ERROR)

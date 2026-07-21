@@ -467,7 +467,7 @@ extern "C" fn bootstrap_main() -> ! {
     x86_64::instructions::interrupts::enable();
     kprintln!("[ok] pic + sti");
     serial_println!("[boot] interrupts enabled");
-    run_virtio_self_check();
+    let gpt_root_mounted = run_virtio_self_check();
     serial_println!("[boot] initializing network");
     let network_info = match network::initialize() {
         Ok(info) => {
@@ -559,6 +559,21 @@ extern "C" fn bootstrap_main() -> ! {
         Err(error) => serial_println!("[proc] ELF load self-check failed: {:?}", error),
     }
 
+    if syscall_ready && gpt_root_mounted {
+        match vfs::read_root("/sbin/init")
+            .and_then(|image| process::load_elf(&image).map_err(|_| vfs::VfsError::InvalidFormat))
+        {
+            Ok(init) => {
+                serial_println!("[proc] launching native /sbin/init");
+                unsafe { scheduler::start_native(alloc::vec![Box::new(init)]) }
+            }
+            Err(error) => {
+                serial_println!("[proc] native /sbin/init unavailable: {:?}", error);
+                serial_println!("[recovery] entering kernel recovery shell");
+            }
+        }
+    }
+
     if syscall_ready {
         if smp.online_aps > 0 {
             match (
@@ -606,7 +621,7 @@ extern "C" fn bootstrap_main() -> ! {
     shell::run()
 }
 
-fn run_virtio_self_check() {
+fn run_virtio_self_check() -> bool {
     match virtio::VirtioBlock::probe() {
         Ok(mut device) => {
             let sectors = device.sector_count();
@@ -631,6 +646,7 @@ fn run_virtio_self_check() {
                         "[storage] virtio-blk ready: sectors={} write=false read=false equal=false root={}",
                         sectors, mounted
                     );
+                    mounted
                 }
                 Err(_) => {
                     serial_println!("[storage] no Vanta GPT root; using legacy VantaFS fallback");
@@ -678,13 +694,18 @@ fn run_virtio_self_check() {
                         read_back == written,
                         root_ready
                     );
+                    false
                 }
             }
         }
         Err(virtio::VirtioError::NotFound) => {
             serial_println!("[storage] no VirtIO block device; using RAM bootstrap disk");
+            false
         }
-        Err(error) => serial_println!("[storage] VirtIO block probe failed: {:?}", error),
+        Err(error) => {
+            serial_println!("[storage] VirtIO block probe failed: {:?}", error);
+            false
+        }
     }
 }
 

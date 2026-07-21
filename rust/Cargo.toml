@@ -1,5 +1,5 @@
 [workspace]
-members = ["abi", "gpt", "image", "kernel", "redoxfs-adapter", "xtask"]
+members = ["abi", "gpt", "image", "kernel", "redoxfs-adapter", "userland", "xtask"]
 resolver = "2"
 
 [workspace.package]

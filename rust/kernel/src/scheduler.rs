@@ -100,6 +100,8 @@ struct FileDescriptor {
 #[derive(Clone)]
 enum DescriptorResource {
     File(Arc<Mutex<OpenFile>>),
+    Serial,
+    Tty,
     PipeRead(Arc<Mutex<PipeReader>>),
     PipeWrite(Arc<Mutex<PipeWriter>>),
     Socket(Arc<Mutex<OpenSocket>>),
@@ -165,6 +167,12 @@ impl PipeWriter {
     }
 }
 
+fn close_pipe_writer(writer: Arc<Mutex<PipeWriter>>) {
+    if Arc::strong_count(&writer) == 1 {
+        writer.lock().close();
+    }
+}
+
 struct Scheduler {
     tasks: Vec<Task>,
     current: usize,
@@ -179,7 +187,9 @@ static NEXT_CAPABILITY_SLOT: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(test)]
 mod tests {
-    use super::Pipe;
+    use super::{close_pipe_writer, decode_tty_scancode, Pipe};
+    use alloc::sync::Arc;
+    use spin::Mutex;
 
     #[test]
     fn pipe_preserves_order_then_reports_eof_after_writer_close() {
@@ -189,6 +199,26 @@ mod tests {
         writer.close();
         assert_eq!(reader.read(8), b"llo");
         assert!(reader.read(8).is_empty());
+    }
+
+    #[test]
+    fn duplicated_pipe_writer_keeps_pipe_open_until_last_descriptor_closes() {
+        let (_, writer) = Pipe::new();
+        let first = Arc::new(Mutex::new(writer));
+        let second = Arc::clone(&first);
+        let state = Arc::clone(&first.lock().state);
+
+        close_pipe_writer(first);
+        assert!(state.lock().writer_open);
+        close_pipe_writer(second);
+        assert!(!state.lock().writer_open);
+    }
+
+    #[test]
+    fn tty_decodes_printable_keys_and_line_endings() {
+        assert_eq!(decode_tty_scancode(0x23), Some(b'h'));
+        assert_eq!(decode_tty_scancode(0x1c), Some(b'\n'));
+        assert_eq!(decode_tty_scancode(0xa3), None);
     }
 }
 
@@ -209,21 +239,33 @@ fn allocate_capability() -> CapabilityId {
 }
 
 pub unsafe fn start(processes: Vec<Box<Process>>) -> ! {
-    start_on_current_cpu(processes, "started")
+    start_on_current_cpu(processes, "started", false)
+}
+
+pub unsafe fn start_native(processes: Vec<Box<Process>>) -> ! {
+    start_on_current_cpu(processes, "native started", true)
 }
 
 pub unsafe fn start_ap(processes: Vec<Box<Process>>) -> ! {
-    start_on_current_cpu(processes, "AP run queue started")
+    start_on_current_cpu(processes, "AP run queue started", false)
 }
 
-unsafe fn start_on_current_cpu(processes: Vec<Box<Process>>, label: &str) -> ! {
+unsafe fn start_on_current_cpu(processes: Vec<Box<Process>>, label: &str, native_tty: bool) -> ! {
     let kernel_space = paging::current_address_space();
     if processes.is_empty() {
         crate::shell::run();
     }
     let tasks = processes
         .into_iter()
-        .map(|process| new_task(allocate_pid(), None, Credentials::vanta(), process))
+        .map(|process| {
+            new_task(
+                allocate_pid(),
+                None,
+                Credentials::vanta(),
+                process,
+                standard_descriptors(native_tty),
+            )
+        })
         .collect();
     *current_scheduler().lock() = Some(Scheduler {
         tasks,
@@ -454,10 +496,15 @@ pub fn spawn_current(process: Box<Process>) -> Result<u64, ()> {
     }
     let parent_pid = scheduler.tasks[scheduler.current].pid;
     let credentials = scheduler.tasks[scheduler.current].credentials;
+    let descriptors = scheduler.tasks[scheduler.current].descriptors.clone();
     let pid = allocate_pid();
-    scheduler
-        .tasks
-        .push(new_task(pid, Some(parent_pid), credentials, process));
+    scheduler.tasks.push(new_task(
+        pid,
+        Some(parent_pid),
+        credentials,
+        process,
+        descriptors,
+    ));
     Ok(pid)
 }
 
@@ -568,6 +615,7 @@ fn new_task(
     parent_pid: Option<u64>,
     credentials: Credentials,
     process: Box<Process>,
+    descriptors: Vec<Option<FileDescriptor>>,
 ) -> Task {
     Task {
         pid,
@@ -587,9 +635,34 @@ fn new_task(
         },
         interrupt_context: InterruptContext::initial(process.entry(), process.user_stack_top()),
         process: Some(process),
-        descriptors: alloc::vec![None, None, None],
+        descriptors,
         credentials,
     }
+}
+
+fn standard_descriptors(native_tty: bool) -> Vec<Option<FileDescriptor>> {
+    let resource = if native_tty {
+        DescriptorResource::Tty
+    } else {
+        DescriptorResource::Serial
+    };
+    alloc::vec![
+        Some(FileDescriptor {
+            capability: allocate_capability(),
+            rights: Rights::READ | Rights::TRANSFER,
+            resource: resource.clone(),
+        }),
+        Some(FileDescriptor {
+            capability: allocate_capability(),
+            rights: Rights::WRITE | Rights::TRANSFER,
+            resource: resource.clone(),
+        }),
+        Some(FileDescriptor {
+            capability: allocate_capability(),
+            rights: Rights::WRITE | Rights::TRANSFER,
+            resource,
+        }),
+    ]
 }
 
 pub fn open_current(contents: Vec<u8>) -> Result<u64, ()> {
@@ -717,7 +790,7 @@ fn install_descriptor(
     descriptors: &mut Vec<Option<FileDescriptor>>,
     descriptor: FileDescriptor,
 ) -> Result<u64, ()> {
-    const MAX_DESCRIPTORS: usize = 5;
+    const MAX_DESCRIPTORS: usize = 256;
     if let Some((index, slot)) = descriptors
         .iter_mut()
         .enumerate()
@@ -751,6 +824,8 @@ pub fn read_current(descriptor: u64, length: usize) -> Result<Vec<u8>, ()> {
             let connection = socket.connection.as_mut().ok_or(())?;
             crate::network::tcp_receive(connection, length).map_err(|_| ())
         }
+        DescriptorResource::Serial => Err(()),
+        DescriptorResource::Tty => Ok(read_tty(length)),
         DescriptorResource::PipeRead(reader) => Ok(reader.lock().read(length)),
         DescriptorResource::PipeWrite(_) => Err(()),
     }
@@ -776,8 +851,11 @@ pub fn close_current(descriptor: u64) -> Result<(), ()> {
                 }
             }
         }
-        DescriptorResource::PipeWrite(writer) => writer.lock().close(),
-        DescriptorResource::File(_) | DescriptorResource::PipeRead(_) => {}
+        DescriptorResource::PipeWrite(writer) => close_pipe_writer(writer),
+        DescriptorResource::File(_)
+        | DescriptorResource::Serial
+        | DescriptorResource::Tty
+        | DescriptorResource::PipeRead(_) => {}
     }
     Ok(())
 }
@@ -797,8 +875,48 @@ pub fn write_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
             writer.lock().write(bytes);
             Ok(())
         }
+        DescriptorResource::Serial | DescriptorResource::Tty => {
+            for byte in bytes {
+                crate::serial::_print(format_args!("{}", *byte as char));
+            }
+            Ok(())
+        }
         DescriptorResource::File(_) | DescriptorResource::PipeRead(_) => Err(()),
     }
+}
+
+fn decode_tty_scancode(scancode: u8) -> Option<u8> {
+    if scancode & 0x80 != 0 {
+        return None;
+    }
+    match scancode {
+        0x02..=0x0a => Some(b"123456789"[(scancode - 0x02) as usize]),
+        0x0b => Some(b'0'),
+        0x0e => Some(8),
+        0x10..=0x19 => Some(b"qwertyuiop"[(scancode - 0x10) as usize]),
+        0x1c => Some(b'\n'),
+        0x1e..=0x26 => Some(b"asdfghjkl"[(scancode - 0x1e) as usize]),
+        0x27 => Some(b';'),
+        0x2c..=0x32 => Some(b"zxcvbnm"[(scancode - 0x2c) as usize]),
+        0x33 => Some(b','),
+        0x34 => Some(b'.'),
+        0x35 => Some(b'/'),
+        0x39 => Some(b' '),
+        _ => None,
+    }
+}
+
+fn read_tty(length: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    while bytes.len() < length {
+        let Some(scancode) = crate::keyboard::pop_scancode() else {
+            break;
+        };
+        if let Some(byte) = decode_tty_scancode(scancode) {
+            bytes.push(byte);
+        }
+    }
+    bytes
 }
 
 fn current_descriptor(descriptor: u64) -> Result<FileDescriptor, ()> {

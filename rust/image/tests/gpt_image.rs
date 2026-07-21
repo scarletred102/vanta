@@ -14,6 +14,7 @@ fn builds_a_gpt_disk_with_bootable_esp_and_redoxfs_root() {
             boot_efi: b"limine-efi",
             kernel: b"vanta-kernel",
             limine_config: b"/vanta\n",
+            root_files: &[],
         },
     )
     .expect("GPT image");

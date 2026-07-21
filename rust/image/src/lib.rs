@@ -29,6 +29,16 @@ pub struct ImageContents<'a> {
     pub boot_efi: &'a [u8],
     pub kernel: &'a [u8],
     pub limine_config: &'a [u8],
+    pub root_files: &'a [RootFile<'a>],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RootFile<'a> {
+    pub path: &'a str,
+    pub contents: &'a [u8],
+    pub mode: u16,
+    pub uid: u32,
+    pub gid: u32,
 }
 
 #[derive(Debug)]
@@ -108,7 +118,7 @@ pub fn build_image(
     let mut bytes = vec![0_u8; image_len];
 
     let esp_bytes = build_esp(options.esp_sectors, contents)?;
-    let root_bytes = build_redoxfs(options.root_sectors)?;
+    let root_bytes = build_redoxfs(options.root_sectors, contents.root_files)?;
     copy_partition(&mut bytes, esp, &esp_bytes)?;
     copy_partition(&mut bytes, root, &root_bytes)?;
     write_gpt(&mut bytes, esp, root, total_sectors)?;
@@ -151,7 +161,7 @@ fn write_fat_file(
     Ok(())
 }
 
-fn build_redoxfs(sectors: u64) -> Result<Vec<u8>, ImageError> {
+fn build_redoxfs(sectors: u64, root_files: &[RootFile<'_>]) -> Result<Vec<u8>, ImageError> {
     let bytes = usize::try_from(
         sectors
             .checked_mul(SECTOR_SIZE as u64)
@@ -168,10 +178,45 @@ fn build_redoxfs(sectors: u64) -> Result<Vec<u8>, ImageError> {
             .create_node(etc, "config", Node::MODE_FILE | 0o644, 0, 0)?
             .ptr();
         tx.write_node(config, 0, b"vanta-vfs-syscall\n", 0, 0)?;
+        for file in root_files {
+            install_root_file(tx, *file)?;
+        }
         Ok(())
     })
     .map_err(ImageError::RedoxFs)?;
     Ok(fs.disk.into_bytes())
+}
+
+fn install_root_file(
+    tx: &mut redoxfs::Transaction<MemoryDisk>,
+    file: RootFile<'_>,
+) -> Result<(), SyscallError> {
+    let mut components = file.path.split('/').filter(|part| !part.is_empty());
+    let name = components
+        .next_back()
+        .ok_or_else(|| SyscallError::new(EIO))?;
+    let mut parent = TreePtr::root();
+    for component in components {
+        parent = match tx.find_node(parent, component) {
+            Ok(node) if node.data().is_dir() => node.ptr(),
+            Ok(_) => return Err(SyscallError::new(EIO)),
+            Err(error) if error.errno == syscall::error::ENOENT => tx
+                .create_node(parent, component, Node::MODE_DIR | 0o755, 0, 0)?
+                .ptr(),
+            Err(error) => return Err(error),
+        };
+    }
+    let node = tx
+        .create_node(
+            parent,
+            name,
+            Node::MODE_FILE | file.mode,
+            file.uid.into(),
+            file.gid.into(),
+        )?
+        .ptr();
+    tx.write_node(node, 0, file.contents, 0, 0)?;
+    Ok(())
 }
 
 fn copy_partition(
@@ -393,6 +438,62 @@ impl MemoryDisk {
 
     fn into_bytes(self) -> Vec<u8> {
         self.bytes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redoxfs_root_contains_requested_native_programs() {
+        let init = RootFile {
+            path: "/sbin/init",
+            contents: b"init",
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        };
+        let shell = RootFile {
+            path: "/bin/vsh",
+            contents: b"vsh",
+            mode: 0o755,
+            uid: 1000,
+            gid: 1000,
+        };
+        let image = build_image(
+            ImageOptions {
+                esp_sectors: 8_192,
+                root_sectors: 8_192,
+            },
+            ImageContents {
+                boot_efi: b"boot",
+                kernel: b"kernel",
+                limine_config: b"config",
+                root_files: &[init, shell],
+            },
+        )
+        .unwrap();
+
+        let mut fs = FileSystem::open(
+            MemoryDisk {
+                bytes: image.root_bytes().to_vec(),
+            },
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        fs.tx(|tx| {
+            let sbin = tx.find_node(TreePtr::root(), "sbin")?.ptr();
+            let init = tx.find_node(sbin, "init")?;
+            assert_eq!(init.data().mode(), Node::MODE_FILE | 0o755);
+            let bin = tx.find_node(TreePtr::root(), "bin")?.ptr();
+            let shell = tx.find_node(bin, "vsh")?;
+            assert_eq!(shell.data().mode(), Node::MODE_FILE | 0o755);
+            Ok(())
+        })
+        .unwrap();
     }
 }
 
