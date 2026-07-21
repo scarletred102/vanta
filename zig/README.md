@@ -5,18 +5,13 @@ QEMU-targeted kernel, not a universally compatible or production-ready
 operating system. For the project overview and the Rust-native rewrite, see
 the [repository README](../README.md).
 
-## Build and run
+## Verification status
 
-Run these commands from this `zig/` directory with Zig 0.16.0:
-
-```powershell
-zig build
-./run.ps1
-```
-
-`zig build` compiles the kernel. `run.ps1` builds the userspace server
-programs, creates `vanta.iso`, then starts QEMU. Use `-NoDisplay` for serial
-output without the graphical QEMU window.
+This source track is preserved for exploration, but it is not part of Vanta's
+current release-verification matrix. Its existing build and run scripts remain
+in the track for development work; they are not a supported or
+release-verified boot path. Use the [`rust/`](../rust/README.md) track for the
+reproducible QEMU verification workflow.
 
 ## Prerequisites
 
