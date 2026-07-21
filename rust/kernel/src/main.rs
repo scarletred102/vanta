@@ -578,59 +578,67 @@ fn run_virtio_self_check() {
     match virtio::VirtioBlock::probe() {
         Ok(mut device) => {
             let sectors = device.sector_count();
-            let mut written = [0u8; storage::SECTOR_SIZE];
-            written[..16].copy_from_slice(b"vanta-virtio-ok\n");
-            let write_ok = device.write_sector(32, &written).is_ok();
-            let mut read_back = [0u8; storage::SECTOR_SIZE];
-            let read_ok = device.read_sector(32, &mut read_back).is_ok();
             match storage::discover_vanta_root(&device) {
-                Ok(root) => serial_println!(
-                    "[storage] Vanta GPT root: start={} sectors={}",
-                    root.start_lba,
-                    root.sector_count()
-                ),
+                Ok(root) => {
+                    serial_println!(
+                        "[storage] Vanta GPT root: start={} sectors={}",
+                        root.start_lba,
+                        root.sector_count()
+                    );
+                    serial_println!("[storage] GPT root reserved for RedoxFS VFS backend");
+                    serial_println!(
+                        "[storage] virtio-blk ready: sectors={} write=false read=false equal=false root=false",
+                        sectors
+                    );
+                }
                 Err(_) => {
-                    serial_println!("[storage] no Vanta GPT root; using legacy VantaFS fallback")
+                    serial_println!("[storage] no Vanta GPT root; using legacy VantaFS fallback");
+                    let mut written = [0u8; storage::SECTOR_SIZE];
+                    written[..16].copy_from_slice(b"vanta-virtio-ok\n");
+                    let write_ok = device.write_sector(32, &written).is_ok();
+                    let mut read_back = [0u8; storage::SECTOR_SIZE];
+                    let read_ok = device.read_sector(32, &mut read_back).is_ok();
+                    let mount = vfs::mount_virtio_root(device);
+                    let root_ready = match mount {
+                        Ok(existed) => {
+                            let previous = vfs::read_root("/etc/persistent").ok();
+                            let expected = b"vanta-persistent-vfs\n";
+                            let config = b"vanta-vfs-syscall\n";
+                            let persisted = vfs::write_root("/etc/config", config).is_ok()
+                                && vfs::write_root("/etc/persistent", expected).is_ok()
+                                && vfs::remount_root().is_ok()
+                                && vfs::read_root("/etc/config").ok().as_deref() == Some(config)
+                                && vfs::read_root("/etc/persistent").ok().as_deref()
+                                    == Some(expected)
+                                && vfs::list_root()
+                                    .map(|paths| {
+                                        paths.iter().any(|path| path == "/etc/config")
+                                            && paths.iter().any(|path| path == "/etc/persistent")
+                                    })
+                                    .unwrap_or(false);
+                            serial_println!(
+                                "[storage] persistent VFS mounted: existed={} prior-bytes={} remount={}",
+                                existed,
+                                previous.as_ref().map_or(0, Vec::len),
+                                persisted
+                            );
+                            persisted
+                        }
+                        Err(error) => {
+                            serial_println!("[storage] persistent VFS mount failed: {:?}", error);
+                            false
+                        }
+                    };
+                    serial_println!(
+                        "[storage] virtio-blk ready: sectors={} write={} read={} equal={} root={}",
+                        sectors,
+                        write_ok,
+                        read_ok,
+                        read_back == written,
+                        root_ready
+                    );
                 }
             }
-            let mount = vfs::mount_virtio_root(device);
-            let root_ready = match mount {
-                Ok(existed) => {
-                    let previous = vfs::read_root("/etc/persistent").ok();
-                    let expected = b"vanta-persistent-vfs\n";
-                    let config = b"vanta-vfs-syscall\n";
-                    let persisted = vfs::write_root("/etc/config", config).is_ok()
-                        && vfs::write_root("/etc/persistent", expected).is_ok()
-                        && vfs::remount_root().is_ok()
-                        && vfs::read_root("/etc/config").ok().as_deref() == Some(config)
-                        && vfs::read_root("/etc/persistent").ok().as_deref() == Some(expected)
-                        && vfs::list_root()
-                            .map(|paths| {
-                                paths.iter().any(|path| path == "/etc/config")
-                                    && paths.iter().any(|path| path == "/etc/persistent")
-                            })
-                            .unwrap_or(false);
-                    serial_println!(
-                        "[storage] persistent VFS mounted: existed={} prior-bytes={} remount={}",
-                        existed,
-                        previous.as_ref().map_or(0, Vec::len),
-                        persisted
-                    );
-                    persisted
-                }
-                Err(error) => {
-                    serial_println!("[storage] persistent VFS mount failed: {:?}", error);
-                    false
-                }
-            };
-            serial_println!(
-                "[storage] virtio-blk ready: sectors={} write={} read={} equal={} root={}",
-                sectors,
-                write_ok,
-                read_ok,
-                read_back == written,
-                root_ready
-            );
         }
         Err(virtio::VirtioError::NotFound) => {
             serial_println!("[storage] no VirtIO block device; using RAM bootstrap disk");

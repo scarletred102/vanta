@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$Virtio,
+    [switch]$Gpt,
     [switch]$Network,
     [ValidateRange(5, 60)]
     [int]$TimeoutSeconds = 30
@@ -36,18 +37,29 @@ $arguments = @(
     "-no-reboot", "-no-shutdown", "-display", "none"
 )
 
+if ($Gpt) {
+    $Virtio = $true
+    & cargo xtask image
+    if ($LASTEXITCODE -ne 0) {
+        throw "GPT image build failed with exit code $LASTEXITCODE"
+    }
+    $disk = (Resolve-Path .\target\vanta-gpt.img).Path
+}
+
 if ($Virtio) {
-    Remove-Item -LiteralPath $disk -Force -ErrorAction SilentlyContinue
-    $stream = [System.IO.File]::Open(
-        $disk,
-        [System.IO.FileMode]::Create,
-        [System.IO.FileAccess]::ReadWrite,
-        [System.IO.FileShare]::None
-    )
-    try {
-        $stream.SetLength(8MB)
-    } finally {
-        $stream.Dispose()
+    if (!$Gpt) {
+        Remove-Item -LiteralPath $disk -Force -ErrorAction SilentlyContinue
+        $stream = [System.IO.File]::Open(
+            $disk,
+            [System.IO.FileMode]::Create,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None
+        )
+        try {
+            $stream.SetLength(8MB)
+        } finally {
+            $stream.Dispose()
+        }
     }
     $arguments += @(
         "-drive", "file=$disk,if=none,format=raw,id=vd0",
@@ -193,7 +205,7 @@ function Complete-TcpProbe {
 
 try {
     if ($Network) {
-        $expectedTcpConnections = if ($Virtio) { 2 } else { 1 }
+        $expectedTcpConnections = if ($Virtio -and !$Gpt) { 2 } else { 1 }
         Start-TcpProbe $expectedTcpConnections
     }
 
@@ -204,7 +216,11 @@ try {
         "[shell] entering main loop"
     )
     if ($Virtio) {
-        $required += "[storage] no Vanta GPT root; using legacy VantaFS fallback"
+        if ($Gpt) {
+            $required += "[storage] Vanta GPT root:"
+        } else {
+            $required += "[storage] no Vanta GPT root; using legacy VantaFS fallback"
+        }
         $required += "[storage] virtio-blk ready:"
     }
     if ($Network) {
@@ -220,7 +236,7 @@ try {
         }
     }
 
-    if ($Virtio) {
+    if ($Virtio -and !$Gpt) {
         $second_boot_required = @("[storage] persistent VFS mounted: existed=true")
         if ($Network) {
             $second_boot_required += "[net] VFS configuration loaded"
