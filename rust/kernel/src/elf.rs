@@ -4,6 +4,8 @@
 //! x86_64 images with ordinary program headers. It does not interpret sections,
 //! relocations, symbols, or dynamic linking.
 
+use vanta_abi::Syscall;
+
 const ELF_HEADER_SIZE: usize = 64;
 const PROGRAM_HEADER_SIZE: usize = 56;
 const ELFCLASS64: u8 = 2;
@@ -250,7 +252,7 @@ const fn make_test_elf() -> [u8; 0x300] {
     image[0x100] = 0x48;
     image[0x101] = 0xc7;
     image[0x102] = 0xc0;
-    image[0x103] = 39;
+    image[0x103] = Syscall::GetPid.number() as u8;
     image[0x107] = 0x0f;
     image[0x108] = 0x05;
     image[0x109] = 0x48;
@@ -265,7 +267,7 @@ const fn make_test_elf() -> [u8; 0x300] {
     image[0x110] = 0x48;
     image[0x111] = 0xc7;
     image[0x112] = 0xc0;
-    image[0x113] = 2;
+    image[0x113] = Syscall::OpenAt.number() as u8;
     image[0x117] = 0x48;
     image[0x118] = 0xbf;
     put_u64(&mut image, 0x119, TEST_DATA_ADDRESS);
@@ -283,7 +285,7 @@ const fn make_test_elf() -> [u8; 0x300] {
     image[0x12d] = 0x48;
     image[0x12e] = 0xc7;
     image[0x12f] = 0xc0;
-    image[0x130] = 8;
+    image[0x130] = Syscall::LSeek.number() as u8;
     image[0x134] = 0x48;
     image[0x135] = 0x89;
     image[0x136] = 0xdf;
@@ -298,7 +300,7 @@ const fn make_test_elf() -> [u8; 0x300] {
     image[0x142] = 0x48;
     image[0x143] = 0xc7;
     image[0x144] = 0xc0;
-    image[0x145] = 32;
+    image[0x145] = Syscall::Dup3.number() as u8;
     image[0x149] = 0x48;
     image[0x14a] = 0x89;
     image[0x14b] = 0xdf;
@@ -307,8 +309,8 @@ const fn make_test_elf() -> [u8; 0x300] {
     image[0x14e] = 0x49;
     image[0x14f] = 0x89;
     image[0x150] = 0xc4;
-    image[0x151] = 0x31;
-    image[0x152] = 0xc0;
+    image[0x151] = 0xb0;
+    image[0x152] = Syscall::Read.number() as u8;
     image[0x153] = 0x4c;
     image[0x154] = 0x89;
     image[0x155] = 0xe7;
@@ -327,7 +329,7 @@ const fn make_test_elf() -> [u8; 0x300] {
     image[0x16c] = 0x48;
     image[0x16d] = 0xc7;
     image[0x16e] = 0xc0;
-    image[0x16f] = 1;
+    image[0x16f] = Syscall::Write.number() as u8;
     image[0x173] = 0x48;
     image[0x174] = 0xc7;
     image[0x175] = 0xc7;
@@ -342,14 +344,14 @@ const fn make_test_elf() -> [u8; 0x300] {
     image[0x182] = 0x48;
     image[0x183] = 0xc7;
     image[0x184] = 0xc0;
-    image[0x185] = 3;
+    image[0x185] = Syscall::Close.number() as u8;
     image[0x189] = 0x4c;
     image[0x18a] = 0x89;
     image[0x18b] = 0xe7;
     image[0x18c] = 0x0f;
     image[0x18d] = 0x05;
-    image[0x18e] = 0x31;
-    image[0x18f] = 0xc0;
+    image[0x18e] = 0xb0;
+    image[0x18f] = Syscall::Read.number() as u8;
     image[0x190] = 0x48;
     image[0x191] = 0x89;
     image[0x192] = 0xdf;
@@ -374,7 +376,7 @@ const fn make_test_elf() -> [u8; 0x300] {
     image[0x1ad] = 0x48;
     image[0x1ae] = 0xc7;
     image[0x1af] = 0xc0;
-    image[0x1b0] = 3;
+    image[0x1b0] = Syscall::Close.number() as u8;
     image[0x1b4] = 0x48;
     image[0x1b5] = 0x89;
     image[0x1b6] = 0xdf;
@@ -392,7 +394,7 @@ const fn make_test_elf() -> [u8; 0x300] {
     image[0x1c5] = 0x48;
     image[0x1c6] = 0xc7;
     image[0x1c7] = 0xc0;
-    image[0x1c8] = 60;
+    image[0x1c8] = Syscall::Exit.number() as u8;
     image[0x1cc] = 0x31;
     image[0x1cd] = 0xff;
     image[0x1ce] = 0x0f;
@@ -453,7 +455,11 @@ const fn make_network_elf() -> [u8; 0x300] {
 
     let mut cursor = TEXT;
     // socket(AF_INET, SOCK_STREAM, 0)
-    emit_bytes(&mut image, &mut cursor, &[0xb8, 41, 0, 0, 0]);
+    emit_bytes(
+        &mut image,
+        &mut cursor,
+        &[0xb8, Syscall::Socket.number() as u8, 0, 0, 0],
+    );
     emit_bytes(&mut image, &mut cursor, &[0xbf, 2, 0, 0, 0]);
     emit_bytes(&mut image, &mut cursor, &[0xbe, 1, 0, 0, 0]);
     emit_bytes(
@@ -468,7 +474,18 @@ const fn make_network_elf() -> [u8; 0x300] {
     emit_bytes(
         &mut image,
         &mut cursor,
-        &[0xb8, 42, 0, 0, 0, 0x48, 0x89, 0xdf, 0x48, 0xbe],
+        &[
+            0xb8,
+            Syscall::Connect.number() as u8,
+            0,
+            0,
+            0,
+            0x48,
+            0x89,
+            0xdf,
+            0x48,
+            0xbe,
+        ],
     );
     put_u64(&mut image, cursor, TEST_DATA_ADDRESS);
     cursor += 8;
@@ -483,7 +500,18 @@ const fn make_network_elf() -> [u8; 0x300] {
     emit_bytes(
         &mut image,
         &mut cursor,
-        &[0xb8, 1, 0, 0, 0, 0x48, 0x89, 0xdf, 0x48, 0xbe],
+        &[
+            0xb8,
+            Syscall::Write.number() as u8,
+            0,
+            0,
+            0,
+            0x48,
+            0x89,
+            0xdf,
+            0x48,
+            0xbe,
+        ],
     );
     put_u64(&mut image, cursor, TEST_DATA_ADDRESS + 32);
     cursor += 8;
@@ -498,7 +526,18 @@ const fn make_network_elf() -> [u8; 0x300] {
     emit_bytes(
         &mut image,
         &mut cursor,
-        &[0xb8, 0, 0, 0, 0, 0x48, 0x89, 0xdf, 0x48, 0xbe],
+        &[
+            0xb8,
+            Syscall::Read.number() as u8,
+            0,
+            0,
+            0,
+            0x48,
+            0x89,
+            0xdf,
+            0x48,
+            0xbe,
+        ],
     );
     put_u64(&mut image, cursor, TEST_DATA_ADDRESS + 48);
     cursor += 8;
@@ -523,14 +562,39 @@ const fn make_network_elf() -> [u8; 0x300] {
         &mut image,
         &mut cursor,
         &[
-            0xb8, 3, 0, 0, 0, 0x48, 0x89, 0xdf, 0x0f, 0x05, 0x48, 0x85, 0xc0,
+            0xb8,
+            Syscall::Close.number() as u8,
+            0,
+            0,
+            0,
+            0x48,
+            0x89,
+            0xdf,
+            0x0f,
+            0x05,
+            0x48,
+            0x85,
+            0xc0,
         ],
     );
     jump_to(&mut image, &mut cursor, 0x88, FAILURE);
     emit_bytes(
         &mut image,
         &mut cursor,
-        &[0xb8, 1, 0, 0, 0, 0xbf, 1, 0, 0, 0, 0x48, 0xbe],
+        &[
+            0xb8,
+            Syscall::Write.number() as u8,
+            0,
+            0,
+            0,
+            0xbf,
+            1,
+            0,
+            0,
+            0,
+            0x48,
+            0xbe,
+        ],
     );
     put_u64(&mut image, cursor, TEST_DATA_ADDRESS + 64);
     cursor += 8;
@@ -538,12 +602,24 @@ const fn make_network_elf() -> [u8; 0x300] {
     emit_bytes(
         &mut image,
         &mut cursor,
-        &[0xb8, 60, 0, 0, 0, 0x31, 0xff, 0x0f, 0x05, 0x0f, 0x0b],
+        &[
+            0xb8,
+            Syscall::Exit.number() as u8,
+            0,
+            0,
+            0,
+            0x31,
+            0xff,
+            0x0f,
+            0x05,
+            0x0f,
+            0x0b,
+        ],
     );
 
     // Every failure exits through the ordinary scheduler path with code 1.
     image[FAILURE] = 0xb8;
-    put_u32(&mut image, FAILURE + 1, 60);
+    put_u32(&mut image, FAILURE + 1, Syscall::Exit.number() as u32);
     image[FAILURE + 5] = 0xbf;
     put_u32(&mut image, FAILURE + 6, 1);
     image[FAILURE + 10] = 0x0f;
@@ -610,7 +686,7 @@ const fn make_spawner_elf() -> [u8; 0x300] {
     // Spawn "/bin/init" and keep the PID in rbx while waitpid yields. This is a
     // regression probe for voluntary context switches preserving callee-saved state.
     image[0x1b9] = 0xb8;
-    put_u32(&mut image, 0x1ba, 400);
+    put_u32(&mut image, 0x1ba, Syscall::SpawnVe.number() as u32);
     image[0x1be] = 0xbf;
     put_u32(&mut image, 0x1bf, (TEST_DATA_ADDRESS + 11) as u32);
     image[0x1c3] = 0xbe;
@@ -628,7 +704,7 @@ const fn make_spawner_elf() -> [u8; 0x300] {
     image[0x1d2] = 0x89;
     image[0x1d3] = 0xc3;
     image[0x1d4] = 0xb8;
-    put_u32(&mut image, 0x1d5, 61);
+    put_u32(&mut image, 0x1d5, Syscall::WaitPid.number() as u32);
     image[0x1d9] = 0x48;
     image[0x1da] = 0x89;
     image[0x1db] = 0xdf;
@@ -640,13 +716,13 @@ const fn make_spawner_elf() -> [u8; 0x300] {
     image[0x1e1] = 0x79;
     image[0x1e2] = 9;
     image[0x1e3] = 0xb8;
-    put_u32(&mut image, 0x1e4, 24);
+    put_u32(&mut image, 0x1e4, Syscall::Yield.number() as u32);
     image[0x1e8] = 0x0f;
     image[0x1e9] = 0x05;
     image[0x1ea] = 0xeb;
     image[0x1eb] = 0xe8;
     image[0x1ec] = 0xb8;
-    put_u32(&mut image, 0x1ed, 60);
+    put_u32(&mut image, 0x1ed, Syscall::Exit.number() as u32);
     image[0x1f1] = 0x31;
     image[0x1f2] = 0xff;
     image[0x1f3] = 0x0f;
@@ -674,7 +750,7 @@ const fn make_exec_elf() -> [u8; 0x300] {
 
     // exec("/bin/init"); the replacement image must exit without returning here.
     image[0x1ad] = 0xb8;
-    put_u32(&mut image, 0x1ae, 59);
+    put_u32(&mut image, 0x1ae, Syscall::ExecVe.number() as u32);
     image[0x1b2] = 0xbf;
     put_u32(&mut image, 0x1b3, (TEST_DATA_ADDRESS + 11) as u32);
     image[0x1b7] = 0xbe;

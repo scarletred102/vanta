@@ -12,9 +12,9 @@ if [ "$PROFILE" = "release" ]; then
 fi
 
 echo "[build] compiling kernel ($PROFILE)"
-(cd kernel && "$CARGO" build $PROFILE_FLAG)
+"$CARGO" build -p vanta-kernel --target x86_64-unknown-none $PROFILE_FLAG
 
-KERNEL_BIN="$(pwd)/kernel/target/x86_64-unknown-none/$PROFILE_DIR/vanta-kernel"
+KERNEL_BIN="$(pwd)/target/x86_64-unknown-none/$PROFILE_DIR/vanta-kernel"
 if [ ! -f "$KERNEL_BIN" ]; then
     echo "kernel binary not found: $KERNEL_BIN" >&2
     exit 1

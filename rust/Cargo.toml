@@ -1,0 +1,16 @@
+[workspace]
+members = ["abi", "kernel"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/rockierock059/vanta"
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+lto = "thin"

@@ -12,8 +12,8 @@ OVMF="${OVMF:-C:/Program Files/qemu/share/edk2-x86_64-code.fd}"
 ESP_PATH="$(pwd -W 2>/dev/null || pwd)/esp"
 
 echo "[build] kernel"
-(cd kernel && "$CARGO" build --release)
-cp kernel/target/x86_64-unknown-none/release/vanta-kernel esp/boot/vanta-kernel
+"$CARGO" build -p vanta-kernel --target x86_64-unknown-none --release
+cp target/x86_64-unknown-none/release/vanta-kernel esp/boot/vanta-kernel
 
 if [ "${BUILD_ONLY:-}" = "1" ]; then
     echo "[build] BUILD_ONLY set, exiting"

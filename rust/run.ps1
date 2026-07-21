@@ -11,12 +11,10 @@ $ovmf  = if ($env:OVMF)  { $env:OVMF }  else { "C:\Program Files\qemu\share\edk2
 $esp   = (Resolve-Path .\esp).Path
 
 Write-Host "[build] kernel"
-Push-Location kernel
-& $cargo build --release
-if ($LASTEXITCODE -ne 0) { Pop-Location; exit $LASTEXITCODE }
-Pop-Location
+& $cargo build -p vanta-kernel --target x86_64-unknown-none --release
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 New-Item -ItemType Directory -Force -Path esp\boot | Out-Null
-Copy-Item -Force kernel\target\x86_64-unknown-none\release\vanta-kernel esp\boot\vanta-kernel
+Copy-Item -Force target\x86_64-unknown-none\release\vanta-kernel esp\boot\vanta-kernel
 
 if ($env:BUILD_ONLY) {
     Write-Host "[build] BUILD_ONLY set, done"
