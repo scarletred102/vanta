@@ -3,7 +3,7 @@ param(
     [switch]$Virtio,
     [switch]$Network,
     [ValidateRange(5, 60)]
-    [int]$TimeoutSeconds = 12
+    [int]$TimeoutSeconds = 30
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,10 +62,35 @@ if ($Network) {
 }
 
 function Invoke-QemuBoot {
+    param([string[]]$CompletionMarkers)
+
     Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
     $process = Start-Process -FilePath $qemu -ArgumentList $arguments -PassThru -WindowStyle Hidden
+    $output = ""
     try {
-        Start-Sleep -Seconds $TimeoutSeconds
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while ((Get-Date) -lt $deadline) {
+            if (Test-Path -LiteralPath $log) {
+                $output = Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue
+                if ($null -eq $output) {
+                    $output = ""
+                }
+                $complete = $true
+                foreach ($marker in $CompletionMarkers) {
+                    if (!$output.Contains($marker)) {
+                        $complete = $false
+                        break
+                    }
+                }
+                if ($complete) {
+                    return $output
+                }
+            }
+            if ($process.HasExited) {
+                break
+            }
+            Start-Sleep -Milliseconds 100
+        }
     } finally {
         if (!$process.HasExited) {
             Stop-Process -Id $process.Id -Force
@@ -74,7 +99,13 @@ function Invoke-QemuBoot {
     if (!(Test-Path -LiteralPath $log)) {
         throw "QEMU did not create a serial log"
     }
-    Get-Content -LiteralPath $log -Raw
+    if (!$output) {
+        $output = Get-Content -LiteralPath $log -Raw
+    }
+    if ($null -eq $output) {
+        $output = ""
+    }
+    $output
 }
 
 function Start-TcpProbe {
@@ -166,7 +197,6 @@ try {
         Start-TcpProbe $expectedTcpConnections
     }
 
-    $output = Invoke-QemuBoot
     $required = @(
         "[storage] writable VFS root mounted and lifecycle/remount self-check passed",
         "[smp] queued AP run queue=true dispatched=2",
@@ -181,6 +211,7 @@ try {
         $required += "[net] VFS configuration loaded"
         $required += "[net] tcp user socket probe passed"
     }
+    $output = Invoke-QemuBoot -CompletionMarkers $required
 
     foreach ($marker in $required) {
         if (!$output.Contains($marker)) {
@@ -189,7 +220,12 @@ try {
     }
 
     if ($Virtio) {
-        $second_boot = Invoke-QemuBoot
+        $second_boot_required = @("[storage] persistent VFS mounted: existed=true")
+        if ($Network) {
+            $second_boot_required += "[net] VFS configuration loaded"
+            $second_boot_required += "[net] tcp user socket probe passed"
+        }
+        $second_boot = Invoke-QemuBoot -CompletionMarkers $second_boot_required
         if (!$second_boot.Contains("[storage] persistent VFS mounted: existed=true")) {
             throw "QEMU persistence regression failed: disk was not remounted on the second boot`n$second_boot"
         }
