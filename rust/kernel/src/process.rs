@@ -57,6 +57,12 @@ impl Process {
         self.user_stack_top
     }
 
+    pub fn user_stack_pointer(&self) -> u64 {
+        self.user_stack_top
+            .checked_add(8)
+            .expect("user stack pointer overflow")
+    }
+
     pub fn read_user_byte(&self, virtual_address: u64) -> Option<u8> {
         let translation = paging::translate_in(self.space, virtual_address)?;
         let physical = paging::phys_to_virt(translation.physical_address)?;
@@ -95,6 +101,10 @@ impl Drop for Process {
 }
 
 pub fn load_elf(bytes: &[u8]) -> Result<Process, ProcessError> {
+    load_elf_with_args(bytes, &[])
+}
+
+pub fn load_elf_with_args(bytes: &[u8], args: &[&[u8]]) -> Result<Process, ProcessError> {
     let image = ElfImage::parse(bytes).map_err(ProcessError::Elf)?;
     let plans = plan_pages(image)?;
     let space = paging::create_address_space().map_err(ProcessError::Map)?;
@@ -160,7 +170,66 @@ pub fn load_elf(bytes: &[u8]) -> Result<Process, ProcessError> {
         });
     }
 
+    initialize_stack(&mut process, args)?;
     Ok(process)
+}
+
+fn initialize_stack(process: &mut Process, args: &[&[u8]]) -> Result<(), ProcessError> {
+    let mut stack_pointer = USER_STACK_TOP;
+    let mut argument_pointers = Vec::new();
+    for argument in args.iter().rev() {
+        let size = argument
+            .len()
+            .checked_add(1)
+            .ok_or(ProcessError::InvalidUserAddress)?;
+        stack_pointer = stack_pointer
+            .checked_sub(size as u64)
+            .ok_or(ProcessError::InvalidUserAddress)?;
+        write_user_bytes(process.space, stack_pointer, argument)?;
+        write_user_byte(process.space, stack_pointer + argument.len() as u64, 0)?;
+        argument_pointers.push(stack_pointer);
+    }
+    stack_pointer &= !15;
+    stack_pointer = stack_pointer
+        .checked_sub(8)
+        .ok_or(ProcessError::InvalidUserAddress)?;
+    write_user_u64(process.space, stack_pointer, 0)?;
+    stack_pointer = stack_pointer
+        .checked_sub(8)
+        .ok_or(ProcessError::InvalidUserAddress)?;
+    write_user_u64(process.space, stack_pointer, 0)?;
+    for pointer in argument_pointers.iter().rev() {
+        stack_pointer = stack_pointer
+            .checked_sub(8)
+            .ok_or(ProcessError::InvalidUserAddress)?;
+        write_user_u64(process.space, stack_pointer, *pointer)?;
+    }
+    stack_pointer = stack_pointer
+        .checked_sub(8)
+        .ok_or(ProcessError::InvalidUserAddress)?;
+    write_user_u64(process.space, stack_pointer, args.len() as u64)?;
+    process.user_stack_top = stack_pointer;
+    Ok(())
+}
+
+fn write_user_byte(space: AddressSpace, address: u64, value: u8) -> Result<(), ProcessError> {
+    let translation =
+        paging::translate_in(space, address).ok_or(ProcessError::InvalidUserAddress)?;
+    let physical = paging::phys_to_virt(translation.physical_address)
+        .ok_or(ProcessError::InvalidUserAddress)?;
+    unsafe { (physical as *mut u8).write(value) };
+    Ok(())
+}
+
+fn write_user_bytes(space: AddressSpace, address: u64, bytes: &[u8]) -> Result<(), ProcessError> {
+    for (offset, byte) in bytes.iter().enumerate() {
+        write_user_byte(space, address + offset as u64, *byte)?;
+    }
+    Ok(())
+}
+
+fn write_user_u64(space: AddressSpace, address: u64, value: u64) -> Result<(), ProcessError> {
+    write_user_bytes(space, address, &value.to_ne_bytes())
 }
 
 fn plan_pages(image: ElfImage<'_>) -> Result<Vec<PagePlan>, ProcessError> {

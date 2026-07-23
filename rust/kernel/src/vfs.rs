@@ -629,6 +629,29 @@ pub fn list_root() -> Result<Vec<String>, VfsError> {
     Ok(paths)
 }
 
+pub fn list_dir_root(path: &str) -> Result<Vec<String>, VfsError> {
+    if let Some(root) = REDOX_ROOT.lock().as_mut() {
+        return root.list_dir(path).map_err(|_| VfsError::RedoxFs);
+    }
+    let prefix = if path == "/" {
+        String::from("/")
+    } else {
+        let mut prefix = String::from(path.trim_end_matches('/'));
+        prefix.push('/');
+        prefix
+    };
+    let mut names = Vec::new();
+    for entry in ROOT.lock().list()? {
+        if let Some(name) = entry.strip_prefix(&prefix) {
+            if !name.is_empty() && !name.contains('/') {
+                names.push(name.trim_end_matches('/').into());
+            }
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
 pub fn remove_root(path: &str) -> Result<(), VfsError> {
     if let Some(path) = tmp_path(path) {
         return TMP

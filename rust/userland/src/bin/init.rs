@@ -4,7 +4,56 @@
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     vanta_userland::write(1, b"vanta init: starting /bin/vsh\n");
+    if native_acceptance() {
+        vanta_userland::write(1, b"[native] terminal/filesystem acceptance passed\n");
+    } else {
+        vanta_userland::write(2, b"[native] terminal/filesystem acceptance failed\n");
+    }
     let result = vanta_userland::exec(b"/bin/vsh");
     vanta_userland::write(2, b"vanta init: could not exec /bin/vsh\n");
     vanta_userland::exit(result)
+}
+
+fn native_acceptance() -> bool {
+    let path = b"/home/vanta/init-acceptance";
+    let renamed = b"/home/vanta/init-acceptance-renamed";
+    let directory = b"/home/vanta/init-acceptance-dir";
+    let _ = vanta_userland::mkdir(b"/home/vanta");
+    let fd = vanta_userland::open(
+        path,
+        vanta_userland::OPEN_CREATE | vanta_userland::OPEN_TRUNCATE,
+    );
+    if fd == u64::MAX - 1 {
+        return false;
+    }
+    let _write_result = vanta_userland::write(fd, b"vanta-native\n");
+    let mut stat = [0_u8; 16];
+    let stat_ok = vanta_userland::fstat(fd, &mut stat) == 0
+        && u64::from_ne_bytes(stat[..8].try_into().unwrap()) == 13;
+    vanta_userland::close(fd);
+    let read_fd = vanta_userland::open(path, vanta_userland::OPEN_READ);
+    if read_fd == u64::MAX - 1 {
+        return false;
+    }
+    let mut bytes = [0_u8; 32];
+    let count = vanta_userland::read(read_fd, &mut bytes);
+    vanta_userland::close(read_fd);
+    let read_ok = count == 13 && &bytes[..13] == b"vanta-native\n";
+    let _mkdir_result = vanta_userland::mkdir(directory);
+    let directory_fd = vanta_userland::open(directory, vanta_userland::OPEN_READ);
+    let dir_ok = directory_fd != u64::MAX - 1;
+    if dir_ok {
+        vanta_userland::close(directory_fd);
+    }
+    let rename_ok = vanta_userland::rename(path, renamed) == 0;
+    let remove_ok = vanta_userland::unlink(renamed) == 0;
+    let remove_dir_ok = vanta_userland::unlink(directory) == 0;
+    vanta_userland::write(2, b"w1 ");
+    vanta_userland::write(2, if stat_ok { b"s1 " } else { b"s0 " });
+    vanta_userland::write(2, if read_ok { b"r1 " } else { b"r0 " });
+    vanta_userland::write(2, if dir_ok { b"d1 " } else { b"d0 " });
+    vanta_userland::write(2, if rename_ok { b"n1 " } else { b"n0 " });
+    vanta_userland::write(2, if remove_ok { b"x1 " } else { b"x0 " });
+    vanta_userland::write(2, if remove_dir_ok { b"D1\n" } else { b"D0\n" });
+    stat_ok && read_ok && dir_ok && rename_ok && remove_ok && remove_dir_ok
 }

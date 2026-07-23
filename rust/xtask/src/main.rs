@@ -40,6 +40,12 @@ fn build_default_image() -> Result<(), String> {
     let cat = read_file(root.join("target/x86_64-unknown-none/release/cat"))?;
     let true_program = read_file(root.join("target/x86_64-unknown-none/release/true"))?;
     let false_program = read_file(root.join("target/x86_64-unknown-none/release/false"))?;
+    let ls = read_file(root.join("target/x86_64-unknown-none/release/ls"))?;
+    let mkdir = read_file(root.join("target/x86_64-unknown-none/release/mkdir"))?;
+    let rm = read_file(root.join("target/x86_64-unknown-none/release/rm"))?;
+    let mv = read_file(root.join("target/x86_64-unknown-none/release/mv"))?;
+    let pwd = read_file(root.join("target/x86_64-unknown-none/release/pwd"))?;
+    let stat = read_file(root.join("target/x86_64-unknown-none/release/stat"))?;
     let root_files = [
         RootFile {
             path: "/sbin/init",
@@ -79,6 +85,48 @@ fn build_default_image() -> Result<(), String> {
         RootFile {
             path: "/bin/false",
             contents: &false_program,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/ls",
+            contents: &ls,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/mkdir",
+            contents: &mkdir,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/rm",
+            contents: &rm,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/mv",
+            contents: &mv,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/pwd",
+            contents: &pwd,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/stat",
+            contents: &stat,
             mode: 0o755,
             uid: 0,
             gid: 0,

@@ -1,8 +1,10 @@
 //! Cooperative single-CPU scheduler for user processes.
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 use vanta_abi::{CapabilityId, Credentials, Rights};
@@ -100,6 +102,7 @@ struct FileDescriptor {
 #[derive(Clone)]
 enum DescriptorResource {
     File(Arc<Mutex<OpenFile>>),
+    Directory(Arc<Mutex<OpenDirectory>>),
     Serial,
     Tty,
     PipeRead(Arc<Mutex<PipeReader>>),
@@ -108,7 +111,14 @@ enum DescriptorResource {
 }
 
 struct OpenFile {
+    path: String,
     contents: Vec<u8>,
+    offset: usize,
+    writable: bool,
+}
+
+struct OpenDirectory {
+    entries: Vec<String>,
     offset: usize,
 }
 
@@ -184,6 +194,7 @@ struct Scheduler {
 static SCHEDULERS: [Mutex<Option<Scheduler>>; MAX_CPUS] = [const { Mutex::new(None) }; MAX_CPUS];
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 static NEXT_CAPABILITY_SLOT: AtomicU64 = AtomicU64::new(1);
+static TTY_CTRL_HELD: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
 mod tests {
@@ -487,6 +498,82 @@ pub fn current_parent_pid() -> u64 {
         .unwrap_or(0)
 }
 
+pub fn kill_process(pid: u64, signal: u64) -> Result<(), ()> {
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let current_pid = scheduler.tasks[scheduler.current].pid;
+    if pid == current_pid {
+        return Err(());
+    }
+    let (process, parent_pid) = {
+        let target = scheduler
+            .tasks
+            .iter_mut()
+            .find(|task| task.pid == pid && task.process.is_some())
+            .ok_or(())?;
+        let process = target.process.take();
+        let parent_pid = target.parent_pid;
+        target.state = TaskState::Zombie {
+            exit_code: 128 + signal,
+        };
+        (process, parent_pid)
+    };
+    if let Some(parent_pid) = parent_pid {
+        if let Some(parent) = scheduler.tasks.iter_mut().find(|task| {
+            task.pid == parent_pid && task.state == TaskState::Waiting { child_pid: pid }
+        }) {
+            parent.state = TaskState::Runnable;
+            parent.context.return_value = 128 + signal;
+            parent.interrupt_context.rax = 128 + signal;
+        }
+    }
+    drop(process);
+    Ok(())
+}
+
+pub fn interrupt_current(signal: u64) {
+    let process = {
+        let mut scheduler = current_scheduler().lock();
+        let Some(scheduler) = scheduler.as_mut() else {
+            return;
+        };
+        let current = scheduler.current;
+        let process = scheduler.tasks[current].process.take();
+        if process.is_none() {
+            return;
+        }
+        let pid = scheduler.tasks[current].pid;
+        scheduler.tasks[current].state = TaskState::Zombie {
+            exit_code: 128 + signal,
+        };
+        if let Some(parent_pid) = scheduler.tasks[current].parent_pid {
+            if let Some(parent) = scheduler.tasks.iter_mut().find(|task| {
+                task.pid == parent_pid && task.state == TaskState::Waiting { child_pid: pid }
+            }) {
+                parent.state = TaskState::Runnable;
+                parent.context.return_value = 128 + signal;
+                parent.interrupt_context.rax = 128 + signal;
+            }
+        }
+        process
+    };
+    drop(process);
+    crate::serial_println!("[signal] pid={} signal={}", current_pid(), signal);
+}
+
+pub fn can_mutate_path(path: &str) -> bool {
+    let scheduler = current_scheduler().lock();
+    let Some(scheduler) = scheduler.as_ref() else {
+        return false;
+    };
+    let credentials = scheduler.tasks[scheduler.current].credentials;
+    credentials.is_root()
+        || path == "/tmp"
+        || path.starts_with("/tmp/")
+        || path == "/home/vanta"
+        || path.starts_with("/home/vanta/")
+}
+
 pub fn spawn_current(process: Box<Process>) -> Result<u64, ()> {
     const MAX_TASKS: usize = 8;
     let mut scheduler = current_scheduler().lock();
@@ -508,6 +595,47 @@ pub fn spawn_current(process: Box<Process>) -> Result<u64, ()> {
     Ok(pid)
 }
 
+pub fn spawn_with_stdio_current(
+    process: Box<Process>,
+    stdin: u64,
+    stdout: u64,
+    stderr: u64,
+) -> Result<u64, ()> {
+    const MAX_TASKS: usize = 8;
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    if scheduler.tasks.len() == MAX_TASKS {
+        return Err(());
+    }
+    let parent_pid = scheduler.tasks[scheduler.current].pid;
+    let credentials = scheduler.tasks[scheduler.current].credentials;
+    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.clone();
+    for (target, source) in [(0usize, stdin), (1usize, stdout), (2usize, stderr)] {
+        if source == u64::MAX {
+            continue;
+        }
+        let source: usize = source.try_into().map_err(|_| ())?;
+        let descriptor = descriptors
+            .get(source)
+            .and_then(Option::as_ref)
+            .cloned()
+            .ok_or(())?;
+        if target >= descriptors.len() {
+            descriptors.resize_with(target + 1, || None);
+        }
+        descriptors[target] = Some(descriptor);
+    }
+    let pid = allocate_pid();
+    scheduler.tasks.push(new_task(
+        pid,
+        Some(parent_pid),
+        credentials,
+        process,
+        descriptors,
+    ));
+    Ok(pid)
+}
+
 pub fn exec_current(process: Box<Process>) -> *const UserContext {
     let (context, space, previous) = {
         let mut scheduler = current_scheduler().lock();
@@ -517,16 +645,16 @@ pub fn exec_current(process: Box<Process>) -> *const UserContext {
             return_value: 0,
             rbx: 0,
             rbp: 0,
-            r12: 0,
+            r12: process.user_stack_top(),
             r13: 0,
             r14: 0,
             r15: 0,
             instruction_pointer: process.entry(),
             flags: 0x202,
-            stack_pointer: process.user_stack_top(),
+            stack_pointer: process.user_stack_pointer(),
         };
         let interrupt_context =
-            InterruptContext::initial(process.entry(), process.user_stack_top());
+            InterruptContext::initial(process.entry(), process.user_stack_pointer());
         let task = &mut scheduler.tasks[current];
         let old = core::mem::replace(&mut task.process, Some(process));
         task.context = context;
@@ -625,15 +753,15 @@ fn new_task(
             return_value: 0,
             rbx: 0,
             rbp: 0,
-            r12: 0,
+            r12: process.user_stack_top(),
             r13: 0,
             r14: 0,
             r15: 0,
             instruction_pointer: process.entry(),
             flags: 0x202,
-            stack_pointer: process.user_stack_top(),
+            stack_pointer: process.user_stack_pointer(),
         },
-        interrupt_context: InterruptContext::initial(process.entry(), process.user_stack_top()),
+        interrupt_context: InterruptContext::initial(process.entry(), process.user_stack_pointer()),
         process: Some(process),
         descriptors,
         credentials,
@@ -666,6 +794,39 @@ fn standard_descriptors(native_tty: bool) -> Vec<Option<FileDescriptor>> {
 }
 
 pub fn open_current(contents: Vec<u8>) -> Result<u64, ()> {
+    open_native_current(String::new(), contents, false, false)
+}
+
+pub fn open_native_current(
+    path: String,
+    contents: Vec<u8>,
+    writable: bool,
+    append: bool,
+) -> Result<u64, ()> {
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let descriptors = &mut scheduler.tasks[scheduler.current].descriptors;
+    let initial_offset = if append { contents.len() } else { 0 };
+    let mut rights = Rights::READ | Rights::TRANSFER;
+    if writable {
+        rights |= Rights::WRITE;
+    }
+    install_descriptor(
+        descriptors,
+        FileDescriptor {
+            capability: allocate_capability(),
+            rights,
+            resource: DescriptorResource::File(Arc::new(Mutex::new(OpenFile {
+                path,
+                contents,
+                offset: initial_offset,
+                writable,
+            }))),
+        },
+    )
+}
+
+pub fn open_directory_current(entries: Vec<String>) -> Result<u64, ()> {
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
     let descriptors = &mut scheduler.tasks[scheduler.current].descriptors;
@@ -674,8 +835,8 @@ pub fn open_current(contents: Vec<u8>) -> Result<u64, ()> {
         FileDescriptor {
             capability: allocate_capability(),
             rights: Rights::READ | Rights::TRANSFER,
-            resource: DescriptorResource::File(Arc::new(Mutex::new(OpenFile {
-                contents,
+            resource: DescriptorResource::Directory(Arc::new(Mutex::new(OpenDirectory {
+                entries,
                 offset: 0,
             }))),
         },
@@ -786,6 +947,18 @@ pub fn seek_current(descriptor: u64, offset: i64, whence: u64) -> Result<u64, ()
     Ok(position as u64)
 }
 
+pub fn stat_current(descriptor: u64) -> Result<(u64, u64), ()> {
+    let descriptor = current_descriptor(descriptor)?;
+    if !descriptor.rights.contains(Rights::READ) {
+        return Err(());
+    }
+    match descriptor.resource {
+        DescriptorResource::File(file) => Ok((file.lock().contents.len() as u64, 0o100644)),
+        DescriptorResource::Directory(_) => Ok((0, 0o040755)),
+        _ => Err(()),
+    }
+}
+
 fn install_descriptor(
     descriptors: &mut Vec<Option<FileDescriptor>>,
     descriptor: FileDescriptor,
@@ -819,6 +992,21 @@ pub fn read_current(descriptor: u64, length: usize) -> Result<Vec<u8>, ()> {
             file.offset = end;
             Ok(bytes)
         }
+        DescriptorResource::Directory(directory) => {
+            let mut directory = directory.lock();
+            let mut bytes = Vec::new();
+            while directory.offset < directory.entries.len() && bytes.len() < length {
+                let entry = directory.entries[directory.offset].as_bytes();
+                let needed = entry.len() + 1;
+                if bytes.len() + needed > length && !bytes.is_empty() {
+                    break;
+                }
+                bytes.extend_from_slice(entry);
+                bytes.push(b'\n');
+                directory.offset += 1;
+            }
+            Ok(bytes)
+        }
         DescriptorResource::Socket(socket) => {
             let mut socket = socket.lock();
             let connection = socket.connection.as_mut().ok_or(())?;
@@ -828,6 +1016,19 @@ pub fn read_current(descriptor: u64, length: usize) -> Result<Vec<u8>, ()> {
         DescriptorResource::Tty => Ok(read_tty(length)),
         DescriptorResource::PipeRead(reader) => Ok(reader.lock().read(length)),
         DescriptorResource::PipeWrite(_) => Err(()),
+    }
+}
+
+pub fn read_would_block(descriptor: u64) -> bool {
+    let Ok(descriptor) = current_descriptor(descriptor) else {
+        return false;
+    };
+    match descriptor.resource {
+        DescriptorResource::PipeRead(reader) => {
+            let state = reader.lock();
+            state.state.lock().bytes.is_empty() && state.state.lock().writer_open
+        }
+        _ => false,
     }
 }
 
@@ -853,6 +1054,7 @@ pub fn close_current(descriptor: u64) -> Result<(), ()> {
         }
         DescriptorResource::PipeWrite(writer) => close_pipe_writer(writer),
         DescriptorResource::File(_)
+        | DescriptorResource::Directory(_)
         | DescriptorResource::Serial
         | DescriptorResource::Tty
         | DescriptorResource::PipeRead(_) => {}
@@ -881,7 +1083,21 @@ pub fn write_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
             }
             Ok(())
         }
-        DescriptorResource::File(_) | DescriptorResource::PipeRead(_) => Err(()),
+        DescriptorResource::File(file) => {
+            let mut file = file.lock();
+            if !file.writable {
+                return Err(());
+            }
+            let offset = file.offset;
+            let end = offset.checked_add(bytes.len()).ok_or(())?;
+            if end > file.contents.len() {
+                file.contents.resize(end, 0);
+            }
+            file.contents[offset..end].copy_from_slice(bytes);
+            file.offset = end;
+            crate::vfs::write_root(&file.path, &file.contents).map_err(|_| ())
+        }
+        DescriptorResource::Directory(_) | DescriptorResource::PipeRead(_) => Err(()),
     }
 }
 
@@ -912,6 +1128,18 @@ fn read_tty(length: usize) -> Vec<u8> {
         let Some(scancode) = crate::keyboard::pop_scancode() else {
             break;
         };
+        if scancode == 0x1d {
+            TTY_CTRL_HELD.store(true, AtomicOrdering::Relaxed);
+            continue;
+        }
+        if scancode == 0x9d {
+            TTY_CTRL_HELD.store(false, AtomicOrdering::Relaxed);
+            continue;
+        }
+        if TTY_CTRL_HELD.load(AtomicOrdering::Relaxed) && scancode == 0x2e {
+            bytes.push(3);
+            continue;
+        }
         if let Some(byte) = decode_tty_scancode(scancode) {
             bytes.push(byte);
         }

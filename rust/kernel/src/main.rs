@@ -635,6 +635,12 @@ fn run_virtio_self_check() -> bool {
                     let mounted = match vfs::mount_virtio_redox_root(device, root) {
                         Ok(()) => {
                             serial_println!("[storage] RedoxFS root mounted");
+                            let marker = b"vanta-redoxfs-persistent\n";
+                            let persistence = vfs::write_root("/etc/persistent", marker).is_ok()
+                                && vfs::remount_root().is_ok()
+                                && vfs::read_root("/etc/persistent").ok().as_deref()
+                                    == Some(marker);
+                            serial_println!("[storage] RedoxFS persistence check: {}", persistence);
                             true
                         }
                         Err(error) => {

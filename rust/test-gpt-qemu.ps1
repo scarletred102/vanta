@@ -32,7 +32,9 @@ $process = Start-Process -FilePath $qemu -ArgumentList $arguments -PassThru -Win
 try {
     $required = @(
         "[storage] RedoxFS root mounted",
+        "[storage] RedoxFS persistence check: true",
         "[proc] launching native /sbin/init",
+        "[native] terminal/filesystem acceptance passed",
         "vanta native shell"
     )
     $output = ""

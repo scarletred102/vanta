@@ -16,6 +16,11 @@ pub const SYS_WRITE: u64 = Syscall::Write.number() as u64;
 pub const SYS_OPEN: u64 = Syscall::OpenAt.number() as u64;
 pub const SYS_CLOSE: u64 = Syscall::Close.number() as u64;
 pub const SYS_LSEEK: u64 = Syscall::LSeek.number() as u64;
+pub const SYS_FSTAT: u64 = Syscall::FStat.number() as u64;
+pub const SYS_GETDENTS: u64 = Syscall::GetDents.number() as u64;
+pub const SYS_MKDIR: u64 = Syscall::MkDirAt.number() as u64;
+pub const SYS_UNLINK: u64 = Syscall::UnlinkAt.number() as u64;
+pub const SYS_RENAME: u64 = Syscall::RenameAt.number() as u64;
 pub const SYS_YIELD: u64 = Syscall::Yield.number() as u64;
 pub const SYS_DUP: u64 = Syscall::Dup3.number() as u64;
 pub const SYS_PIPE: u64 = Syscall::Pipe2.number() as u64;
@@ -26,12 +31,14 @@ pub const SYS_GETPPID: u64 = Syscall::GetPpid.number() as u64;
 pub const SYS_EXEC: u64 = Syscall::ExecVe.number() as u64;
 pub const SYS_EXIT: u64 = Syscall::Exit.number() as u64;
 pub const SYS_WAITPID: u64 = Syscall::WaitPid.number() as u64;
+pub const SYS_KILL: u64 = Syscall::Kill.number() as u64;
 pub const SYS_SPAWN: u64 = Syscall::SpawnVe.number() as u64;
 const SYSCALL_RETURN_EXIT: u64 = u64::MAX;
 const SYSCALL_RETURN_YIELD: u64 = u64::MAX - 2;
 const SYSCALL_RETURN_WAIT: u64 = u64::MAX - 3;
 const SYSCALL_RETURN_EXEC: u64 = u64::MAX - 4;
 const SYSCALL_ERROR: u64 = u64::MAX - 1;
+pub const SYSCALL_WOULD_BLOCK: u64 = u64::MAX - 5;
 const USER_ADDRESS_LIMIT: u64 = 0x0000_8000_0000_0000;
 // RedoxFS transactions are stack-intensive, so descriptor syscalls require a
 // real kernel stack rather than the former 8 KiB bootstrap-sized buffer.
@@ -133,6 +140,9 @@ vanta_syscall_entry:
     je vanta_syscall_exec_path
     mov r11, [rsp + 48]
     mov rcx, [rsp + 40]
+    mov rdx, [rsp + 24]
+    mov rsi, [rsp + 16]
+    mov rdi, [rsp + 8]
     add rsp, 104
     mov rsp, gs:[{user_rsp_offset}]
     swapgs
@@ -243,15 +253,38 @@ extern "C" fn vanta_syscall_dispatch(
     match number {
         SYS_READ => read_user(arg1, arg2, arg3),
         SYS_WRITE => write_user(arg1, arg2, arg3),
-        SYS_OPEN => open_user(arg1, arg2),
+        SYS_OPEN => {
+            if arg3 & 0x1f != 0 {
+                open_native_user(arg1, arg2, arg3)
+            } else {
+                open_user(arg1, arg2)
+            }
+        }
         SYS_CLOSE => close_user(arg1),
         SYS_LSEEK => seek_user(arg1, arg2 as i64, arg3),
-        SYS_DUP => duplicate_user(arg1),
+        SYS_FSTAT => fstat_user(arg1, arg2),
+        SYS_GETDENTS => read_user(arg1, arg2, arg3),
+        SYS_MKDIR => path_mutation_user(arg1, arg2, 0, 0),
+        SYS_UNLINK => path_mutation_user(arg1, arg2, 1, 0),
+        SYS_RENAME => path_mutation_user(arg1, arg2, arg3, _arg4),
+        SYS_DUP => duplicate_legacy_user(arg1),
         SYS_PIPE => pipe_user(arg1, arg2),
         SYS_SOCKET => socket_user(arg1, arg2, arg3),
         SYS_CONNECT => connect_user(arg1, arg2, arg3),
-        SYS_SPAWN => spawn_user(arg1, arg2),
+        SYS_SPAWN => {
+            if arg3 == 0 {
+                spawn_legacy_user(arg1, arg2)
+            } else {
+                let native = spawn_native_user(arg1, arg2, arg3, _arg4);
+                if native == SYSCALL_ERROR {
+                    spawn_legacy_user(arg1, arg2)
+                } else {
+                    native
+                }
+            }
+        }
         SYS_WAITPID => waitpid_user(arg1),
+        SYS_KILL => kill_user(arg1, arg2),
         SYS_EXEC => SYSCALL_RETURN_EXEC,
         SYS_YIELD => SYSCALL_RETURN_YIELD,
         SYS_GETPID => crate::scheduler::current_pid(),
@@ -284,9 +317,19 @@ fn write_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
     let Ok(bytes) = copy_from_user(pointer, length, false) else {
         return SYSCALL_ERROR;
     };
-    crate::scheduler::write_current(descriptor, &bytes)
-        .map(|()| length)
-        .unwrap_or(SYSCALL_ERROR)
+    if descriptor == 1 || descriptor == 2 {
+        if crate::scheduler::write_current(descriptor, &bytes).is_ok() {
+            return length;
+        }
+        for byte in bytes {
+            crate::serial::_print(format_args!("{}", byte as char));
+        }
+        return length;
+    }
+    match crate::scheduler::write_current(descriptor, &bytes) {
+        Ok(()) => length,
+        Err(()) => SYSCALL_ERROR,
+    }
 }
 
 fn open_user(pointer: u64, length: u64) -> u64 {
@@ -302,6 +345,55 @@ fn open_user(pointer: u64, length: u64) -> u64 {
     crate::scheduler::open_current(contents).unwrap_or(SYSCALL_ERROR)
 }
 
+fn open_native_user(pointer: u64, length: u64, flags: u64) -> u64 {
+    let Ok(path_bytes) = copy_from_user(pointer, length, false) else {
+        return SYSCALL_ERROR;
+    };
+    let Ok(path) = core::str::from_utf8(&path_bytes) else {
+        return SYSCALL_ERROR;
+    };
+    if let Ok(info) = crate::vfs::file_info_root(path) {
+        if info.is_directory {
+            let Ok(entries) = crate::vfs::list_dir_root(path) else {
+                return SYSCALL_ERROR;
+            };
+            return crate::scheduler::open_directory_current(entries).unwrap_or(SYSCALL_ERROR);
+        }
+    }
+    let writable = flags & 1 != 0;
+    let create = flags & 2 != 0;
+    let truncate = flags & 4 != 0;
+    let append = flags & 8 != 0;
+    if writable && !crate::scheduler::can_mutate_path(path) {
+        return SYSCALL_ERROR;
+    }
+    let mut contents = match crate::vfs::read_root(path) {
+        Ok(contents) => contents,
+        Err(_) if writable && create => Vec::new(),
+        Err(_) => return SYSCALL_ERROR,
+    };
+    if writable && truncate {
+        contents.clear();
+        if crate::vfs::write_root(path, &contents).is_err() {
+            return SYSCALL_ERROR;
+        }
+    } else if writable
+        && create
+        && crate::vfs::file_info_root(path).is_err()
+        && crate::vfs::write_root(path, &contents).is_err()
+    {
+        return SYSCALL_ERROR;
+    }
+    let descriptor = crate::scheduler::open_native_current(
+        alloc::string::String::from(path),
+        contents,
+        writable,
+        append,
+    )
+    .unwrap_or(SYSCALL_ERROR);
+    descriptor
+}
+
 fn read_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
     if length > 256 {
         return SYSCALL_ERROR;
@@ -311,6 +403,9 @@ fn read_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
     };
     if copy_to_user(pointer, &bytes).is_err() {
         return SYSCALL_ERROR;
+    }
+    if bytes.is_empty() && crate::scheduler::read_would_block(descriptor) {
+        return SYSCALL_WOULD_BLOCK;
     }
     bytes.len() as u64
 }
@@ -325,7 +420,49 @@ fn seek_user(descriptor: u64, offset: i64, whence: u64) -> u64 {
     crate::scheduler::seek_current(descriptor, offset, whence).unwrap_or(SYSCALL_ERROR)
 }
 
-fn duplicate_user(descriptor: u64) -> u64 {
+fn path_mutation_user(old_pointer: u64, old_length: u64, operation: u64, new_length: u64) -> u64 {
+    let Ok(old_bytes) = copy_from_user(old_pointer, old_length, false) else {
+        return SYSCALL_ERROR;
+    };
+    let Ok(old_path) = core::str::from_utf8(&old_bytes) else {
+        return SYSCALL_ERROR;
+    };
+    if !crate::scheduler::can_mutate_path(old_path) {
+        return SYSCALL_ERROR;
+    }
+    let result = match operation {
+        0 => crate::vfs::create_dir_root(old_path),
+        1 => crate::vfs::remove_root(old_path),
+        _ => {
+            let Ok(new_bytes) = copy_from_user(operation, new_length, false) else {
+                return SYSCALL_ERROR;
+            };
+            let Ok(new_path) = core::str::from_utf8(&new_bytes) else {
+                return SYSCALL_ERROR;
+            };
+            if !crate::scheduler::can_mutate_path(new_path) {
+                return SYSCALL_ERROR;
+            }
+            crate::vfs::rename_root(old_path, new_path)
+        }
+    };
+    result.map(|_| 0).unwrap_or(SYSCALL_ERROR)
+}
+
+fn fstat_user(descriptor: u64, pointer: u64) -> u64 {
+    let Ok((length, mode)) = crate::scheduler::stat_current(descriptor) else {
+        return SYSCALL_ERROR;
+    };
+    let mut stat = [0_u8; 16];
+    stat[..8].copy_from_slice(&length.to_ne_bytes());
+    stat[8..16].copy_from_slice(&mode.to_ne_bytes());
+    match copy_to_user(pointer, &stat) {
+        Ok(()) => 0,
+        Err(()) => SYSCALL_ERROR,
+    }
+}
+
+fn duplicate_legacy_user(descriptor: u64) -> u64 {
     crate::scheduler::duplicate_current(descriptor).unwrap_or(SYSCALL_ERROR)
 }
 
@@ -368,7 +505,7 @@ fn connect_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
         .unwrap_or(SYSCALL_ERROR)
 }
 
-fn spawn_user(pointer: u64, length: u64) -> u64 {
+fn spawn_legacy_user(pointer: u64, length: u64) -> u64 {
     let Ok(path) = copy_from_user(pointer, length, false) else {
         return SYSCALL_ERROR;
     };
@@ -384,12 +521,82 @@ fn spawn_user(pointer: u64, length: u64) -> u64 {
     crate::scheduler::spawn_current(alloc::boxed::Box::new(process)).unwrap_or(SYSCALL_ERROR)
 }
 
+fn spawn_native_user(pointer: u64, length: u64, stdio_pointer: u64, with_args: u64) -> u64 {
+    let Ok(path) = copy_from_user(pointer, length, false) else {
+        return SYSCALL_ERROR;
+    };
+    let Ok(path) = core::str::from_utf8(&path) else {
+        return SYSCALL_ERROR;
+    };
+    let stdio_length = if with_args == 1 { 40 } else { 24 };
+    let Ok(stdio) = copy_from_user(stdio_pointer, stdio_length, false) else {
+        return SYSCALL_ERROR;
+    };
+    let Ok(image) = crate::vfs::read_root(path) else {
+        return SYSCALL_ERROR;
+    };
+    let mut arguments = Vec::new();
+    if with_args == 1 {
+        let argv_pointer = u64::from_ne_bytes(stdio[24..32].try_into().unwrap());
+        let argc = u64::from_ne_bytes(stdio[32..40].try_into().unwrap()).min(8);
+        for index in 0..argc {
+            let Ok(pointer_bytes) = copy_from_user(argv_pointer + index * 8, 8, false) else {
+                return SYSCALL_ERROR;
+            };
+            let pointer = u64::from_ne_bytes(pointer_bytes.try_into().unwrap());
+            let Ok(argument) = copy_cstring(pointer, 128) else {
+                return SYSCALL_ERROR;
+            };
+            arguments.push(argument);
+        }
+    }
+    let Ok(process) = (if with_args == 1 {
+        let references = arguments.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        crate::process::load_elf_with_args(&image, &references)
+    } else {
+        crate::process::load_elf(&image)
+    }) else {
+        return SYSCALL_ERROR;
+    };
+    let stdin = u64::from_ne_bytes(stdio[0..8].try_into().unwrap());
+    let stdout = u64::from_ne_bytes(stdio[8..16].try_into().unwrap());
+    let stderr = u64::from_ne_bytes(stdio[16..24].try_into().unwrap());
+    crate::scheduler::spawn_with_stdio_current(
+        alloc::boxed::Box::new(process),
+        stdin,
+        stdout,
+        stderr,
+    )
+    .unwrap_or(SYSCALL_ERROR)
+}
+
+fn copy_cstring(pointer: u64, limit: u64) -> Result<Vec<u8>, ()> {
+    let mut bytes = Vec::new();
+    for offset in 0..limit {
+        let byte = copy_from_user(pointer + offset, 1, false)?[0];
+        if byte == 0 {
+            return Ok(bytes);
+        }
+        bytes.push(byte);
+    }
+    Err(())
+}
+
 fn waitpid_user(pid: u64) -> u64 {
     match crate::scheduler::wait_child_current(pid) {
         Ok(Some(code)) => code,
         Ok(None) => SYSCALL_RETURN_WAIT,
         Err(()) => SYSCALL_ERROR,
     }
+}
+
+fn kill_user(pid: u64, signal: u64) -> u64 {
+    if signal == 0 || signal > 31 {
+        return SYSCALL_ERROR;
+    }
+    crate::scheduler::kill_process(pid, signal)
+        .map(|_| 0)
+        .unwrap_or(SYSCALL_ERROR)
 }
 
 fn copy_from_user(pointer: u64, length: u64, writable: bool) -> Result<Vec<u8>, ()> {

@@ -233,7 +233,13 @@ impl<D: SectorIo> RedoxFsBackend<D> {
         let (name, parent) = split_parent(&parts)?;
         self.filesystem.tx(|tx| {
             let parent = resolve(tx, parent)?;
-            tx.remove_node(parent, name, Node::MODE_FILE)?;
+            let node = tx.find_node(parent, name)?;
+            let mode = if node.data().is_dir() {
+                Node::MODE_DIR
+            } else {
+                Node::MODE_FILE
+            };
+            tx.remove_node(parent, name, mode)?;
             Ok(())
         })
     }
