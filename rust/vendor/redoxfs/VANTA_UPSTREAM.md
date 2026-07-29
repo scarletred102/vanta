@@ -18,5 +18,12 @@ formatting returns `EOPNOTSUPP`, and new headers use a zero UUID; the host
 image builder creates only unencrypted filesystems. The upstream `std` profile
 retains random UUID and encrypted-format support.
 
+Vanta also adds `Transaction::create_node_with_owner` while preserving the
+original parent-owned `create_node` API. Vanta's adapter uses this narrow patch
+to provision explicit UID/GID metadata for bootstrap directories such as
+`/home/vanta`, and for future credential-aware creates. Preserve this patch
+when updating the subtree and review it against the corresponding upstream
+transaction implementation.
+
 To update, fetch the intended upstream commit, review its license and diff,
 then run `git subtree pull --prefix=rust/vendor/redoxfs <upstream> <commit> --squash`.

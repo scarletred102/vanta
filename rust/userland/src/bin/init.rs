@@ -24,6 +24,7 @@ fn native_acceptance() -> bool {
         vanta_userland::OPEN_CREATE | vanta_userland::OPEN_TRUNCATE,
     );
     if fd == u64::MAX - 1 {
+        vanta_userland::write(2, b"[native] acceptance: create failed\n");
         return false;
     }
     let _write_result = vanta_userland::write(fd, b"vanta-native\n");
@@ -33,6 +34,7 @@ fn native_acceptance() -> bool {
     vanta_userland::close(fd);
     let read_fd = vanta_userland::open(path, vanta_userland::OPEN_READ);
     if read_fd == u64::MAX - 1 {
+        vanta_userland::write(2, b"[native] acceptance: read-open failed\n");
         return false;
     }
     let mut bytes = [0_u8; 32];
@@ -48,6 +50,16 @@ fn native_acceptance() -> bool {
     let rename_ok = vanta_userland::rename(path, renamed) == 0;
     let remove_ok = vanta_userland::unlink(renamed) == 0;
     let remove_dir_ok = vanta_userland::unlink(directory) == 0;
+    let c_hello = vanta_userland::spawn(b"/bin/c-hello");
+    let c_hello_ok = c_hello != u64::MAX && vanta_userland::wait(c_hello) == 0;
+    vanta_userland::write(
+        2,
+        if c_hello_ok {
+            b"[native] acceptance: c-hello ok\n"
+        } else {
+            b"[native] acceptance: c-hello failed\n"
+        },
+    );
     vanta_userland::write(2, b"w1 ");
     vanta_userland::write(2, if stat_ok { b"s1 " } else { b"s0 " });
     vanta_userland::write(2, if read_ok { b"r1 " } else { b"r0 " });
@@ -55,5 +67,6 @@ fn native_acceptance() -> bool {
     vanta_userland::write(2, if rename_ok { b"n1 " } else { b"n0 " });
     vanta_userland::write(2, if remove_ok { b"x1 " } else { b"x0 " });
     vanta_userland::write(2, if remove_dir_ok { b"D1\n" } else { b"D0\n" });
-    stat_ok && read_ok && dir_ok && rename_ok && remove_ok && remove_dir_ok
+    vanta_userland::write(2, if c_hello_ok { b"c1\n" } else { b"c0\n" });
+    stat_ok && read_ok && dir_ok && rename_ok && remove_ok && remove_dir_ok && c_hello_ok
 }

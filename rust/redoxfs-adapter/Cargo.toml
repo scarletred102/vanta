@@ -9,6 +9,7 @@ repository.workspace = true
 redoxfs = { path = "../vendor/redoxfs", default-features = false }
 syscall = { package = "redox_syscall", version = "0.9.0", default-features = false }
 vanta-gpt = { path = "../gpt" }
+vanta-abi = { path = "../abi" }
 
 [lib]
 path = "src/lib.rs"

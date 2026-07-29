@@ -57,12 +57,6 @@ impl Process {
         self.user_stack_top
     }
 
-    pub fn user_stack_pointer(&self) -> u64 {
-        self.user_stack_top
-            .checked_add(8)
-            .expect("user stack pointer overflow")
-    }
-
     pub fn read_user_byte(&self, virtual_address: u64) -> Option<u8> {
         let translation = paging::translate_in(self.space, virtual_address)?;
         let physical = paging::phys_to_virt(translation.physical_address)?;

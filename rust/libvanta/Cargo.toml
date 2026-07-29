@@ -1,0 +1,12 @@
+[package]
+name = "libvanta"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+vanta-abi = { path = "../abi" }
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+doctest = false

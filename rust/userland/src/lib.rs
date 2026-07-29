@@ -12,6 +12,7 @@ const SYS_PIPE2: u64 = 0x0006;
 const SYS_SPAWN: u64 = 0x0011;
 const SYS_WAITPID: u64 = 0x0013;
 const SYS_KILL: u64 = 0x0015;
+const SYS_SIGACTION: u64 = 0x0016;
 const SYS_EXIT: u64 = 0x0014;
 const SYS_YIELD: u64 = 0x001c;
 const SYS_FSTAT: u64 = 0x0008;
@@ -161,6 +162,11 @@ pub fn kill(pid: u64, signal: u64) -> u64 {
     syscall(SYS_KILL, pid, signal, 0)
 }
 
+pub fn sigaction(signal: u64, handler: u64, flags: u64) -> u64 {
+    let action = [handler.to_ne_bytes(), flags.to_ne_bytes()];
+    syscall(SYS_SIGACTION, signal, action.as_ptr() as u64, 0)
+}
+
 pub fn exit(code: u64) -> ! {
     let _ = syscall(SYS_EXIT, code, 0, 0);
     loop {
@@ -184,6 +190,7 @@ pub fn command_path(command: &[u8]) -> Option<&'static [u8]> {
         b"mv" => Some(b"/bin/mv"),
         b"pwd" => Some(b"/bin/pwd"),
         b"stat" => Some(b"/bin/stat"),
+        b"c-hello" => Some(b"/bin/c-hello"),
         _ => None,
     }
 }
@@ -204,6 +211,8 @@ fn syscall4(number: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
             in("r10") arg4,
             lateout("rcx") _,
             lateout("r11") _,
+            lateout("r8") _,
+            lateout("r9") _,
         );
     }
     result

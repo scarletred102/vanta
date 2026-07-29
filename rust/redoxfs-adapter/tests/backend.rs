@@ -1,3 +1,4 @@
+use vanta_abi::Credentials;
 use vanta_gpt::RootPartition;
 use vanta_redoxfs_adapter::{RedoxFsBackend, SectorError, SectorIo, SECTOR_SIZE};
 
@@ -72,4 +73,56 @@ fn backend_persists_nested_file_lifecycle() {
     );
     backend.remove_file("/etc/vanta.toml").expect("remove file");
     assert!(backend.read_file("/etc/vanta.toml").is_err());
+}
+
+#[test]
+fn backend_enforces_owner_mode_and_umask() {
+    let partition = RootPartition {
+        start_lba: 0,
+        end_lba: 65_535,
+    };
+    let mut backend =
+        RedoxFsBackend::format(MemoryDisk::new(65_536), partition).expect("format RedoxFS root");
+    let root = Credentials::root();
+    let vanta = Credentials::vanta();
+
+    backend
+        .create_dir_all_as("/home/vanta", &root)
+        .expect("create user home");
+    backend
+        .write_file_as("/home/vanta/owned", b"root", &root)
+        .expect("root creates home file");
+    assert!(backend
+        .write_file_as("/home/vanta/owned", b"user", &vanta)
+        .is_err());
+    let owned = backend
+        .file_info_as("/home/vanta/owned", &root)
+        .expect("inspect home file");
+    assert_eq!(owned.uid, 0);
+    assert_eq!(owned.gid, 0);
+    assert_eq!(owned.mode & 0o777, 0o644);
+
+    backend
+        .create_dir_all_as("/etc", &root)
+        .expect("create system directory");
+    backend
+        .write_file_as("/etc/config", b"root", &root)
+        .expect("root creates system file");
+    assert!(backend
+        .write_file_as("/etc/config", b"user", &vanta)
+        .is_err());
+    assert_eq!(
+        backend.read_file_as("/etc/config", &vanta).unwrap(),
+        b"root"
+    );
+
+    let mut private = root;
+    private.umask = 0o077;
+    backend
+        .write_file_as("/home/vanta/private", b"secret", &private)
+        .expect("create private file");
+    let private_info = backend
+        .file_info_as("/home/vanta/private", &private)
+        .expect("inspect private file");
+    assert_eq!(private_info.mode & 0o777, 0o600);
 }

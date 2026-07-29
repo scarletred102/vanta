@@ -457,6 +457,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "libvanta"
+version = "0.1.0"
+dependencies = [
+ "vanta-abi",
+]
+
+[[package]]
 name = "limine"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -919,12 +926,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "vanta-linuxd"
+version = "0.1.0"
+dependencies = [
+ "vanta-abi",
+]
+
+[[package]]
 name = "vanta-redoxfs-adapter"
 version = "0.1.0"
 dependencies = [
  "redox_syscall",
  "redoxfs",
+ "vanta-abi",
  "vanta-gpt",
+]
+
+[[package]]
+name = "vanta-services"
+version = "0.1.0"
+dependencies = [
+ "vanta-abi",
 ]
 
 [[package]]

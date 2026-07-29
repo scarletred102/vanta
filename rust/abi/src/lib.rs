@@ -5,6 +5,22 @@ use core::ops::{BitOr, BitOrAssign};
 pub const ABI_VERSION: u32 = 0;
 pub const MAX_GROUPS: usize = 8;
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SignalAction {
+    pub handler: u64,
+    pub flags: u64,
+}
+
+impl SignalAction {
+    pub const fn default() -> Self {
+        Self {
+            handler: 0,
+            flags: 0,
+        }
+    }
+}
+
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Syscall {

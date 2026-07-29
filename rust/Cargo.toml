@@ -1,5 +1,16 @@
 [workspace]
-members = ["abi", "gpt", "image", "kernel", "redoxfs-adapter", "userland", "xtask"]
+members = [
+    "abi",
+    "gpt",
+    "image",
+    "kernel",
+    "libvanta",
+    "linuxd",
+    "redoxfs-adapter",
+    "services",
+    "userland",
+    "xtask",
+]
 resolver = "2"
 
 [workspace.package]

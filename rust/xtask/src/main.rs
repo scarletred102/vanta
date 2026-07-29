@@ -19,17 +19,121 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("sdk") => {
+            let root = workspace_root();
+            match build_sdk(&root) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("xtask sdk: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         _ => {
-            eprintln!("usage: cargo xtask image");
+            eprintln!("usage: cargo xtask image|sdk");
             ExitCode::FAILURE
         }
     }
+}
+
+fn build_sdk(root: &Path) -> Result<(), String> {
+    let rustup = rustup_path();
+    let status = Command::new(&rustup)
+        .current_dir(&root)
+        .args([
+            "run",
+            RUST_TOOLCHAIN,
+            "cargo",
+            "build",
+            "-p",
+            "libvanta",
+            "--target",
+            "x86_64-unknown-none",
+            "--release",
+        ])
+        .status()
+        .map_err(|error| format!("failed to start SDK build: {error}"))?;
+    if !status.success() {
+        return Err(format!("SDK build exited with {status}"));
+    }
+
+    let output = root.join("target/sdk");
+    fs::create_dir_all(output.join("include"))
+        .map_err(|error| format!("{}: {error}", output.display()))?;
+    let library = root.join("target/x86_64-unknown-none/release/liblibvanta.a");
+    fs::copy(&library, output.join("libvanta.a"))
+        .map_err(|error| format!("{}: {error}", library.display()))?;
+    let header = root.join("libvanta/include/vanta.h");
+    fs::copy(&header, output.join("include/vanta.h"))
+        .map_err(|error| format!("{}: {error}", header.display()))?;
+    fs::copy(
+        root.join("libvanta/examples/hello.c"),
+        output.join("hello.c"),
+    )
+    .map_err(|error| format!("SDK sample: {error}"))?;
+    fs::write(
+        output.join("manifest.txt"),
+        format!(
+            "sdk=libvanta@{}\nabi-version=0\ntarget=x86_64-unknown-none\nsource-revision={}\n",
+            env!("CARGO_PKG_VERSION"),
+            git_revision(&root),
+        ),
+    )
+    .map_err(|error| format!("SDK manifest: {error}"))?;
+    compile_c_sample(&root)?;
+    println!("[sdk] {}", output.display());
+    Ok(())
+}
+
+fn compile_c_sample(root: &Path) -> Result<(), String> {
+    let status = Command::new("zig")
+        .current_dir(root)
+        .args([
+            "cc",
+            "-target",
+            "x86_64-freestanding",
+            "-ffreestanding",
+            "-fno-stack-protector",
+            "-nostdlib",
+            "-I",
+            "libvanta/include",
+            "-c",
+            "target/sdk/hello.c",
+            "-o",
+            "target/sdk/hello.o",
+        ])
+        .status()
+        .map_err(|error| format!("failed to start C SDK compiler (zig cc): {error}"))?;
+    if !status.success() {
+        return Err(format!("C SDK compilation exited with {status}"));
+    }
+    let status = Command::new("zig")
+        .current_dir(root)
+        .args([
+            "cc",
+            "-target",
+            "x86_64-freestanding",
+            "-nostdlib",
+            "-fuse-ld=lld",
+            "-Wl,-T,userland/linker.ld",
+            "target/sdk/hello.o",
+            "target/sdk/libvanta.a",
+            "-o",
+            "target/sdk/hello-vanta.elf",
+        ])
+        .status()
+        .map_err(|error| format!("failed to start C SDK linker (zig cc): {error}"))?;
+    if !status.success() {
+        return Err(format!("C SDK linking exited with {status}"));
+    }
+    Ok(())
 }
 
 fn build_default_image() -> Result<(), String> {
     let root = workspace_root();
     build_kernel(&root)?;
     build_userland(&root)?;
+    build_sdk(&root)?;
 
     let boot_efi = read_file(root.join("esp/EFI/BOOT/BOOTX64.EFI"))?;
     let kernel = read_file(root.join("target/x86_64-unknown-none/release/vanta-kernel"))?;
@@ -46,6 +150,7 @@ fn build_default_image() -> Result<(), String> {
     let mv = read_file(root.join("target/x86_64-unknown-none/release/mv"))?;
     let pwd = read_file(root.join("target/x86_64-unknown-none/release/pwd"))?;
     let stat = read_file(root.join("target/x86_64-unknown-none/release/stat"))?;
+    let c_hello = read_file(root.join("target/sdk/hello-vanta.elf"))?;
     let root_files = [
         RootFile {
             path: "/sbin/init",
@@ -127,6 +232,13 @@ fn build_default_image() -> Result<(), String> {
         RootFile {
             path: "/bin/stat",
             contents: &stat,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/c-hello",
+            contents: &c_hello,
             mode: 0o755,
             uid: 0,
             gid: 0,

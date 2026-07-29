@@ -4,7 +4,7 @@ use core::arch::asm;
 use core::arch::global_asm;
 
 use alloc::vec::Vec;
-use vanta_abi::Syscall;
+use vanta_abi::{SignalAction, Syscall};
 use x86_64::registers::model_specific::{Efer, EferFlags, LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;
 use x86_64::VirtAddr;
@@ -32,6 +32,7 @@ pub const SYS_EXEC: u64 = Syscall::ExecVe.number() as u64;
 pub const SYS_EXIT: u64 = Syscall::Exit.number() as u64;
 pub const SYS_WAITPID: u64 = Syscall::WaitPid.number() as u64;
 pub const SYS_KILL: u64 = Syscall::Kill.number() as u64;
+pub const SYS_SIGACTION: u64 = Syscall::SigAction.number() as u64;
 pub const SYS_SPAWN: u64 = Syscall::SpawnVe.number() as u64;
 const SYSCALL_RETURN_EXIT: u64 = u64::MAX;
 const SYSCALL_RETURN_YIELD: u64 = u64::MAX - 2;
@@ -70,6 +71,7 @@ struct CpuLocal {
     exit_code: u64,
     next_context: UserContext,
     cpu_index: usize,
+    native_abi: u64,
 }
 
 const EMPTY_CPU_LOCAL: CpuLocal = CpuLocal {
@@ -91,6 +93,7 @@ const EMPTY_CPU_LOCAL: CpuLocal = CpuLocal {
         stack_pointer: 0,
     },
     cpu_index: 0,
+    native_abi: 0,
 };
 
 static mut CPU_LOCALS: [CpuLocal; MAX_CPUS] = [EMPTY_CPU_LOCAL; MAX_CPUS];
@@ -98,6 +101,7 @@ static mut CPU_LOCALS: [CpuLocal; MAX_CPUS] = [EMPTY_CPU_LOCAL; MAX_CPUS];
 const SYSCALL_STACK_TOP_OFFSET: usize = core::mem::offset_of!(CpuLocal, syscall_stack_top);
 const USER_RSP_OFFSET: usize = core::mem::offset_of!(CpuLocal, user_rsp);
 const EXIT_CODE_OFFSET: usize = core::mem::offset_of!(CpuLocal, exit_code);
+const NATIVE_ABI_OFFSET: usize = core::mem::offset_of!(CpuLocal, native_abi);
 
 global_asm!(
     r#"
@@ -140,9 +144,12 @@ vanta_syscall_entry:
     je vanta_syscall_exec_path
     mov r11, [rsp + 48]
     mov rcx, [rsp + 40]
+    cmp qword ptr gs:[{native_abi_offset}], 0
+    je vanta_syscall_raw_return
     mov rdx, [rsp + 24]
     mov rsi, [rsp + 16]
     mov rdi, [rsp + 8]
+vanta_syscall_raw_return:
     add rsp, 104
     mov rsp, gs:[{user_rsp_offset}]
     swapgs
@@ -192,6 +199,7 @@ vanta_syscall_restore_context:
     syscall_stack_top_offset = const SYSCALL_STACK_TOP_OFFSET,
     user_rsp_offset = const USER_RSP_OFFSET,
     exit_code_offset = const EXIT_CODE_OFFSET,
+    native_abi_offset = const NATIVE_ABI_OFFSET,
 );
 
 extern "C" {
@@ -242,6 +250,10 @@ pub fn current_cpu_index() -> usize {
     current_cpu_local().cpu_index
 }
 
+pub fn set_native_abi(enabled: bool) {
+    current_cpu_local().native_abi = u64::from(enabled);
+}
+
 #[no_mangle]
 extern "C" fn vanta_syscall_dispatch(
     number: u64,
@@ -285,6 +297,7 @@ extern "C" fn vanta_syscall_dispatch(
         }
         SYS_WAITPID => waitpid_user(arg1),
         SYS_KILL => kill_user(arg1, arg2),
+        SYS_SIGACTION => sigaction_user(arg1, arg2, arg3),
         SYS_EXEC => SYSCALL_RETURN_EXEC,
         SYS_YIELD => SYSCALL_RETURN_YIELD,
         SYS_GETPID => crate::scheduler::current_pid(),
@@ -339,7 +352,8 @@ fn open_user(pointer: u64, length: u64) -> u64 {
     let Ok(path) = core::str::from_utf8(&path) else {
         return SYSCALL_ERROR;
     };
-    let Ok(contents) = crate::vfs::read_root(path) else {
+    let credentials = crate::scheduler::current_credentials();
+    let Ok(contents) = crate::vfs::read_root_as(path, &credentials) else {
         return SYSCALL_ERROR;
     };
     crate::scheduler::open_current(contents).unwrap_or(SYSCALL_ERROR)
@@ -352,9 +366,10 @@ fn open_native_user(pointer: u64, length: u64, flags: u64) -> u64 {
     let Ok(path) = core::str::from_utf8(&path_bytes) else {
         return SYSCALL_ERROR;
     };
-    if let Ok(info) = crate::vfs::file_info_root(path) {
+    let credentials = crate::scheduler::current_credentials();
+    if let Ok(info) = crate::vfs::file_info_root_as(path, &credentials) {
         if info.is_directory {
-            let Ok(entries) = crate::vfs::list_dir_root(path) else {
+            let Ok(entries) = crate::vfs::list_dir_root_as(path, &credentials) else {
                 return SYSCALL_ERROR;
             };
             return crate::scheduler::open_directory_current(entries).unwrap_or(SYSCALL_ERROR);
@@ -367,20 +382,20 @@ fn open_native_user(pointer: u64, length: u64, flags: u64) -> u64 {
     if writable && !crate::scheduler::can_mutate_path(path) {
         return SYSCALL_ERROR;
     }
-    let mut contents = match crate::vfs::read_root(path) {
+    let mut contents = match crate::vfs::read_root_as(path, &credentials) {
         Ok(contents) => contents,
         Err(_) if writable && create => Vec::new(),
         Err(_) => return SYSCALL_ERROR,
     };
     if writable && truncate {
         contents.clear();
-        if crate::vfs::write_root(path, &contents).is_err() {
+        if crate::vfs::write_root_as(path, &contents, &credentials).is_err() {
             return SYSCALL_ERROR;
         }
     } else if writable
         && create
-        && crate::vfs::file_info_root(path).is_err()
-        && crate::vfs::write_root(path, &contents).is_err()
+        && crate::vfs::file_info_root_as(path, &credentials).is_err()
+        && crate::vfs::write_root_as(path, &contents, &credentials).is_err()
     {
         return SYSCALL_ERROR;
     }
@@ -430,9 +445,10 @@ fn path_mutation_user(old_pointer: u64, old_length: u64, operation: u64, new_len
     if !crate::scheduler::can_mutate_path(old_path) {
         return SYSCALL_ERROR;
     }
+    let credentials = crate::scheduler::current_credentials();
     let result = match operation {
-        0 => crate::vfs::create_dir_root(old_path),
-        1 => crate::vfs::remove_root(old_path),
+        0 => crate::vfs::create_dir_root_as(old_path, &credentials),
+        1 => crate::vfs::remove_root_as(old_path, &credentials),
         _ => {
             let Ok(new_bytes) = copy_from_user(operation, new_length, false) else {
                 return SYSCALL_ERROR;
@@ -443,10 +459,13 @@ fn path_mutation_user(old_pointer: u64, old_length: u64, operation: u64, new_len
             if !crate::scheduler::can_mutate_path(new_path) {
                 return SYSCALL_ERROR;
             }
-            crate::vfs::rename_root(old_path, new_path)
+            crate::vfs::rename_root_as(old_path, new_path, &credentials)
         }
     };
-    result.map(|_| 0).unwrap_or(SYSCALL_ERROR)
+    match result {
+        Ok(()) => 0,
+        Err(_) => SYSCALL_ERROR,
+    }
 }
 
 fn fstat_user(descriptor: u64, pointer: u64) -> u64 {
@@ -597,6 +616,38 @@ fn kill_user(pid: u64, signal: u64) -> u64 {
     crate::scheduler::kill_process(pid, signal)
         .map(|_| 0)
         .unwrap_or(SYSCALL_ERROR)
+}
+
+fn sigaction_user(signal: u64, new_action: u64, old_action: u64) -> u64 {
+    if signal == 0 || signal > 31 {
+        return SYSCALL_ERROR;
+    }
+    let old = match crate::scheduler::signal_action(signal) {
+        Some(action) => action,
+        None => return SYSCALL_ERROR,
+    };
+    if old_action != 0 {
+        let bytes = [old.handler.to_ne_bytes(), old.flags.to_ne_bytes()].concat();
+        if copy_to_user(old_action, &bytes).is_err() {
+            return SYSCALL_ERROR;
+        }
+    }
+    if new_action != 0 {
+        let Ok(bytes) = copy_from_user(new_action, 16, false) else {
+            return SYSCALL_ERROR;
+        };
+        let action = SignalAction {
+            handler: u64::from_ne_bytes(bytes[0..8].try_into().unwrap()),
+            flags: u64::from_ne_bytes(bytes[8..16].try_into().unwrap()),
+        };
+        if action.handler != 0 && action.handler != 1 {
+            return SYSCALL_ERROR;
+        }
+        if crate::scheduler::set_signal_action(signal, action).is_err() {
+            return SYSCALL_ERROR;
+        }
+    }
+    0
 }
 
 fn copy_from_user(pointer: u64, length: u64, writable: bool) -> Result<Vec<u8>, ()> {

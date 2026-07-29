@@ -5,7 +5,8 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use redoxfs::{Disk, FileSystem, Node, Transaction, TreePtr, BLOCK_SIZE};
-use syscall::error::{Error, Result, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR};
+use syscall::error::{Error, Result, EACCES, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR};
+use vanta_abi::Credentials;
 use vanta_gpt::RootPartition;
 
 pub const SECTOR_SIZE: usize = 512;
@@ -110,6 +111,9 @@ pub struct RedoxFsBackend<D: SectorIo> {
 pub struct BackendFileInfo {
     pub length: u64,
     pub is_directory: bool,
+    pub uid: u32,
+    pub gid: u32,
+    pub mode: u16,
 }
 
 impl<D: SectorIo> RedoxFsBackend<D> {
@@ -130,9 +134,13 @@ impl<D: SectorIo> RedoxFsBackend<D> {
     }
 
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>> {
+        self.read_file_as(path, &Credentials::root())
+    }
+
+    pub fn read_file_as(&mut self, path: &str, credentials: &Credentials) -> Result<Vec<u8>> {
         let parts = path_parts(path)?;
         self.filesystem.tx(|tx| {
-            let ptr = resolve(tx, &parts)?;
+            let ptr = resolve_with_access(tx, &parts, credentials, Node::MODE_READ)?;
             let node = tx.read_tree(ptr)?;
             if node.data().is_dir() {
                 return Err(Error::new(EISDIR));
@@ -145,19 +153,43 @@ impl<D: SectorIo> RedoxFsBackend<D> {
     }
 
     pub fn write_file(&mut self, path: &str, contents: &[u8]) -> Result<()> {
+        self.write_file_as(path, contents, &Credentials::root())
+    }
+
+    pub fn write_file_as(
+        &mut self,
+        path: &str,
+        contents: &[u8],
+        credentials: &Credentials,
+    ) -> Result<()> {
         let parts = path_parts(path)?;
         let (name, parent) = split_parent(&parts)?;
         self.filesystem.tx(|tx| {
-            let parent = resolve(tx, parent)?;
+            let parent =
+                resolve_with_access(tx, parent, credentials, Node::MODE_WRITE | Node::MODE_EXEC)?;
             let ptr = match tx.find_node(parent, name) {
                 Ok(node) => {
                     if node.data().is_dir() {
                         return Err(Error::new(EISDIR));
                     }
+                    if !node
+                        .data()
+                        .permission(credentials.uid, credentials.gid, Node::MODE_WRITE)
+                    {
+                        return Err(Error::new(EACCES));
+                    }
                     node.ptr()
                 }
                 Err(error) if error.errno == ENOENT => tx
-                    .create_node(parent, name, Node::MODE_FILE | 0o644, 0, 0)?
+                    .create_node_with_owner(
+                        parent,
+                        name,
+                        Node::MODE_FILE | (0o666 & !credentials.umask),
+                        credentials.uid.into(),
+                        credentials.gid.into(),
+                        0,
+                        0,
+                    )?
                     .ptr(),
                 Err(error) => return Err(error),
             };
@@ -168,28 +200,67 @@ impl<D: SectorIo> RedoxFsBackend<D> {
     }
 
     pub fn file_info(&mut self, path: &str) -> Result<BackendFileInfo> {
+        self.file_info_as(path, &Credentials::root())
+    }
+
+    pub fn file_info_as(
+        &mut self,
+        path: &str,
+        credentials: &Credentials,
+    ) -> Result<BackendFileInfo> {
         let parts = path_parts(path)?;
         self.filesystem.tx(|tx| {
-            let ptr = resolve(tx, &parts)?;
+            let ptr = resolve_with_access(tx, &parts, credentials, Node::MODE_READ)?;
             let node = tx.read_tree(ptr)?;
             Ok(BackendFileInfo {
                 length: node.data().size(),
                 is_directory: node.data().is_dir(),
+                uid: node.data().uid(),
+                gid: node.data().gid(),
+                mode: node.data().mode(),
             })
         })
     }
 
     pub fn create_dir_all(&mut self, path: &str) -> Result<()> {
+        self.create_dir_all_as(path, &Credentials::root())
+    }
+
+    pub fn create_dir_all_as(&mut self, path: &str, credentials: &Credentials) -> Result<()> {
         let parts = path_parts(path)?;
         self.filesystem.tx(|tx| {
-            let mut current = TreePtr::root();
+            let mut current: TreePtr<Node> = TreePtr::root();
             for name in parts {
+                let parent = tx.read_tree(current)?;
                 current = match tx.find_node(current, name) {
-                    Ok(node) if node.data().is_dir() => node.ptr(),
+                    Ok(node) if node.data().is_dir() => {
+                        if !parent.data().permission(
+                            credentials.uid,
+                            credentials.gid,
+                            Node::MODE_EXEC,
+                        ) {
+                            return Err(Error::new(EACCES));
+                        }
+                        node.ptr()
+                    }
                     Ok(_) => return Err(Error::new(ENOTDIR)),
-                    Err(error) if error.errno == ENOENT => tx
-                        .create_node(current, name, Node::MODE_DIR | 0o755, 0, 0)?
-                        .ptr(),
+                    Err(error) if error.errno == ENOENT => {
+                        if !parent.data().permission(
+                            credentials.uid,
+                            credentials.gid,
+                            Node::MODE_WRITE | Node::MODE_EXEC,
+                        ) {
+                            return Err(Error::new(EACCES));
+                        }
+                        tx.create_node(
+                            current,
+                            name,
+                            Node::MODE_DIR | (0o777 & !credentials.umask),
+                            0,
+                            0,
+                        )?
+                        .ptr()
+                    }
                     Err(error) => return Err(error),
                 };
             }
@@ -198,9 +269,14 @@ impl<D: SectorIo> RedoxFsBackend<D> {
     }
 
     pub fn list_dir(&mut self, path: &str) -> Result<Vec<String>> {
+        self.list_dir_as(path, &Credentials::root())
+    }
+
+    pub fn list_dir_as(&mut self, path: &str, credentials: &Credentials) -> Result<Vec<String>> {
         let parts = path_parts(path)?;
         self.filesystem.tx(|tx| {
-            let ptr = resolve(tx, &parts)?;
+            let ptr =
+                resolve_with_access(tx, &parts, credentials, Node::MODE_READ | Node::MODE_EXEC)?;
             if !tx.read_tree(ptr)?.data().is_dir() {
                 return Err(Error::new(ENOTDIR));
             }
@@ -217,22 +293,46 @@ impl<D: SectorIo> RedoxFsBackend<D> {
     }
 
     pub fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
+        self.rename_as(old_path, new_path, &Credentials::root())
+    }
+
+    pub fn rename_as(
+        &mut self,
+        old_path: &str,
+        new_path: &str,
+        credentials: &Credentials,
+    ) -> Result<()> {
         let old_parts = path_parts(old_path)?;
         let new_parts = path_parts(new_path)?;
         let (old_name, old_parent) = split_parent(&old_parts)?;
         let (new_name, new_parent) = split_parent(&new_parts)?;
         self.filesystem.tx(|tx| {
-            let old_parent = resolve(tx, old_parent)?;
-            let new_parent = resolve(tx, new_parent)?;
+            let old_parent = resolve_with_access(
+                tx,
+                old_parent,
+                credentials,
+                Node::MODE_WRITE | Node::MODE_EXEC,
+            )?;
+            let new_parent = resolve_with_access(
+                tx,
+                new_parent,
+                credentials,
+                Node::MODE_WRITE | Node::MODE_EXEC,
+            )?;
             tx.rename_node_no_replace(old_parent, old_name, new_parent, new_name)
         })
     }
 
     pub fn remove_file(&mut self, path: &str) -> Result<()> {
+        self.remove_file_as(path, &Credentials::root())
+    }
+
+    pub fn remove_file_as(&mut self, path: &str, credentials: &Credentials) -> Result<()> {
         let parts = path_parts(path)?;
         let (name, parent) = split_parent(&parts)?;
         self.filesystem.tx(|tx| {
-            let parent = resolve(tx, parent)?;
+            let parent =
+                resolve_with_access(tx, parent, credentials, Node::MODE_WRITE | Node::MODE_EXEC)?;
             let node = tx.find_node(parent, name)?;
             let mode = if node.data().is_dir() {
                 Node::MODE_DIR
@@ -264,17 +364,42 @@ fn split_parent<'a>(parts: &'a [&'a str]) -> Result<(&'a str, &'a [&'a str])> {
     Ok((*name, parent))
 }
 
-fn resolve<D: SectorIo>(
+fn resolve_with_access<D: SectorIo>(
     tx: &mut Transaction<RedoxDisk<D>>,
     parts: &[&str],
+    credentials: &Credentials,
+    operation: u16,
 ) -> Result<TreePtr<Node>> {
-    let mut current = TreePtr::root();
+    let mut current: TreePtr<Node> = TreePtr::root();
     for (index, name) in parts.iter().enumerate() {
+        let current_node = tx.read_tree(current)?;
+        if !current_node
+            .data()
+            .permission(credentials.uid, credentials.gid, Node::MODE_EXEC)
+        {
+            return Err(Error::new(EACCES));
+        }
         let node = tx.find_node(current, name)?;
-        if index + 1 < parts.len() && !node.data().is_dir() {
-            return Err(Error::new(ENOTDIR));
+        if index + 1 < parts.len() {
+            if !node.data().is_dir() {
+                return Err(Error::new(ENOTDIR));
+            }
+        } else if !node
+            .data()
+            .permission(credentials.uid, credentials.gid, operation)
+        {
+            return Err(Error::new(EACCES));
         }
         current = node.ptr();
+    }
+    if parts.is_empty() {
+        let root = tx.read_tree(current)?;
+        if !root
+            .data()
+            .permission(credentials.uid, credentials.gid, operation)
+        {
+            return Err(Error::new(EACCES));
+        }
     }
     Ok(current)
 }

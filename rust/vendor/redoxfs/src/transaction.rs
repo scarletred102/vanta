@@ -853,19 +853,36 @@ impl<'a, D: Disk> Transaction<'a, D> {
         ctime: u64,
         ctime_nsec: u32,
     ) -> Result<TreeData<Node>> {
+        let parent = self.read_tree(parent_ptr)?;
+        self.create_node_with_owner(
+            parent_ptr,
+            name,
+            mode,
+            parent.data().uid(),
+            parent.data().gid(),
+            ctime,
+            ctime_nsec,
+        )
+    }
+
+    /// Create a node with explicit ownership for capability-aware filesystems.
+    /// The original `create_node` API remains parent-owned for compatibility.
+    pub fn create_node_with_owner(
+        &mut self,
+        parent_ptr: TreePtr<Node>,
+        name: &str,
+        mode: u16,
+        uid: u32,
+        gid: u32,
+        ctime: u64,
+        ctime_nsec: u32,
+    ) -> Result<TreeData<Node>> {
         self.check_name(&parent_ptr, name)?;
 
         unsafe {
-            let parent = self.read_tree(parent_ptr)?;
             let node_block_data = BlockData::new(
                 self.allocate(&mut FsCtx, BlockMeta::default())?,
-                Node::new(
-                    mode,
-                    parent.data().uid(),
-                    parent.data().gid(),
-                    ctime,
-                    ctime_nsec,
-                ),
+                Node::new(mode, uid, gid, ctime, ctime_nsec),
             );
             let node_block_ptr = self.write_block(node_block_data)?;
             let node_ptr = self.insert_tree(node_block_ptr)?;

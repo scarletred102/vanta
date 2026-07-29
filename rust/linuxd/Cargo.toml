@@ -1,0 +1,8 @@
+[package]
+name = "vanta-linuxd"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+vanta-abi = { path = "../abi" }

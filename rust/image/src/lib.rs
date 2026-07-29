@@ -177,7 +177,7 @@ fn build_redoxfs(sectors: u64, root_files: &[RootFile<'_>]) -> Result<Vec<u8>, I
         let home = tx
             .create_node(TreePtr::root(), "home", Node::MODE_DIR | 0o755, 0, 0)?
             .ptr();
-        tx.create_node(home, "vanta", Node::MODE_DIR | 0o755, 1000, 1000)?;
+        tx.create_node_with_owner(home, "vanta", Node::MODE_DIR | 0o755, 1000, 1000, 0, 0)?;
         let config = tx
             .create_node(etc, "config", Node::MODE_FILE | 0o644, 0, 0)?
             .ptr();

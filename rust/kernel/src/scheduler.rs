@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
-use vanta_abi::{CapabilityId, Credentials, Rights};
+use vanta_abi::{CapabilityId, Credentials, Rights, SignalAction};
 
 use crate::paging::{self, AddressSpace};
 use crate::process::Process;
@@ -82,6 +82,7 @@ struct Task {
     interrupt_context: InterruptContext,
     descriptors: Vec<Option<FileDescriptor>>,
     credentials: Credentials,
+    signal_actions: [SignalAction; 32],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -262,6 +263,7 @@ pub unsafe fn start_ap(processes: Vec<Box<Process>>) -> ! {
 }
 
 unsafe fn start_on_current_cpu(processes: Vec<Box<Process>>, label: &str, native_tty: bool) -> ! {
+    crate::syscall::set_native_abi(native_tty);
     let kernel_space = paging::current_address_space();
     if processes.is_empty() {
         crate::shell::run();
@@ -498,6 +500,35 @@ pub fn current_parent_pid() -> u64 {
         .unwrap_or(0)
 }
 
+pub fn current_credentials() -> Credentials {
+    let scheduler = current_scheduler().lock();
+    scheduler
+        .as_ref()
+        .map(|scheduler| scheduler.tasks[scheduler.current].credentials)
+        .unwrap_or_else(Credentials::root)
+}
+
+pub fn signal_action(signal: u64) -> Option<SignalAction> {
+    let scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_ref()?;
+    if signal == 0 || signal > 31 {
+        return None;
+    }
+    Some(scheduler.tasks[scheduler.current].signal_actions[signal as usize])
+}
+
+pub fn set_signal_action(signal: u64, action: SignalAction) -> Result<SignalAction, ()> {
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    if signal == 0 || signal > 31 {
+        return Err(());
+    }
+    let slot = &mut scheduler.tasks[scheduler.current].signal_actions[signal as usize];
+    let old = *slot;
+    *slot = action;
+    Ok(old)
+}
+
 pub fn kill_process(pid: u64, signal: u64) -> Result<(), ()> {
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
@@ -511,6 +542,9 @@ pub fn kill_process(pid: u64, signal: u64) -> Result<(), ()> {
             .iter_mut()
             .find(|task| task.pid == pid && task.process.is_some())
             .ok_or(())?;
+        if target.signal_actions[signal as usize].handler == 1 {
+            return Ok(());
+        }
         let process = target.process.take();
         let parent_pid = target.parent_pid;
         target.state = TaskState::Zombie {
@@ -651,10 +685,10 @@ pub fn exec_current(process: Box<Process>) -> *const UserContext {
             r15: 0,
             instruction_pointer: process.entry(),
             flags: 0x202,
-            stack_pointer: process.user_stack_pointer(),
+            stack_pointer: process.user_stack_top(),
         };
         let interrupt_context =
-            InterruptContext::initial(process.entry(), process.user_stack_pointer());
+            InterruptContext::initial(process.entry(), process.user_stack_top());
         let task = &mut scheduler.tasks[current];
         let old = core::mem::replace(&mut task.process, Some(process));
         task.context = context;
@@ -759,12 +793,13 @@ fn new_task(
             r15: 0,
             instruction_pointer: process.entry(),
             flags: 0x202,
-            stack_pointer: process.user_stack_pointer(),
+            stack_pointer: process.user_stack_top(),
         },
-        interrupt_context: InterruptContext::initial(process.entry(), process.user_stack_pointer()),
+        interrupt_context: InterruptContext::initial(process.entry(), process.user_stack_top()),
         process: Some(process),
         descriptors,
         credentials,
+        signal_actions: [SignalAction::default(); 32],
     }
 }
 
@@ -1095,7 +1130,8 @@ pub fn write_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
             }
             file.contents[offset..end].copy_from_slice(bytes);
             file.offset = end;
-            crate::vfs::write_root(&file.path, &file.contents).map_err(|_| ())
+            let credentials = current_credentials();
+            crate::vfs::write_root_as(&file.path, &file.contents, &credentials).map_err(|_| ())
         }
         DescriptorResource::Directory(_) | DescriptorResource::PipeRead(_) => Err(()),
     }

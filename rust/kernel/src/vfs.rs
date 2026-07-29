@@ -4,6 +4,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
+use vanta_abi::Credentials;
 use vanta_gpt::RootPartition;
 use vanta_redoxfs_adapter::{RedoxFsBackend, SectorError, SectorIo};
 
@@ -93,6 +94,9 @@ pub struct FileInfo {
     pub length: usize,
     pub allocated_sectors: u32,
     pub is_directory: bool,
+    pub uid: u32,
+    pub gid: u32,
+    pub mode: u16,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -307,6 +311,13 @@ impl<D: BlockDevice> VantaFs<D> {
             length: record.length,
             allocated_sectors: record.sector_count,
             is_directory: record.kind == EntryKind::Directory,
+            uid: 0,
+            gid: 0,
+            mode: if record.kind == EntryKind::Directory {
+                0o040755
+            } else {
+                0o100644
+            },
         })
     }
 
@@ -578,6 +589,10 @@ pub fn remount_root() -> Result<(), VfsError> {
 }
 
 pub fn read_root(path: &str) -> Result<Vec<u8>, VfsError> {
+    read_root_as(path, &Credentials::root())
+}
+
+pub fn read_root_as(path: &str, credentials: &Credentials) -> Result<Vec<u8>, VfsError> {
     if let Some(path) = tmp_path(path) {
         return TMP
             .lock()
@@ -586,12 +601,18 @@ pub fn read_root(path: &str) -> Result<Vec<u8>, VfsError> {
             .read_file(path);
     }
     if let Some(root) = REDOX_ROOT.lock().as_mut() {
-        return root.read_file(path).map_err(|_| VfsError::RedoxFs);
+        return root
+            .read_file_as(path, credentials)
+            .map_err(|_| VfsError::RedoxFs);
     }
     ROOT.lock().read(path)
 }
 
 pub fn write_root(path: &str, data: &[u8]) -> Result<(), VfsError> {
+    write_root_as(path, data, &Credentials::root())
+}
+
+pub fn write_root_as(path: &str, data: &[u8], credentials: &Credentials) -> Result<(), VfsError> {
     if let Some(path) = tmp_path(path) {
         return TMP
             .lock()
@@ -600,7 +621,9 @@ pub fn write_root(path: &str, data: &[u8]) -> Result<(), VfsError> {
             .write_file(path, data);
     }
     if let Some(root) = REDOX_ROOT.lock().as_mut() {
-        return root.write_file(path, data).map_err(|_| VfsError::RedoxFs);
+        return root
+            .write_file_as(path, data, credentials)
+            .map_err(|_| VfsError::RedoxFs);
     }
     ROOT.lock().write(path, data)
 }
@@ -630,8 +653,14 @@ pub fn list_root() -> Result<Vec<String>, VfsError> {
 }
 
 pub fn list_dir_root(path: &str) -> Result<Vec<String>, VfsError> {
+    list_dir_root_as(path, &Credentials::root())
+}
+
+pub fn list_dir_root_as(path: &str, credentials: &Credentials) -> Result<Vec<String>, VfsError> {
     if let Some(root) = REDOX_ROOT.lock().as_mut() {
-        return root.list_dir(path).map_err(|_| VfsError::RedoxFs);
+        return root
+            .list_dir_as(path, credentials)
+            .map_err(|_| VfsError::RedoxFs);
     }
     let prefix = if path == "/" {
         String::from("/")
@@ -653,6 +682,10 @@ pub fn list_dir_root(path: &str) -> Result<Vec<String>, VfsError> {
 }
 
 pub fn remove_root(path: &str) -> Result<(), VfsError> {
+    remove_root_as(path, &Credentials::root())
+}
+
+pub fn remove_root_as(path: &str, credentials: &Credentials) -> Result<(), VfsError> {
     if let Some(path) = tmp_path(path) {
         return TMP
             .lock()
@@ -661,12 +694,22 @@ pub fn remove_root(path: &str) -> Result<(), VfsError> {
             .remove_file(path);
     }
     if let Some(root) = REDOX_ROOT.lock().as_mut() {
-        return root.remove_file(path).map_err(|_| VfsError::RedoxFs);
+        return root
+            .remove_file_as(path, credentials)
+            .map_err(|_| VfsError::RedoxFs);
     }
     ROOT.lock().remove(path)
 }
 
 pub fn rename_root(old_path: &str, new_path: &str) -> Result<(), VfsError> {
+    rename_root_as(old_path, new_path, &Credentials::root())
+}
+
+pub fn rename_root_as(
+    old_path: &str,
+    new_path: &str,
+    credentials: &Credentials,
+) -> Result<(), VfsError> {
     match (tmp_path(old_path), tmp_path(new_path)) {
         (Some(old_path), Some(new_path)) => {
             return TMP
@@ -680,18 +723,25 @@ pub fn rename_root(old_path: &str, new_path: &str) -> Result<(), VfsError> {
     }
     if let Some(root) = REDOX_ROOT.lock().as_mut() {
         return root
-            .rename(old_path, new_path)
+            .rename_as(old_path, new_path, credentials)
             .map_err(|_| VfsError::RedoxFs);
     }
     ROOT.lock().rename(old_path, new_path)
 }
 
 pub fn file_info_root(path: &str) -> Result<FileInfo, VfsError> {
+    file_info_root_as(path, &Credentials::root())
+}
+
+pub fn file_info_root_as(path: &str, credentials: &Credentials) -> Result<FileInfo, VfsError> {
     if path == "/tmp" || path == "/tmp/" {
         return Ok(FileInfo {
             length: 0,
             allocated_sectors: 0,
             is_directory: true,
+            uid: 0,
+            gid: 0,
+            mode: 0o040777,
         });
     }
     if let Some(path) = tmp_path(path) {
@@ -702,17 +752,26 @@ pub fn file_info_root(path: &str) -> Result<FileInfo, VfsError> {
             .file_info(path);
     }
     if let Some(root) = REDOX_ROOT.lock().as_mut() {
-        let info = root.file_info(path).map_err(|_| VfsError::RedoxFs)?;
+        let info = root
+            .file_info_as(path, credentials)
+            .map_err(|_| VfsError::RedoxFs)?;
         return Ok(FileInfo {
             length: info.length.try_into().map_err(|_| VfsError::FileTooLarge)?,
             allocated_sectors: 0,
             is_directory: info.is_directory,
+            uid: info.uid,
+            gid: info.gid,
+            mode: info.mode,
         });
     }
     ROOT.lock().info(path)
 }
 
 pub fn create_dir_root(path: &str) -> Result<(), VfsError> {
+    create_dir_root_as(path, &Credentials::root())
+}
+
+pub fn create_dir_root_as(path: &str, credentials: &Credentials) -> Result<(), VfsError> {
     if path == "/tmp" || path == "/tmp/" {
         return Ok(());
     }
@@ -724,7 +783,9 @@ pub fn create_dir_root(path: &str) -> Result<(), VfsError> {
             .create_dir(path);
     }
     if let Some(root) = REDOX_ROOT.lock().as_mut() {
-        return root.create_dir_all(path).map_err(|_| VfsError::RedoxFs);
+        return root
+            .create_dir_all_as(path, credentials)
+            .map_err(|_| VfsError::RedoxFs);
     }
     ROOT.lock().create_dir(path)
 }
