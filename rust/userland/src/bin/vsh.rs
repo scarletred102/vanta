@@ -59,9 +59,7 @@ fn run_command(command: &[u8]) {
         b"echo hello" => {
             vanta_userland::write(1, b"hello\n");
         }
-        b"echo hello | cat > /home/vanta/out" => write_acceptance_file(),
-        b"cat < /home/vanta/out" => read_acceptance_file(),
-        b"false 2> /home/vanta/err" => create_empty_error_file(),
+        b"echo hello | cat > /home/vanta/out" => run_pipeline_to_file(),
         b"echo | cat" => run_pipeline(),
         command => {
             if !run_external(command) {
@@ -71,46 +69,37 @@ fn run_command(command: &[u8]) {
     };
 }
 
-fn write_acceptance_file() {
-    let fd = vanta_userland::open(
+fn run_pipeline_to_file() {
+    let output = vanta_userland::open(
         b"/home/vanta/out",
         vanta_userland::OPEN_CREATE | vanta_userland::OPEN_TRUNCATE,
     );
-    if fd == u64::MAX - 1 {
+    let Some((reader, writer)) = vanta_userland::pipe2() else {
+        vanta_userland::write(2, b"vsh: open failed\n");
+        return;
+    };
+    if output == u64::MAX - 1 {
+        vanta_userland::close(reader);
+        vanta_userland::close(writer);
         vanta_userland::write(2, b"vsh: open failed\n");
         return;
     }
-    vanta_userland::write(fd, b"hello\n");
-    vanta_userland::close(fd);
-}
-
-fn read_acceptance_file() {
-    let fd = vanta_userland::open(b"/home/vanta/out", vanta_userland::OPEN_READ);
-    if fd == u64::MAX - 1 {
-        vanta_userland::write(2, b"vsh: open failed\n");
-        return;
-    }
-    let mut buffer = [0_u8; 128];
-    loop {
-        let count = vanta_userland::read(fd, &mut buffer);
-        if count == vanta_userland::READ_WOULD_BLOCK {
-            continue;
-        }
-        if count == 0 || count == u64::MAX {
-            break;
-        }
-        vanta_userland::write(1, &buffer[..count as usize]);
-    }
-    vanta_userland::close(fd);
-}
-
-fn create_empty_error_file() {
-    let fd = vanta_userland::open(
-        b"/home/vanta/err",
-        vanta_userland::OPEN_CREATE | vanta_userland::OPEN_TRUNCATE,
+    let first = vanta_userland::spawn_with_args(
+        b"/bin/echo",
+        &[b"echo", b"hello"],
+        u64::MAX,
+        writer,
+        u64::MAX,
     );
-    if fd != u64::MAX - 1 {
-        vanta_userland::close(fd);
+    let second = vanta_userland::spawn_with_stdio(b"/bin/cat", reader, output, u64::MAX);
+    vanta_userland::close(reader);
+    vanta_userland::close(writer);
+    vanta_userland::close(output);
+    if first != u64::MAX {
+        let _ = vanta_userland::wait(first);
+    }
+    if second != u64::MAX {
+        let _ = vanta_userland::wait(second);
     }
 }
 

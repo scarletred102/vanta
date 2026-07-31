@@ -196,6 +196,10 @@ static SCHEDULERS: [Mutex<Option<Scheduler>>; MAX_CPUS] = [const { Mutex::new(No
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 static NEXT_CAPABILITY_SLOT: AtomicU64 = AtomicU64::new(1);
 static TTY_CTRL_HELD: AtomicBool = AtomicBool::new(false);
+// The terminal has one foreground process for now.  This is deliberately
+// narrower than a full POSIX process-group implementation, but prevents
+// Ctrl-C from killing the shell while it is waiting for a foreground child.
+static FOREGROUND_PID: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
 mod tests {
@@ -409,6 +413,9 @@ pub fn exit_current(code: u64) -> *const UserContext {
             .expect("current task already exited");
         scheduler.tasks[current].state = TaskState::Zombie { exit_code: code };
         let exited_pid = scheduler.tasks[current].pid;
+        if FOREGROUND_PID.load(AtomicOrdering::Relaxed) == exited_pid {
+            FOREGROUND_PID.store(0, AtomicOrdering::Relaxed);
+        }
         if let Some(parent) = scheduler.tasks.iter_mut().find(|task| {
             task.pid == parent_pid.unwrap_or(0)
                 && task.state
@@ -550,6 +557,9 @@ pub fn kill_process(pid: u64, signal: u64) -> Result<(), ()> {
         target.state = TaskState::Zombie {
             exit_code: 128 + signal,
         };
+        if FOREGROUND_PID.load(AtomicOrdering::Relaxed) == pid {
+            FOREGROUND_PID.store(0, AtomicOrdering::Relaxed);
+        }
         (process, parent_pid)
     };
     if let Some(parent_pid) = parent_pid {
@@ -571,16 +581,35 @@ pub fn interrupt_current(signal: u64) {
         let Some(scheduler) = scheduler.as_mut() else {
             return;
         };
-        let current = scheduler.current;
-        let process = scheduler.tasks[current].process.take();
+        let target_pid = {
+            let foreground = FOREGROUND_PID.load(AtomicOrdering::Relaxed);
+            if foreground == 0 {
+                scheduler.tasks[scheduler.current].pid
+            } else {
+                foreground
+            }
+        };
+        let Some(target) = scheduler
+            .tasks
+            .iter_mut()
+            .find(|task| task.pid == target_pid && task.process.is_some())
+        else {
+            return;
+        };
+        if signal > 31 || target.signal_actions[signal as usize].handler == 1 {
+            return;
+        }
+        let process = target.process.take();
         if process.is_none() {
             return;
         }
-        let pid = scheduler.tasks[current].pid;
-        scheduler.tasks[current].state = TaskState::Zombie {
+        let pid = target.pid;
+        target.state = TaskState::Zombie {
             exit_code: 128 + signal,
         };
-        if let Some(parent_pid) = scheduler.tasks[current].parent_pid {
+        let parent_pid = target.parent_pid;
+        FOREGROUND_PID.store(0, AtomicOrdering::Relaxed);
+        if let Some(parent_pid) = parent_pid {
             if let Some(parent) = scheduler.tasks.iter_mut().find(|task| {
                 task.pid == parent_pid && task.state == TaskState::Waiting { child_pid: pid }
             }) {
@@ -626,6 +655,7 @@ pub fn spawn_current(process: Box<Process>) -> Result<u64, ()> {
         process,
         descriptors,
     ));
+    FOREGROUND_PID.store(pid, AtomicOrdering::Relaxed);
     Ok(pid)
 }
 
@@ -667,6 +697,7 @@ pub fn spawn_with_stdio_current(
         process,
         descriptors,
     ));
+    FOREGROUND_PID.store(pid, AtomicOrdering::Relaxed);
     Ok(pid)
 }
 

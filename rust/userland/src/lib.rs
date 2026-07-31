@@ -27,11 +27,15 @@ pub fn write(fd: u64, bytes: &[u8]) -> u64 {
 }
 
 pub fn read(fd: u64, bytes: &mut [u8]) -> u64 {
-    let result = syscall(SYS_READ, fd, bytes.as_mut_ptr() as u64, bytes.len() as u64);
-    if result == READ_WOULD_BLOCK {
+    loop {
+        let result = syscall(SYS_READ, fd, bytes.as_mut_ptr() as u64, bytes.len() as u64);
+        if result != READ_WOULD_BLOCK {
+            return result;
+        }
+        // Native pipe descriptors are blocking. The kernel's cooperative
+        // scheduler yields while the writer or child state makes progress.
         yield_now();
     }
-    result
 }
 
 pub fn exec(path: &[u8]) -> u64 {
