@@ -38,8 +38,9 @@ const SYSCALL_RETURN_EXIT: u64 = u64::MAX;
 const SYSCALL_RETURN_YIELD: u64 = u64::MAX - 2;
 const SYSCALL_RETURN_WAIT: u64 = u64::MAX - 3;
 const SYSCALL_RETURN_EXEC: u64 = u64::MAX - 4;
+const SYSCALL_RETURN_BLOCK: u64 = u64::MAX - 6;
 const SYSCALL_ERROR: u64 = u64::MAX - 1;
-pub const SYSCALL_WOULD_BLOCK: u64 = u64::MAX - 5;
+pub(crate) const SYSCALL_WOULD_BLOCK: u64 = u64::MAX - 5;
 const USER_ADDRESS_LIMIT: u64 = 0x0000_8000_0000_0000;
 // RedoxFS transactions are stack-intensive, so descriptor syscalls require a
 // real kernel stack rather than the former 8 KiB bootstrap-sized buffer.
@@ -72,6 +73,7 @@ struct CpuLocal {
     next_context: UserContext,
     cpu_index: usize,
     native_abi: u64,
+    block_descriptor: u64,
 }
 
 const EMPTY_CPU_LOCAL: CpuLocal = CpuLocal {
@@ -94,6 +96,7 @@ const EMPTY_CPU_LOCAL: CpuLocal = CpuLocal {
     },
     cpu_index: 0,
     native_abi: 0,
+    block_descriptor: 0,
 };
 
 static mut CPU_LOCALS: [CpuLocal; MAX_CPUS] = [EMPTY_CPU_LOCAL; MAX_CPUS];
@@ -110,6 +113,7 @@ global_asm!(
     .extern vanta_syscall_yield
     .extern vanta_syscall_wait
     .extern vanta_syscall_exec
+    .extern vanta_syscall_block
     .extern vanta_syscall_exit
 vanta_syscall_entry:
     swapgs
@@ -142,6 +146,8 @@ vanta_syscall_entry:
     je vanta_syscall_wait_path
     cmp rax, -5
     je vanta_syscall_exec_path
+    cmp rax, -6
+    je vanta_syscall_block_path
     mov r11, [rsp + 48]
     mov rcx, [rsp + 40]
     cmp qword ptr gs:[{native_abi_offset}], 0
@@ -169,6 +175,11 @@ vanta_syscall_exec_path:
     call vanta_syscall_exec
     test rax, rax
     jz vanta_syscall_exec_error
+    jmp vanta_syscall_restore_context
+vanta_syscall_block_path:
+    mov rdi, rsp
+    mov rsi, gs:[{user_rsp_offset}]
+    call vanta_syscall_block
     jmp vanta_syscall_restore_context
 vanta_syscall_exec_error:
     mov r11, [rsp + 48]
@@ -420,7 +431,8 @@ fn read_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
         return SYSCALL_ERROR;
     }
     if bytes.is_empty() && crate::scheduler::read_would_block(descriptor) {
-        return SYSCALL_WOULD_BLOCK;
+        current_cpu_local().block_descriptor = descriptor;
+        return SYSCALL_RETURN_BLOCK;
     }
     bytes.len() as u64
 }
@@ -699,6 +711,13 @@ extern "C" fn vanta_syscall_yield(frame: *const u64, stack_pointer: u64) -> *con
 extern "C" fn vanta_syscall_wait(frame: *const u64, stack_pointer: u64) -> *const UserContext {
     let child_pid = unsafe { *frame.add(1) };
     crate::scheduler::wait_current(child_pid, user_context(frame, stack_pointer))
+}
+
+#[no_mangle]
+extern "C" fn vanta_syscall_block(frame: *const u64, stack_pointer: u64) -> *const UserContext {
+    let descriptor = current_cpu_local().block_descriptor;
+    current_cpu_local().block_descriptor = 0;
+    crate::scheduler::block_pipe_current(descriptor, user_context(frame, stack_pointer))
 }
 
 #[no_mangle]

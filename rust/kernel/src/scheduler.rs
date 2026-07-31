@@ -89,6 +89,7 @@ struct Task {
 enum TaskState {
     Runnable,
     Waiting { child_pid: u64 },
+    PipeWaiting { pipe_id: u64 },
     Zombie { exit_code: u64 },
     Reaped,
 }
@@ -138,6 +139,7 @@ struct PipeWriter {
 }
 
 struct PipeState {
+    id: u64,
     bytes: Vec<u8>,
     writer_open: bool,
 }
@@ -145,6 +147,7 @@ struct PipeState {
 impl Pipe {
     fn new() -> (PipeReader, PipeWriter) {
         let state = Arc::new(Mutex::new(PipeState {
+            id: NEXT_PIPE_ID.fetch_add(1, Ordering::Relaxed),
             bytes: Vec::new(),
             writer_open: true,
         }));
@@ -166,21 +169,37 @@ impl PipeReader {
 }
 
 impl PipeWriter {
-    fn write(&mut self, bytes: &[u8]) {
+    fn write(&mut self, bytes: &[u8]) -> u64 {
         let mut state = self.state.lock();
         if state.writer_open {
             state.bytes.extend_from_slice(bytes);
         }
+        state.id
     }
 
-    fn close(&mut self) {
-        self.state.lock().writer_open = false;
+    fn close(&mut self) -> u64 {
+        let mut state = self.state.lock();
+        state.writer_open = false;
+        state.id
     }
 }
 
 fn close_pipe_writer(writer: Arc<Mutex<PipeWriter>>) {
     if Arc::strong_count(&writer) == 1 {
-        writer.lock().close();
+        let pipe_id = writer.lock().close();
+        wake_pipe_waiters(pipe_id);
+    }
+}
+
+fn wake_pipe_waiters(pipe_id: u64) {
+    let mut scheduler = current_scheduler().lock();
+    let Some(scheduler) = scheduler.as_mut() else {
+        return;
+    };
+    for task in &mut scheduler.tasks {
+        if task.state == (TaskState::PipeWaiting { pipe_id }) {
+            task.state = TaskState::Runnable;
+        }
     }
 }
 
@@ -194,6 +213,7 @@ struct Scheduler {
 
 static SCHEDULERS: [Mutex<Option<Scheduler>>; MAX_CPUS] = [const { Mutex::new(None) }; MAX_CPUS];
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
+static NEXT_PIPE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_CAPABILITY_SLOT: AtomicU64 = AtomicU64::new(1);
 static TTY_CTRL_HELD: AtomicBool = AtomicBool::new(false);
 // The terminal has one foreground process for now.  This is deliberately
@@ -752,6 +772,67 @@ pub fn wait_child_current(pid: u64) -> Result<Option<u64>, ()> {
     Ok(Some(exit_code))
 }
 
+pub fn pipe_wait_key(descriptor: u64) -> Option<u64> {
+    let descriptor = current_descriptor(descriptor).ok()?;
+    match descriptor.resource {
+        DescriptorResource::PipeRead(reader) => Some(reader.lock().state.lock().id),
+        _ => None,
+    }
+}
+
+pub fn block_pipe_current(descriptor: u64, context: UserContext) -> *const UserContext {
+    let Some(pipe_id) = pipe_wait_key(descriptor) else {
+        return crate::syscall::prepare_user_return(context, current_target().1);
+    };
+    let mut context = context;
+    // Resume the userland blocking wrapper with the same would-block result;
+    // it will retry the read after the pipe wakeup.
+    context.return_value = crate::syscall::SYSCALL_WOULD_BLOCK;
+    let (next_context, next_space, previous, next) = {
+        let mut scheduler = current_scheduler().lock();
+        let scheduler = scheduler.as_mut().expect("pipe block without scheduler");
+        let previous = scheduler.current;
+        scheduler.tasks[previous].context = context;
+        scheduler.tasks[previous].interrupt_context.rbx = context.rbx;
+        scheduler.tasks[previous].interrupt_context.rbp = context.rbp;
+        scheduler.tasks[previous].interrupt_context.r12 = context.r12;
+        scheduler.tasks[previous].interrupt_context.r13 = context.r13;
+        scheduler.tasks[previous].interrupt_context.r14 = context.r14;
+        scheduler.tasks[previous].interrupt_context.r15 = context.r15;
+        scheduler.tasks[previous].interrupt_context.rax = context.return_value;
+        scheduler.tasks[previous]
+            .interrupt_context
+            .instruction_pointer = context.instruction_pointer;
+        scheduler.tasks[previous].interrupt_context.flags = context.flags;
+        scheduler.tasks[previous].interrupt_context.stack_pointer = context.stack_pointer;
+        scheduler.tasks[previous].state = TaskState::PipeWaiting { pipe_id };
+
+        let Some(next) = next_alive(scheduler, previous) else {
+            scheduler.tasks[previous].state = TaskState::Runnable;
+            let process = scheduler.tasks[previous]
+                .process
+                .as_mut()
+                .expect("blocked task lost process");
+            return crate::syscall::prepare_user_return(context, process.address_space());
+        };
+        scheduler.current = next;
+        scheduler.slice_ticks = 0;
+        let task = &mut scheduler.tasks[next];
+        let process = task
+            .process
+            .as_mut()
+            .expect("scheduler selected an exited task");
+        (task.context, process.address_space(), previous, next)
+    };
+    crate::serial_println!(
+        "[sched] pipe block pid={} pipe={} -> {}",
+        scheduler_pid(previous),
+        pipe_id,
+        scheduler_pid(next)
+    );
+    crate::syscall::prepare_user_return(next_context, next_space)
+}
+
 pub fn wait_current(pid: u64, context: UserContext) -> *const UserContext {
     let (next_context, next_space, previous, next) = {
         let mut scheduler = current_scheduler().lock();
@@ -1140,7 +1221,8 @@ pub fn write_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
             crate::network::tcp_send(connection, bytes).map_err(|_| ())
         }
         DescriptorResource::PipeWrite(writer) => {
-            writer.lock().write(bytes);
+            let pipe_id = writer.lock().write(bytes);
+            wake_pipe_waiters(pipe_id);
             Ok(())
         }
         DescriptorResource::Serial | DescriptorResource::Tty => {

@@ -47,9 +47,8 @@ cargo xtask image
 
 This writes `target/vanta-gpt.img` and `target/vanta-gpt.manifest`. The image
 has a FAT ESP containing Limine and the kernel plus a bounded, formatted
-RedoxFS root partition. The kernel currently detects that partition but keeps
-the legacy VantaFS mount as the runtime fallback until the RedoxFS VFS adapter
-is enabled.
+RedoxFS root partition. The kernel mounts that RedoxFS partition as the
+writable root and enters the serial recovery path if it is absent or invalid.
 
 Requires:
 - rustup with a nightly toolchain (a `rust-toolchain.toml` pins this) on a
@@ -65,6 +64,13 @@ boots QEMU pointed at the ESP via the `fat:rw:` trick — no ISO tools required.
 
 ```
 rust/
+  Cargo.toml                 # workspace: ABI, image, kernel, SDK, services
+  xtask/                     # reproducible SDK and GPT image commands
+  abi/                       # versioned native Vanta ABI v0
+  gpt/ image/                # GPT validation and RedoxFS image builder
+  redoxfs-adapter/           # credential-aware RedoxFS backend boundary
+  libvanta/                  # freestanding C ABI bootstrap library
+  linuxd/ services/          # compatibility and service contracts
   kernel/
     Cargo.toml
     rust-toolchain.toml      # nightly
@@ -76,7 +82,7 @@ rust/
       fs.rs                  # read-only CPIO newc initramfs
       storage.rs             # sector block-device trait + RAM block driver
       virtio.rs              # legacy VirtIO PCI block driver + DMA split ring
-      vfs.rs                 # writable VantaFS volume + RAM/VirtIO root mount
+      vfs.rs                 # RedoxFS root adapter + recovery VantaFS
       serial.rs              # COM1 logger
       gdt.rs                 # per-CPU GDT/TSS/stacks + ring-3 entry
       interrupts.rs          # IDT, PIC/PIT, exception + IRQ handlers
@@ -89,11 +95,12 @@ rust/
       pci.rs                 # serialized legacy PCI configuration-space discovery
       heap.rs                # mapped free-list + global Rust allocator
       process.rs              # ELF PT_LOAD mapping + user stack lifecycle
-      scheduler.rs           # timer-preemptive task table + file/socket descriptors
-      syscall.rs              # per-CPU syscall/sysret entry + VFS/process/socket ABI
+      scheduler.rs           # tasks, descriptors, pipe queues, signals, waits
+      syscall.rs              # per-CPU syscall/sysret entry + native ABI
       keyboard.rs            # IRQ1 scancode queue
       shell.rs               # decoder + echo loop
-  test-qemu.ps1              # checked two-vCPU QEMU boot regression
+  test-qemu.ps1              # legacy/VirtIO/network QEMU regressions
+  test-gpt-qemu.ps1          # GPT, RedoxFS, native-init acceptance
   esp/
     EFI/BOOT/BOOTX64.EFI     # Limine UEFI bootloader
     boot/vanta-kernel        # built kernel (gitignored)
@@ -132,6 +139,8 @@ rust/
   child PID and recorded parent PID
 - `SYS_WAITPID` blocks the calling parent until its selected child exits, then
   wakes it with the child exit code
+- Native pipe reads block the calling task in the kernel until a writer adds
+  data or closes the pipe; writers wake matching blocked readers
 - `SYS_EXEC` replaces the current process with a VFS-backed ELF; the old image
   is reclaimed before control enters the replacement
 - Timer-preemptive round-robin scheduler with complete callee-saved user
@@ -154,9 +163,16 @@ rust/
 - Writable VantaFS root mount with remount/persistence self-checks
 - Persistent VantaFS auto-format/mount on an attached legacy VirtIO disk,
   verified through an attached-disk write/read round trip and a second boot
-- In-kernel shell with editable input and `help`, `status`, `net`, dynamic
-  `ls`, `cat`, `write`, `stat`, `mv`, `rm`, `run`, and `clear` commands over
-  the mounted VFS root; `run` launches a VFS-backed ring-3 ELF
+- Persistent GPT RedoxFS root with ownership, group, mode, traversal, and umask
+  enforcement for the `vanta` developer account
+- Native `/sbin/init`, `/bin/vsh`, and static Rust base commands installed in
+  the GPT image
+- Native shell execution with command arguments, `<`, `>`, `>>`, `2>`, a real
+  `echo | cat` pipeline, child waits, and foreground Ctrl-C targeting
+- `libvanta` bootstrap static library, C header, freestanding allocator/CRT
+  entry, and reproducible `cargo xtask sdk` output including `hello-vanta.elf`
+- Linux syscall translation and restartable-service contract crates as the
+  foundation for later compatibility personalities
 
 ## TCP user ABI
 
@@ -178,12 +194,17 @@ tcp_host=10.0.2.2
 tcp_port=18080
 ```
 
-## What does not (yet)
+## Current limitations
 
 - No copy-on-write `fork` yet
 - No slab allocator yet; the bootstrap free-list has fixed metadata capacity
 - No modern VirtIO PCI transport or filesystem journaling
-- No TCP retransmission, listener/accept path, UDP socket ABI, DHCP, or DNS resolver
+- No TCP retransmission, listener/accept path, UDP socket ABI, DHCP, or native
+  DNS resolver; the QEMU DNS regression path itself is passing
+- `sigaction` currently supports default and ignore dispositions; custom user
+  handler delivery and full POSIX process groups are not implemented
+- The native C runtime is only the bootstrap profile; full stdio, directories,
+  environment, and relibc compatibility remain Track B work
 - No mouse, no windowing — terminal only
 - No SMP task migration, load balancing, or idle-CPU wake IPIs yet
 
