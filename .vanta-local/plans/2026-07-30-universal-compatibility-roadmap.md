@@ -33,12 +33,14 @@ Implemented and verified on `main`:
 The first external SDK syscall slice is complete as well: `libvanta` exposes
 the currently implemented descriptor, directory, pipe, process, scheduling,
 signal, and path-mutation calls, and `/bin/c-sdk-smoke` verifies them in GPT
-QEMU. Full stdio, environment, threading, and relibc compatibility remain
-open.
+QEMU. The first stdio slice is now complete too: unbuffered stream wrappers and
+`/bin/c-stdio-smoke` verify create/write/reopen/read/remove behavior in GPT
+QEMU. Buffered `FILE` semantics, environment, threading, and full relibc
+compatibility remain open.
 
 Track A is complete at its defined native acceptance scope. Post-Track-A work:
 
-- stdio, directory, environment, and full process portions of the C runtime; the first CRT entry and bounded allocator now exist;
+- buffered stdio, directory, environment, and full process portions of the C runtime; unbuffered stream wrappers, the first CRT entry, and bounded allocator now exist;
 - connecting `vanta-linuxd` to a Linux-personality ELF loader and syscall trap broker;
 - full custom signal-handler delivery and POSIX process groups/job control;
 - full stdio, directory, environment, and process portions of the C runtime;

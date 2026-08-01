@@ -30,8 +30,10 @@ that query before printing its success marker.
 The first external SDK slice is also complete: `libvanta` now wraps the
 implemented descriptor, directory, pipe, process, scheduling, signal, and
 path-mutation syscalls. A generated `/bin/c-sdk-smoke` program exercises the
-surface in GPT QEMU. Full stdio, environment, threading, and relibc remain
-later runtime work.
+surface in GPT QEMU. The next stdio slice is also complete: unbuffered stream
+wrappers and a generated `/bin/c-stdio-smoke` program create, write, reopen,
+read, and remove a file during GPT native acceptance. Buffered `FILE`
+semantics, environment, threading, and relibc remain later runtime work.
 
 The implementation worktree now includes the first `libvanta` static-library
 bootstrap, a reproducible `cargo xtask sdk` artifact, the initial `linuxd`

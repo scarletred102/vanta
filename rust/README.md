@@ -179,6 +179,9 @@ rust/
 - `libvanta` wrappers for the currently implemented descriptor, directory,
   pipe, process, scheduling, signal, and path-mutation syscalls; the GPT
   `c-sdk-smoke` program exercises that surface end to end
+- Unbuffered `libvanta` C stream wrappers over Vanta descriptors; the GPT
+  `c-stdio-smoke` program creates, writes, reopens, reads, and removes a file
+  through that stream surface
 - Linux syscall translation and restartable-service contract crates as the
   foundation for later compatibility personalities
 
@@ -211,8 +214,8 @@ tcp_port=18080
   DNS resolver; the QEMU DNS regression path itself is passing
 - `sigaction` currently supports default and ignore dispositions; custom user
   handler delivery and full POSIX process groups are not implemented
-- The native C runtime is only the bootstrap profile; full stdio, directories,
-  environment, and relibc compatibility remain Track B work
+- The native C runtime is only the bootstrap profile; buffered `FILE` semantics,
+  directories, environment, and relibc compatibility remain Track B work
 - ABI v1 negotiation is not implemented; the current native query reports the
   frozen ABI v0 contract and rejects no unknown mandatory bits implicitly
 - No mouse, no windowing — terminal only

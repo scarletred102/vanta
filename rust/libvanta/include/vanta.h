@@ -20,6 +20,16 @@ typedef struct {
     uint32_t write_fd;
 } vanta_pipe_t;
 
+typedef struct {
+    uint64_t fd;
+} vanta_stream_t;
+
+#define VANTA_OPEN_READ 0x10
+#define VANTA_OPEN_WRITE 0x11
+#define VANTA_OPEN_CREATE 0x13
+#define VANTA_OPEN_TRUNCATE 0x15
+#define VANTA_OPEN_APPEND 0x19
+
 int32_t *vanta_errno_location(void);
 int64_t vanta_write(uint64_t fd, const uint8_t *buffer, size_t length);
 int64_t vanta_read(uint64_t fd, uint8_t *buffer, size_t length);
@@ -41,6 +51,13 @@ int64_t vanta_getppid(void);
 int64_t vanta_yield(void);
 int64_t vanta_kill(uint64_t pid, uint64_t signal);
 int64_t vanta_sigaction(uint64_t signal, uint64_t handler, uint64_t flags);
+int64_t vanta_stream_open(const uint8_t *path, size_t length, uint64_t flags,
+                          vanta_stream_t *stream);
+int64_t vanta_stream_read(vanta_stream_t *stream, uint8_t *buffer, size_t length);
+int64_t vanta_stream_write(vanta_stream_t *stream, const uint8_t *buffer,
+                           size_t length);
+int64_t vanta_stream_close(vanta_stream_t *stream);
+int64_t vanta_stream_flush(vanta_stream_t *stream);
 void *vanta_malloc(size_t size);
 void vanta_free(void *pointer);
 void vanta_exit(int32_t status);

@@ -86,6 +86,56 @@ pub struct VantaPipe {
     pub write_fd: u32,
 }
 
+#[repr(C)]
+pub struct VantaStream {
+    pub fd: u64,
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_stream_open(
+    path: *const u8,
+    length: usize,
+    flags: u64,
+    stream: *mut VantaStream,
+) -> isize {
+    let fd = vanta_open(path, length, flags);
+    if fd < 0 {
+        return fd;
+    }
+    unsafe {
+        (*stream).fd = fd as u64;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_stream_read(
+    stream: *mut VantaStream,
+    buffer: *mut u8,
+    length: usize,
+) -> isize {
+    unsafe { vanta_read((*stream).fd, buffer, length) }
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_stream_write(
+    stream: *mut VantaStream,
+    buffer: *const u8,
+    length: usize,
+) -> isize {
+    unsafe { vanta_write((*stream).fd, buffer, length) }
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_stream_close(stream: *mut VantaStream) -> isize {
+    unsafe { vanta_close((*stream).fd) }
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_stream_flush(_: *mut VantaStream) -> isize {
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn vanta_dup(fd: u64) -> isize {
     call(Syscall::Dup3, [fd, 0, 0, 0])
