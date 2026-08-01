@@ -171,6 +171,9 @@ rust/
   `echo | cat` pipeline, child waits, and foreground Ctrl-C targeting
 - `libvanta` bootstrap static library, C header, freestanding allocator/CRT
   entry, and reproducible `cargo xtask sdk` output including `hello-vanta.elf`
+- ABI v0 contract vectors for syscall numbers, feature bits, errno decoding,
+  capability boundaries, credentials, signal layout, and directory records;
+  see [`abi/README.md`](abi/README.md)
 - Linux syscall translation and restartable-service contract crates as the
   foundation for later compatibility personalities
 
@@ -205,6 +208,8 @@ tcp_port=18080
   handler delivery and full POSIX process groups are not implemented
 - The native C runtime is only the bootstrap profile; full stdio, directories,
   environment, and relibc compatibility remain Track B work
+- ABI v1 negotiation and a native feature-query syscall are not implemented;
+  the current ABI v0 feature set is a tested contract constant
 - No mouse, no windowing — terminal only
 - No SMP task migration, load balancing, or idle-CPU wake IPIs yet
 
