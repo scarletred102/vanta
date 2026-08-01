@@ -1,7 +1,7 @@
 #![cfg_attr(not(test), no_std)]
 
 use core::arch::asm;
-use vanta_abi::{AbiInfo, Syscall};
+use vanta_abi::{AbiInfo, SignalAction, Syscall};
 
 pub const VANTA_OK: isize = 0;
 pub const VANTA_EIO: i32 = 5;
@@ -71,6 +71,95 @@ pub extern "C" fn vanta_get_abi_info(info: *mut AbiInfo) -> isize {
     call(
         Syscall::GetAbiInfo,
         [info as u64, core::mem::size_of::<AbiInfo>() as u64, 0, 0],
+    )
+}
+
+#[repr(C)]
+pub struct VantaStat {
+    pub size: u64,
+    pub mode: u64,
+}
+
+#[repr(C)]
+pub struct VantaPipe {
+    pub read_fd: u32,
+    pub write_fd: u32,
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_dup(fd: u64) -> isize {
+    call(Syscall::Dup3, [fd, 0, 0, 0])
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_pipe(pipe: *mut VantaPipe) -> isize {
+    call(Syscall::Pipe2, [pipe as u64, 0, 0, 0])
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_fstat(fd: u64, stat: *mut VantaStat) -> isize {
+    call(Syscall::FStat, [fd, stat as u64, 0, 0])
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_getdents(fd: u64, buffer: *mut u8, length: usize) -> isize {
+    call(Syscall::GetDents, [fd, buffer as u64, length as u64, 0])
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_mkdir(path: *const u8, length: usize) -> isize {
+    call(Syscall::MkDirAt, [path as u64, length as u64, 0, 0])
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_unlink(path: *const u8, length: usize) -> isize {
+    call(Syscall::UnlinkAt, [path as u64, length as u64, 0, 0])
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_rename(
+    old_path: *const u8,
+    old_length: usize,
+    new_path: *const u8,
+    new_length: usize,
+) -> isize {
+    call(
+        Syscall::RenameAt,
+        [
+            old_path as u64,
+            old_length as u64,
+            new_path as u64,
+            new_length as u64,
+        ],
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_getpid() -> isize {
+    call(Syscall::GetPid, [0, 0, 0, 0])
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_getppid() -> isize {
+    call(Syscall::GetPpid, [0, 0, 0, 0])
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_yield() -> isize {
+    call(Syscall::Yield, [0, 0, 0, 0])
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_kill(pid: u64, signal: u64) -> isize {
+    call(Syscall::Kill, [pid, signal, 0, 0])
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_sigaction(signal: u64, handler: u64, flags: u64) -> isize {
+    let action = SignalAction { handler, flags };
+    call(
+        Syscall::SigAction,
+        [signal, &action as *const SignalAction as u64, 0, 0],
     )
 }
 

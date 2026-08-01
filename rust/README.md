@@ -176,6 +176,9 @@ rust/
   see [`abi/README.md`](abi/README.md)
 - Native `GetAbiInfo` query through the kernel, Rust userland, and `libvanta`;
   the GPT C hello acceptance program validates the returned version and size
+- `libvanta` wrappers for the currently implemented descriptor, directory,
+  pipe, process, scheduling, signal, and path-mutation syscalls; the GPT
+  `c-sdk-smoke` program exercises that surface end to end
 - Linux syscall translation and restartable-service contract crates as the
   foundation for later compatibility personalities
 

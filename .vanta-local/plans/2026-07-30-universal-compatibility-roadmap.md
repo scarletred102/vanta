@@ -30,6 +30,12 @@ Implemented and verified on `main`:
 - RedoxFS ownership, mode, traversal, group, and umask enforcement;
 - legacy, VirtIO, VirtIO-network/DNS, and GPT QEMU gates all passing.
 
+The first external SDK syscall slice is complete as well: `libvanta` exposes
+the currently implemented descriptor, directory, pipe, process, scheduling,
+signal, and path-mutation calls, and `/bin/c-sdk-smoke` verifies them in GPT
+QEMU. Full stdio, environment, threading, and relibc compatibility remain
+open.
+
 Track A is complete at its defined native acceptance scope. Post-Track-A work:
 
 - stdio, directory, environment, and full process portions of the C runtime; the first CRT entry and bounded allocator now exist;
@@ -349,9 +355,16 @@ Acceptance: Gate A passes from a generated GPT image, including unauthorized-wri
 
 ### 2. Ship the first external SDK
 
-Implement the smallest usable `libvanta`/CRT profile: startup, allocator, errno, file I/O, directories, environment, process launch/wait, and static linking. Build `echo`, `cat`, `ls`, and a C hello program into the RedoxFS image with `xtask`.
+Expand the usable `libvanta`/CRT profile: startup, allocator, errno, file I/O,
+directories, environment, process launch/wait, and static linking. The direct
+syscall wrapper slice and C smoke image are complete; remaining SDK work is
+stdio, environment, and broader process-runtime behavior. Keep `echo`, `cat`,
+`ls`, the C hello program, and the C smoke program in the RedoxFS image with
+`xtask`.
 
-Acceptance: C programs use only the documented SDK and pass file, directory, allocation, exit-status, and mode tests.
+Acceptance: C programs use only the documented SDK and pass file, directory,
+allocation, process, pipe, exit-status, and mode tests. Status: direct-wrapper
+and smoke coverage pass; full libc/runtime coverage remains pending.
 
 ### 3. Define service seams without extraction risk
 

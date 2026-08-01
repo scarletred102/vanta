@@ -27,6 +27,12 @@ claiming ABI v1 negotiation. `GetAbiInfo` now exposes the frozen version and
 feature bits to native callers, and the GPT C hello acceptance path validates
 that query before printing its success marker.
 
+The first external SDK slice is also complete: `libvanta` now wraps the
+implemented descriptor, directory, pipe, process, scheduling, signal, and
+path-mutation syscalls. A generated `/bin/c-sdk-smoke` program exercises the
+surface in GPT QEMU. Full stdio, environment, threading, and relibc remain
+later runtime work.
+
 The implementation worktree now includes the first `libvanta` static-library
 bootstrap, a reproducible `cargo xtask sdk` artifact, the initial `linuxd`
 static syscall translation contract, and capability-bearing service request

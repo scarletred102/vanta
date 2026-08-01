@@ -60,6 +60,16 @@ fn native_acceptance() -> bool {
             b"[native] acceptance: c-hello failed\n"
         },
     );
+    let c_sdk_smoke = vanta_userland::spawn(b"/bin/c-sdk-smoke");
+    let c_sdk_smoke_ok = c_sdk_smoke != u64::MAX && vanta_userland::wait(c_sdk_smoke) == 0;
+    vanta_userland::write(
+        2,
+        if c_sdk_smoke_ok {
+            b"[native] acceptance: c-sdk-smoke ok\n"
+        } else {
+            b"[native] acceptance: c-sdk-smoke failed\n"
+        },
+    );
     vanta_userland::write(2, b"w1 ");
     vanta_userland::write(2, if stat_ok { b"s1 " } else { b"s0 " });
     vanta_userland::write(2, if read_ok { b"r1 " } else { b"r0 " });
@@ -68,5 +78,12 @@ fn native_acceptance() -> bool {
     vanta_userland::write(2, if remove_ok { b"x1 " } else { b"x0 " });
     vanta_userland::write(2, if remove_dir_ok { b"D1\n" } else { b"D0\n" });
     vanta_userland::write(2, if c_hello_ok { b"c1\n" } else { b"c0\n" });
-    stat_ok && read_ok && dir_ok && rename_ok && remove_ok && remove_dir_ok && c_hello_ok
+    stat_ok
+        && read_ok
+        && dir_ok
+        && rename_ok
+        && remove_ok
+        && remove_dir_ok
+        && c_hello_ok
+        && c_sdk_smoke_ok
 }

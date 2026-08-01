@@ -10,6 +10,16 @@ typedef struct {
     uint64_t features;
 } vanta_abi_info_t;
 
+typedef struct {
+    uint64_t size;
+    uint64_t mode;
+} vanta_stat_t;
+
+typedef struct {
+    uint32_t read_fd;
+    uint32_t write_fd;
+} vanta_pipe_t;
+
 int32_t *vanta_errno_location(void);
 int64_t vanta_write(uint64_t fd, const uint8_t *buffer, size_t length);
 int64_t vanta_read(uint64_t fd, uint8_t *buffer, size_t length);
@@ -18,6 +28,19 @@ int64_t vanta_close(uint64_t fd);
 int64_t vanta_spawn(const uint8_t *path, size_t length);
 int64_t vanta_waitpid(uint64_t pid);
 int64_t vanta_get_abi_info(vanta_abi_info_t *info);
+int64_t vanta_dup(uint64_t fd);
+int64_t vanta_pipe(vanta_pipe_t *pipe);
+int64_t vanta_fstat(uint64_t fd, vanta_stat_t *stat);
+int64_t vanta_getdents(uint64_t fd, uint8_t *buffer, size_t length);
+int64_t vanta_mkdir(const uint8_t *path, size_t length);
+int64_t vanta_unlink(const uint8_t *path, size_t length);
+int64_t vanta_rename(const uint8_t *old_path, size_t old_length,
+                    const uint8_t *new_path, size_t new_length);
+int64_t vanta_getpid(void);
+int64_t vanta_getppid(void);
+int64_t vanta_yield(void);
+int64_t vanta_kill(uint64_t pid, uint64_t signal);
+int64_t vanta_sigaction(uint64_t signal, uint64_t handler, uint64_t flags);
 void *vanta_malloc(size_t size);
 void vanta_free(void *pointer);
 void vanta_exit(int32_t status);

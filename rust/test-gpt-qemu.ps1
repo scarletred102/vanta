@@ -36,7 +36,8 @@ try {
         "[proc] launching native /sbin/init",
         "[native] terminal/filesystem acceptance passed",
         "vanta native shell",
-        "hello from C on Vanta"
+        "hello from C on Vanta",
+        "libvanta SDK smoke passed"
     )
     $output = ""
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)

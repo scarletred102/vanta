@@ -71,6 +71,11 @@ fn build_sdk(root: &Path) -> Result<(), String> {
         output.join("hello.c"),
     )
     .map_err(|error| format!("SDK sample: {error}"))?;
+    fs::copy(
+        root.join("libvanta/examples/sdk_smoke.c"),
+        output.join("sdk_smoke.c"),
+    )
+    .map_err(|error| format!("SDK smoke sample: {error}"))?;
     fs::write(
         output.join("manifest.txt"),
         format!(
@@ -86,6 +91,19 @@ fn build_sdk(root: &Path) -> Result<(), String> {
 }
 
 fn compile_c_sample(root: &Path) -> Result<(), String> {
+    compile_c_program(root, "hello.c", "hello.o", "hello-vanta.elf")?;
+    compile_c_program(root, "sdk_smoke.c", "sdk_smoke.o", "sdk-smoke-vanta.elf")
+}
+
+fn compile_c_program(
+    root: &Path,
+    source: &str,
+    object: &str,
+    executable: &str,
+) -> Result<(), String> {
+    let source_path = format!("target/sdk/{source}");
+    let object_path = format!("target/sdk/{object}");
+    let executable_path = format!("target/sdk/{executable}");
     let status = Command::new("zig")
         .current_dir(root)
         .args([
@@ -99,14 +117,18 @@ fn compile_c_sample(root: &Path) -> Result<(), String> {
             "-I",
             "libvanta/include",
             "-c",
-            "target/sdk/hello.c",
+            source_path.as_str(),
             "-o",
-            "target/sdk/hello.o",
+            object_path.as_str(),
         ])
         .status()
-        .map_err(|error| format!("failed to start C SDK compiler (zig cc): {error}"))?;
+        .map_err(|error| {
+            format!("failed to start C SDK compiler for {source} (zig cc): {error}")
+        })?;
     if !status.success() {
-        return Err(format!("C SDK compilation exited with {status}"));
+        return Err(format!(
+            "C SDK compilation for {source} exited with {status}"
+        ));
     }
     let status = Command::new("zig")
         .current_dir(root)
@@ -117,15 +139,15 @@ fn compile_c_sample(root: &Path) -> Result<(), String> {
             "-nostdlib",
             "-fuse-ld=lld",
             "-Wl,-T,userland/linker.ld",
-            "target/sdk/hello.o",
+            object_path.as_str(),
             "target/sdk/libvanta.a",
             "-o",
-            "target/sdk/hello-vanta.elf",
+            executable_path.as_str(),
         ])
         .status()
-        .map_err(|error| format!("failed to start C SDK linker (zig cc): {error}"))?;
+        .map_err(|error| format!("failed to start C SDK linker for {source} (zig cc): {error}"))?;
     if !status.success() {
-        return Err(format!("C SDK linking exited with {status}"));
+        return Err(format!("C SDK linking for {source} exited with {status}"));
     }
     Ok(())
 }
@@ -152,6 +174,7 @@ fn build_default_image() -> Result<(), String> {
     let pwd = read_file(root.join("target/x86_64-unknown-none/release/pwd"))?;
     let stat = read_file(root.join("target/x86_64-unknown-none/release/stat"))?;
     let c_hello = read_file(root.join("target/sdk/hello-vanta.elf"))?;
+    let c_sdk_smoke = read_file(root.join("target/sdk/sdk-smoke-vanta.elf"))?;
     let root_files = [
         RootFile {
             path: "/sbin/init",
@@ -240,6 +263,13 @@ fn build_default_image() -> Result<(), String> {
         RootFile {
             path: "/bin/c-hello",
             contents: &c_hello,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/c-sdk-smoke",
+            contents: &c_sdk_smoke,
             mode: 0o755,
             uid: 0,
             gid: 0,
