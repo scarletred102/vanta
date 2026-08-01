@@ -2,8 +2,7 @@ use core::mem::{align_of, size_of};
 
 use vanta_abi::{
     CapabilityId, Credentials, DirectoryRecord, Errno, FeatureSet, Rights, SignalAction, Syscall,
-    ABI_VERSION,
-    FEATURE_NATIVE_TERMINAL, FEATURE_REDOXFS_ROOT, SUPPORTED_FEATURES,
+    ABI_VERSION, FEATURE_NATIVE_TERMINAL, FEATURE_REDOXFS_ROOT, SUPPORTED_FEATURES,
 };
 
 #[test]
