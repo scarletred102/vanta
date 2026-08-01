@@ -5,6 +5,42 @@ use core::ops::{BitOr, BitOrAssign};
 pub const ABI_VERSION: u32 = 0;
 pub const MAX_GROUPS: usize = 8;
 
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FeatureSet(u64);
+
+impl FeatureSet {
+    pub const EMPTY: Self = Self(0);
+
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    pub const fn contains(self, required: Self) -> bool {
+        self.0 & required.0 == required.0
+    }
+
+    pub const fn unknown_mandatory_bits(self, required: Self) -> Self {
+        Self(required.0 & !self.0)
+    }
+}
+
+pub const FEATURE_NATIVE_TERMINAL: FeatureSet = FeatureSet(1 << 0);
+pub const FEATURE_REDOXFS_ROOT: FeatureSet = FeatureSet(1 << 1);
+pub const FEATURE_PIPE_WAKEUP: FeatureSet = FeatureSet(1 << 2);
+pub const FEATURE_C_ABI_BOOTSTRAP: FeatureSet = FeatureSet(1 << 3);
+
+pub const SUPPORTED_FEATURES: FeatureSet = FeatureSet(
+    FEATURE_NATIVE_TERMINAL.bits()
+        | FEATURE_REDOXFS_ROOT.bits()
+        | FEATURE_PIPE_WAKEUP.bits()
+        | FEATURE_C_ABI_BOOTSTRAP.bits(),
+);
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SignalAction {

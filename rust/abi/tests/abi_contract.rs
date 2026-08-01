@@ -1,4 +1,22 @@
-use vanta_abi::{CapabilityId, Credentials, Errno, Rights, Syscall, ABI_VERSION};
+use vanta_abi::{
+    CapabilityId, Credentials, Errno, FeatureSet, Rights, Syscall, ABI_VERSION,
+    FEATURE_NATIVE_TERMINAL, FEATURE_REDOXFS_ROOT, SUPPORTED_FEATURES,
+};
+
+#[test]
+fn feature_vectors_and_mandatory_bits_are_stable() {
+    assert_eq!(FEATURE_NATIVE_TERMINAL.bits(), 1 << 0);
+    assert_eq!(FEATURE_REDOXFS_ROOT.bits(), 1 << 1);
+    assert!(SUPPORTED_FEATURES.contains(FEATURE_NATIVE_TERMINAL));
+    assert_eq!(
+        FeatureSet::EMPTY.unknown_mandatory_bits(FEATURE_NATIVE_TERMINAL),
+        FEATURE_NATIVE_TERMINAL
+    );
+    assert_eq!(
+        SUPPORTED_FEATURES.unknown_mandatory_bits(SUPPORTED_FEATURES),
+        FeatureSet::EMPTY
+    );
+}
 
 #[test]
 fn abi_v0_uses_vanta_owned_numbers() {
