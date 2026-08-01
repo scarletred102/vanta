@@ -11,7 +11,9 @@ Scope: make Vanta a credible alternative platform for desktop, server, developer
 The host ABI contract is now covered by golden vectors for syscall numbers,
 feature bits, errno decoding, capability boundaries, credentials, signal
 layout, and directory records. The native feature-query path and ABI v1
-negotiation remain pending; this update does not advance Track B or Track C.
+negotiation remain separate concerns; `GetAbiInfo` now reports the frozen v0
+version and feature bits to native callers, and the GPT C hello acceptance path
+validates that query. This update does not advance Track B or Track C.
 
 Implemented and verified on `main`:
 
@@ -335,8 +337,9 @@ Codex must follow these rules:
 Create `vanta-abi` golden vectors for syscall numbers, error encoding, capability handles, rights, credentials, times, 64-bit offsets, directory records, signals, and feature discovery. Add a compatibility-version check and reject unknown mandatory features.
 
 Status: host tests reproduce the current vectors and reject unknown mandatory
-feature bits. A compatibility-version check and tiny native feature-query
-program remain the next ABI follow-up.
+feature bits. `GetAbiInfo` is implemented at the native syscall, Rust
+userland, and `libvanta` layers; the GPT C hello program is the end-to-end
+feature-query proof. ABI v1 negotiation remains the next ABI follow-up.
 
 ### 1. Finish native terminal release
 

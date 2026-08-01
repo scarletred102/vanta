@@ -23,7 +23,9 @@ The ABI crate now has tested golden vectors for every current Vanta syscall,
 errno decoding including signed-boundary rejection, capability slot/generation
 boundaries, feature discovery bits, and the `repr(C)` signal, credential, and
 directory-record layouts. This freezes the host-side v0 contract without
-claiming ABI v1 negotiation or a native feature-query syscall.
+claiming ABI v1 negotiation. `GetAbiInfo` now exposes the frozen version and
+feature bits to native callers, and the GPT C hello acceptance path validates
+that query before printing its success marker.
 
 The implementation worktree now includes the first `libvanta` static-library
 bootstrap, a reproducible `cargo xtask sdk` artifact, the initial `linuxd`

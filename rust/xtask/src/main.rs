@@ -93,6 +93,7 @@ fn compile_c_sample(root: &Path) -> Result<(), String> {
             "-target",
             "x86_64-freestanding",
             "-ffreestanding",
+            "-fno-sanitize=undefined",
             "-fno-stack-protector",
             "-nostdlib",
             "-I",

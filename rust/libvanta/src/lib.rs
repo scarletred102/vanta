@@ -1,7 +1,7 @@
 #![cfg_attr(not(test), no_std)]
 
 use core::arch::asm;
-use vanta_abi::Syscall;
+use vanta_abi::{AbiInfo, Syscall};
 
 pub const VANTA_OK: isize = 0;
 pub const VANTA_EIO: i32 = 5;
@@ -64,6 +64,14 @@ pub extern "C" fn vanta_spawn(path: *const u8, length: usize) -> isize {
 #[no_mangle]
 pub extern "C" fn vanta_waitpid(pid: u64) -> isize {
     call(Syscall::WaitPid, [pid, 0, 0, 0])
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_get_abi_info(info: *mut AbiInfo) -> isize {
+    call(
+        Syscall::GetAbiInfo,
+        [info as u64, core::mem::size_of::<AbiInfo>() as u64, 0, 0],
+    )
 }
 
 #[no_mangle]

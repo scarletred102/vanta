@@ -174,6 +174,8 @@ rust/
 - ABI v0 contract vectors for syscall numbers, feature bits, errno decoding,
   capability boundaries, credentials, signal layout, and directory records;
   see [`abi/README.md`](abi/README.md)
+- Native `GetAbiInfo` query through the kernel, Rust userland, and `libvanta`;
+  the GPT C hello acceptance program validates the returned version and size
 - Linux syscall translation and restartable-service contract crates as the
   foundation for later compatibility personalities
 
@@ -208,8 +210,8 @@ tcp_port=18080
   handler delivery and full POSIX process groups are not implemented
 - The native C runtime is only the bootstrap profile; full stdio, directories,
   environment, and relibc compatibility remain Track B work
-- ABI v1 negotiation and a native feature-query syscall are not implemented;
-  the current ABI v0 feature set is a tested contract constant
+- ABI v1 negotiation is not implemented; the current native query reports the
+  frozen ABI v0 contract and rejects no unknown mandatory bits implicitly
 - No mouse, no windowing — terminal only
 - No SMP task migration, load balancing, or idle-CPU wake IPIs yet
 

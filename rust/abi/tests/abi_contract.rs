@@ -1,8 +1,8 @@
 use core::mem::{align_of, size_of};
 
 use vanta_abi::{
-    CapabilityId, Credentials, DirectoryRecord, Errno, FeatureSet, Rights, SignalAction, Syscall,
-    ABI_VERSION, FEATURE_NATIVE_TERMINAL, FEATURE_REDOXFS_ROOT, SUPPORTED_FEATURES,
+    AbiInfo, CapabilityId, Credentials, DirectoryRecord, Errno, FeatureSet, Rights, SignalAction,
+    Syscall, ABI_VERSION, FEATURE_NATIVE_TERMINAL, FEATURE_REDOXFS_ROOT, SUPPORTED_FEATURES,
 };
 
 #[test]
@@ -18,6 +18,15 @@ fn feature_vectors_and_mandatory_bits_are_stable() {
         SUPPORTED_FEATURES.unknown_mandatory_bits(SUPPORTED_FEATURES),
         FeatureSet::EMPTY
     );
+}
+
+#[test]
+fn abi_info_reports_the_frozen_contract() {
+    let info = AbiInfo::current();
+
+    assert_eq!(info.abi_version, ABI_VERSION);
+    assert_eq!(info.struct_size, 16);
+    assert_eq!(info.features, SUPPORTED_FEATURES.bits());
 }
 
 #[test]
@@ -70,6 +79,7 @@ fn syscall_numbers_are_frozen() {
         (Syscall::UnlinkAt, 0x000B),
         (Syscall::RenameAt, 0x000C),
         (Syscall::TtyIoctl, 0x000D),
+        (Syscall::GetAbiInfo, 0x000E),
         (Syscall::SpawnVe, 0x0011),
         (Syscall::ExecVe, 0x0012),
         (Syscall::WaitPid, 0x0013),

@@ -22,6 +22,9 @@ stable representations.
   (`1000:1000`).
 - `SignalAction` and `DirectoryRecord` use `repr(C)` layouts covered by the
   ABI tests. `DirectoryRecord` reserves 256 bytes for a bounded name.
+- `Syscall::GetAbiInfo` is `0x000E` and writes the fixed `AbiInfo` record to a
+  caller-provided buffer. The record reports `ABI_VERSION`, its own byte size,
+  and the supported feature bits.
 
 ## Feature Discovery
 
@@ -36,8 +39,8 @@ stable representations.
 
 `FeatureSet::unknown_mandatory_bits` returns the required bits that are not
 supported. Callers must reject unknown mandatory bits rather than silently
-falling back. The current feature set is a host/kernel contract constant; a
-native feature-query syscall is separate follow-up work.
+falling back. Native callers use `GetAbiInfo` to retrieve the current version
+and feature bits at runtime.
 
 ## Verification
 

@@ -35,7 +35,8 @@ try {
         "[storage] RedoxFS persistence check: true",
         "[proc] launching native /sbin/init",
         "[native] terminal/filesystem acceptance passed",
-        "vanta native shell"
+        "vanta native shell",
+        "hello from C on Vanta"
     )
     $output = ""
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)

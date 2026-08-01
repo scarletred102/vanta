@@ -4,7 +4,7 @@ use core::arch::asm;
 use core::arch::global_asm;
 
 use alloc::vec::Vec;
-use vanta_abi::{SignalAction, Syscall};
+use vanta_abi::{AbiInfo, SignalAction, Syscall};
 use x86_64::registers::model_specific::{Efer, EferFlags, LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;
 use x86_64::VirtAddr;
@@ -34,6 +34,7 @@ pub const SYS_WAITPID: u64 = Syscall::WaitPid.number() as u64;
 pub const SYS_KILL: u64 = Syscall::Kill.number() as u64;
 pub const SYS_SIGACTION: u64 = Syscall::SigAction.number() as u64;
 pub const SYS_SPAWN: u64 = Syscall::SpawnVe.number() as u64;
+pub const SYS_GET_ABI_INFO: u64 = Syscall::GetAbiInfo.number() as u64;
 const SYSCALL_RETURN_EXIT: u64 = u64::MAX;
 const SYSCALL_RETURN_YIELD: u64 = u64::MAX - 2;
 const SYSCALL_RETURN_WAIT: u64 = u64::MAX - 3;
@@ -309,6 +310,7 @@ extern "C" fn vanta_syscall_dispatch(
         SYS_WAITPID => waitpid_user(arg1),
         SYS_KILL => kill_user(arg1, arg2),
         SYS_SIGACTION => sigaction_user(arg1, arg2, arg3),
+        SYS_GET_ABI_INFO => abi_info_user(arg1, arg2),
         SYS_EXEC => SYSCALL_RETURN_EXEC,
         SYS_YIELD => SYSCALL_RETURN_YIELD,
         SYS_GETPID => crate::scheduler::current_pid(),
@@ -491,6 +493,23 @@ fn fstat_user(descriptor: u64, pointer: u64) -> u64 {
         Ok(()) => 0,
         Err(()) => SYSCALL_ERROR,
     }
+}
+
+fn abi_info_user(pointer: u64, length: u64) -> u64 {
+    let size = core::mem::size_of::<AbiInfo>();
+    if length < size as u64 {
+        return SYSCALL_ERROR;
+    }
+    let info = AbiInfo::current();
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            core::ptr::addr_of!(info).cast::<u8>(),
+            core::mem::size_of::<AbiInfo>(),
+        )
+    };
+    copy_to_user(pointer, bytes)
+        .map(|()| 0)
+        .unwrap_or(SYSCALL_ERROR)
 }
 
 fn duplicate_legacy_user(descriptor: u64) -> u64 {

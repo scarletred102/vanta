@@ -41,6 +41,24 @@ pub const SUPPORTED_FEATURES: FeatureSet = FeatureSet(
         | FEATURE_C_ABI_BOOTSTRAP.bits(),
 );
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AbiInfo {
+    pub abi_version: u32,
+    pub struct_size: u32,
+    pub features: u64,
+}
+
+impl AbiInfo {
+    pub const fn current() -> Self {
+        Self {
+            abi_version: ABI_VERSION,
+            struct_size: core::mem::size_of::<Self>() as u32,
+            features: SUPPORTED_FEATURES.bits(),
+        }
+    }
+}
+
 pub const MAX_DIRECTORY_NAME: usize = 256;
 
 #[repr(C)]
@@ -103,6 +121,7 @@ pub enum Syscall {
     UnlinkAt = 0x000B,
     RenameAt = 0x000C,
     TtyIoctl = 0x000D,
+    GetAbiInfo = 0x000E,
     SpawnVe = 0x0011,
     ExecVe = 0x0012,
     WaitPid = 0x0013,

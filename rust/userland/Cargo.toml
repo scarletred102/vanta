@@ -6,6 +6,9 @@ edition = "2021"
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+vanta-abi = { path = "../abi" }
+
 [[bin]]
 name = "init"
 path = "src/bin/init.rs"

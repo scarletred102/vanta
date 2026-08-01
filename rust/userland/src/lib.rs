@@ -1,6 +1,7 @@
 #![no_std]
 
 use core::arch::asm;
+use vanta_abi::{AbiInfo, Syscall};
 
 const SYS_WRITE: u64 = 0x0002;
 const SYS_READ: u64 = 0x0001;
@@ -20,6 +21,7 @@ const SYS_GETDENTS: u64 = 0x0009;
 const SYS_MKDIR: u64 = 0x000a;
 const SYS_UNLINK: u64 = 0x000b;
 const SYS_RENAME: u64 = 0x000c;
+const SYS_GET_ABI_INFO: u64 = Syscall::GetAbiInfo.number() as u64;
 pub const READ_WOULD_BLOCK: u64 = u64::MAX - 5;
 
 pub fn write(fd: u64, bytes: &[u8]) -> u64 {
@@ -80,6 +82,15 @@ pub fn getdents(fd: u64, bytes: &mut [u8]) -> u64 {
         fd,
         bytes.as_mut_ptr() as u64,
         bytes.len() as u64,
+    )
+}
+
+pub fn abi_info(info: &mut AbiInfo) -> u64 {
+    syscall(
+        SYS_GET_ABI_INFO,
+        info as *mut AbiInfo as u64,
+        core::mem::size_of::<AbiInfo>() as u64,
+        0,
     )
 }
 
@@ -230,12 +241,18 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::command_path;
+    use super::{command_path, SYS_GET_ABI_INFO};
+    use vanta_abi::Syscall;
 
     #[test]
     fn resolves_bundled_static_commands() {
         assert_eq!(command_path(b"echo"), Some(&b"/bin/echo"[..]));
         assert_eq!(command_path(b"false"), Some(&b"/bin/false"[..]));
         assert_eq!(command_path(b"missing"), None);
+    }
+
+    #[test]
+    fn uses_the_frozen_abi_query_number() {
+        assert_eq!(SYS_GET_ABI_INFO, Syscall::GetAbiInfo.number() as u64);
     }
 }
