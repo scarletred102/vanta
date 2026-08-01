@@ -41,6 +41,36 @@ pub const SUPPORTED_FEATURES: FeatureSet = FeatureSet(
         | FEATURE_C_ABI_BOOTSTRAP.bits(),
 );
 
+pub const MAX_DIRECTORY_NAME: usize = 256;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DirectoryRecord {
+    pub inode: u64,
+    pub file_type: u8,
+    pub name_len: u8,
+    pub record_len: u16,
+    pub name: [u8; MAX_DIRECTORY_NAME],
+}
+
+impl DirectoryRecord {
+    pub const fn empty(inode: u64, file_type: u8) -> Self {
+        Self {
+            inode,
+            file_type,
+            name_len: 0,
+            record_len: core::mem::size_of::<Self>() as u16,
+            name: [0; MAX_DIRECTORY_NAME],
+        }
+    }
+
+    pub fn set_name(&mut self, name: &[u8]) {
+        let length = core::cmp::min(name.len(), MAX_DIRECTORY_NAME);
+        self.name[..length].copy_from_slice(&name[..length]);
+        self.name_len = length as u8;
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SignalAction {

@@ -1,5 +1,8 @@
+use core::mem::{align_of, size_of};
+
 use vanta_abi::{
-    CapabilityId, Credentials, Errno, FeatureSet, Rights, Syscall, ABI_VERSION,
+    CapabilityId, Credentials, DirectoryRecord, Errno, FeatureSet, Rights, SignalAction, Syscall,
+    ABI_VERSION,
     FEATURE_NATIVE_TERMINAL, FEATURE_REDOXFS_ROOT, SUPPORTED_FEATURES,
 };
 
@@ -16,6 +19,25 @@ fn feature_vectors_and_mandatory_bits_are_stable() {
         SUPPORTED_FEATURES.unknown_mandatory_bits(SUPPORTED_FEATURES),
         FeatureSet::EMPTY
     );
+}
+
+#[test]
+fn wire_layouts_are_stable() {
+    assert_eq!(size_of::<SignalAction>(), 16);
+    assert_eq!(align_of::<SignalAction>(), 8);
+    assert_eq!(size_of::<Credentials>(), 44);
+    assert_eq!(align_of::<Credentials>(), 4);
+    assert_eq!(size_of::<DirectoryRecord>(), 272);
+    assert_eq!(align_of::<DirectoryRecord>(), 8);
+}
+
+#[test]
+fn directory_record_preserves_bounded_name_data() {
+    let mut record = DirectoryRecord::empty(42, 8);
+    record.set_name(b"hello");
+    assert_eq!(record.inode, 42);
+    assert_eq!(record.name_len, 5);
+    assert_eq!(&record.name[..5], b"hello");
 }
 
 #[test]
