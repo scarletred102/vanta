@@ -140,11 +140,19 @@ impl Errno {
     }
 
     pub const fn from_return_value(value: isize) -> Option<Self> {
-        if value < 0 {
-            Some(Self((-value) as i32))
-        } else {
-            None
+        if value >= 0 {
+            return None;
         }
+
+        let magnitude = match value.checked_neg() {
+            Some(magnitude) => magnitude,
+            None => return None,
+        };
+        if magnitude > i32::MAX as isize {
+            return None;
+        }
+
+        Some(Self(magnitude as i32))
     }
 }
 

@@ -41,6 +41,58 @@ fn directory_record_preserves_bounded_name_data() {
 }
 
 #[test]
+fn errno_rejects_non_error_returns() {
+    assert_eq!(Errno::from_return_value(0), None);
+    assert_eq!(Errno::from_return_value(1), None);
+    assert_eq!(Errno::from_return_value(isize::MIN), None);
+}
+
+#[test]
+fn capability_boundaries_round_trip() {
+    for (slot, generation) in [(0, 0), (42, 7), (u32::MAX, u32::MAX)] {
+        let id = CapabilityId::from_parts(slot, generation);
+        assert_eq!((id.slot(), id.generation()), (slot, generation));
+    }
+}
+
+#[test]
+fn syscall_numbers_are_frozen() {
+    let vectors = [
+        (Syscall::Read, 0x0001),
+        (Syscall::Write, 0x0002),
+        (Syscall::OpenAt, 0x0003),
+        (Syscall::Close, 0x0004),
+        (Syscall::Dup3, 0x0005),
+        (Syscall::Pipe2, 0x0006),
+        (Syscall::LSeek, 0x0007),
+        (Syscall::FStat, 0x0008),
+        (Syscall::GetDents, 0x0009),
+        (Syscall::MkDirAt, 0x000A),
+        (Syscall::UnlinkAt, 0x000B),
+        (Syscall::RenameAt, 0x000C),
+        (Syscall::TtyIoctl, 0x000D),
+        (Syscall::SpawnVe, 0x0011),
+        (Syscall::ExecVe, 0x0012),
+        (Syscall::WaitPid, 0x0013),
+        (Syscall::Exit, 0x0014),
+        (Syscall::Kill, 0x0015),
+        (Syscall::SigAction, 0x0016),
+        (Syscall::Brk, 0x0017),
+        (Syscall::MMap, 0x0018),
+        (Syscall::MUnmap, 0x0019),
+        (Syscall::GetPid, 0x001A),
+        (Syscall::GetPpid, 0x001B),
+        (Syscall::Yield, 0x001C),
+        (Syscall::Socket, 0x0020),
+        (Syscall::Connect, 0x0021),
+    ];
+
+    for (syscall, number) in vectors {
+        assert_eq!(syscall.number(), number);
+    }
+}
+
+#[test]
 fn abi_v0_uses_vanta_owned_numbers() {
     assert_eq!(ABI_VERSION, 0);
     assert_eq!(Syscall::Read.number(), 0x0001);
