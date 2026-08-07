@@ -22,7 +22,7 @@ Implemented and verified on `main`:
 - the generated GPT image now bundles `/bin/c-hello`, and `/sbin/init` executes it during the native acceptance path;
 - `vanta-linuxd` translation contract for the first static x86_64 Linux syscall subset, with deterministic unsupported-syscall and dynamic-interpreter rejection;
 - `vanta-services` request/response headers with explicit service identity, request IDs, capability authority, and stable service errors;
-- the kernel bootstrap heap was increased to 1 MiB to safely load the external C image;
+- the kernel bootstrap heap is 2 MiB so the buffered external C image loads safely;
 - native kernel release build, GPT native-init regression including the C program, legacy QEMU regression, and VirtIO QEMU regression remain passing.
 - kernel pipe wait states with writer/close wakeups;
 - foreground-child Ctrl-C targeting and default/ignore signal dispositions;
@@ -35,15 +35,20 @@ the currently implemented descriptor, directory, pipe, process, scheduling,
 signal, and path-mutation calls, and `/bin/c-sdk-smoke` verifies them in GPT
 QEMU. The first stdio slice is now complete too: unbuffered stream wrappers and
 `/bin/c-stdio-smoke` verify create/write/reopen/read/remove behavior in GPT
-QEMU. Buffered `FILE` semantics, environment, threading, and full relibc
+QEMU. The follow-up buffered stdio bootstrap is now complete: the same sample
+verifies bounded `vanta_file_t` buffering, `putc`, bulk write, `getc`, EOF,
+flush, close, and removal. Environment, threading, and full `FILE`/relibc
 compatibility remain open.
 
 Track A is complete at its defined native acceptance scope. Post-Track-A work:
 
-- buffered stdio, directory, environment, and full process portions of the C runtime; unbuffered stream wrappers, the first CRT entry, and bounded allocator now exist;
+- environment, directory, and full process portions of the C runtime; bounded
+  buffered stdio, unbuffered stream wrappers, the first CRT entry, and bounded
+  allocator now exist;
 - connecting `vanta-linuxd` to a Linux-personality ELF loader and syscall trap broker;
 - full custom signal-handler delivery and POSIX process groups/job control;
-- full stdio, directory, environment, and process portions of the C runtime;
+- full `FILE`/relibc stdio, directory, environment, and process portions of the
+  C runtime;
 - connecting `vanta-linuxd` to a Linux-personality ELF loader and syscall trap broker;
 - copy-on-write `fork`, dynamic linking, and broader compatibility personalities.
 
@@ -360,7 +365,8 @@ Acceptance: Gate A passes from a generated GPT image, including unauthorized-wri
 Expand the usable `libvanta`/CRT profile: startup, allocator, errno, file I/O,
 directories, environment, process launch/wait, and static linking. The direct
 syscall wrapper slice and C smoke image are complete; remaining SDK work is
-stdio, environment, and broader process-runtime behavior. Keep `echo`, `cat`,
+environment, directories, and broader process-runtime behavior beyond the
+bounded stdio bootstrap. Keep `echo`, `cat`,
 `ls`, the C hello program, and the C smoke program in the RedoxFS image with
 `xtask`.
 

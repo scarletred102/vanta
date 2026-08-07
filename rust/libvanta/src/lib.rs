@@ -9,6 +9,9 @@ pub const VANTA_EBADF: i32 = 9;
 pub const VANTA_EINVAL: i32 = 22;
 pub const VANTA_ENOSYS: i32 = 38;
 const BOOTSTRAP_HEAP_SIZE: usize = 64 * 1024;
+const VANTA_FILE_BUFFER_SIZE: usize = 256;
+const VANTA_FILE_READ: u32 = 1;
+const VANTA_FILE_WRITE: u32 = 2;
 
 static mut ERRNO: i32 = 0;
 static mut BOOTSTRAP_HEAP: [u8; BOOTSTRAP_HEAP_SIZE] = [0; BOOTSTRAP_HEAP_SIZE];
@@ -134,6 +137,145 @@ pub extern "C" fn vanta_stream_close(stream: *mut VantaStream) -> isize {
 #[no_mangle]
 pub extern "C" fn vanta_stream_flush(_: *mut VantaStream) -> isize {
     0
+}
+
+#[repr(C)]
+pub struct VantaFile {
+    pub fd: u64,
+    pub mode: u32,
+    pub buffer_pos: u32,
+    pub buffer_len: u32,
+    pub buffer: [u8; VANTA_FILE_BUFFER_SIZE],
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_file_open(
+    path: *const u8,
+    length: usize,
+    flags: u64,
+    file: *mut VantaFile,
+) -> isize {
+    let fd = vanta_open(path, length, flags);
+    if fd < 0 {
+        return fd;
+    }
+    let mode = if flags & 1 != 0 {
+        VANTA_FILE_WRITE
+    } else {
+        VANTA_FILE_READ
+    };
+    unsafe {
+        core::ptr::write(
+            file,
+            VantaFile {
+                fd: fd as u64,
+                mode,
+                buffer_pos: 0,
+                buffer_len: 0,
+                buffer: [0; VANTA_FILE_BUFFER_SIZE],
+            },
+        );
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_file_flush(file: *mut VantaFile) -> isize {
+    unsafe {
+        if (*file).mode != VANTA_FILE_WRITE || (*file).buffer_len == 0 {
+            return 0;
+        }
+        let length = (*file).buffer_len as usize;
+        let written = vanta_write((*file).fd, (*file).buffer.as_ptr(), length);
+        if written < 0 {
+            return written;
+        }
+        if written as usize != length {
+            let remaining = length - written as usize;
+            core::ptr::copy(
+                (*file).buffer.as_ptr().add(written as usize),
+                (*file).buffer.as_mut_ptr(),
+                remaining,
+            );
+            (*file).buffer_len = remaining as u32;
+            return -(VANTA_EIO as isize);
+        }
+        (*file).buffer_len = 0;
+        (*file).buffer_pos = 0;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_file_write(
+    file: *mut VantaFile,
+    buffer: *const u8,
+    length: usize,
+) -> isize {
+    unsafe {
+        if (*file).mode != VANTA_FILE_WRITE {
+            return -(VANTA_EBADF as isize);
+        }
+        let mut offset = 0;
+        while offset < length {
+            if (*file).buffer_len as usize == VANTA_FILE_BUFFER_SIZE && vanta_file_flush(file) < 0 {
+                return -(VANTA_EIO as isize);
+            }
+            let available = VANTA_FILE_BUFFER_SIZE - (*file).buffer_len as usize;
+            let count = core::cmp::min(available, length - offset);
+            core::ptr::copy_nonoverlapping(
+                buffer.add(offset),
+                (*file).buffer.as_mut_ptr().add((*file).buffer_len as usize),
+                count,
+            );
+            (*file).buffer_len += count as u32;
+            offset += count;
+        }
+    }
+    length as isize
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_file_getc(file: *mut VantaFile) -> isize {
+    unsafe {
+        if (*file).mode != VANTA_FILE_READ {
+            return -(VANTA_EBADF as isize);
+        }
+        if (*file).buffer_pos >= (*file).buffer_len {
+            let count = vanta_read(
+                (*file).fd,
+                (*file).buffer.as_mut_ptr(),
+                VANTA_FILE_BUFFER_SIZE,
+            );
+            if count <= 0 {
+                return count;
+            }
+            (*file).buffer_pos = 0;
+            (*file).buffer_len = count as u32;
+        }
+        let byte = (*file).buffer[(*file).buffer_pos as usize];
+        (*file).buffer_pos += 1;
+        byte as isize
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_file_putc(file: *mut VantaFile, byte: u8) -> isize {
+    let result = vanta_file_write(file, &byte, 1);
+    if result < 0 {
+        result
+    } else {
+        byte as isize
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_file_close(file: *mut VantaFile) -> isize {
+    let flush_result = vanta_file_flush(file);
+    if flush_result < 0 {
+        return flush_result;
+    }
+    unsafe { vanta_close((*file).fd) }
 }
 
 #[no_mangle]

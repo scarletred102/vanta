@@ -35,6 +35,14 @@ wrappers and a generated `/bin/c-stdio-smoke` program create, write, reopen,
 read, and remove a file during GPT native acceptance. Buffered `FILE`
 semantics, environment, threading, and relibc remain later runtime work.
 
+### Buffered stdio bootstrap — 2026-08-07
+
+The stdio slice now includes a bounded buffered `vanta_file_t` object over
+Vanta descriptors. The GPT `/bin/c-stdio-smoke` acceptance program verifies
+buffered `putc`, bulk write, `getc`, EOF, explicit flush, close, and file
+removal. This is a runtime bootstrap contract, not full global `FILE` streams,
+formatting, environment handling, or relibc compatibility.
+
 The implementation worktree now includes the first `libvanta` static-library
 bootstrap, a reproducible `cargo xtask sdk` artifact, the initial `linuxd`
 static syscall translation contract, and capability-bearing service request

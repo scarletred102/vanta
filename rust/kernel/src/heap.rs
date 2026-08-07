@@ -13,10 +13,10 @@ use spin::Mutex;
 use crate::{memory, paging};
 
 const HEAP_BASE: u64 = 0xffff_ff00_0000_0000;
-// RedoxFS keeps an LZ4 cache for one 128 KiB metadata record. Its worst-case
-// compressed representation is 144,199 bytes, so the bootstrap heap must be
-// larger than the old 128 KiB reservation before a GPT root can be mounted.
-const HEAP_PAGES: usize = 256;
+// RedoxFS keeps an LZ4 cache for one 128 KiB metadata record, and native C
+// images now exceed 1 MiB during process loading. Keep a bounded 2 MiB heap
+// until the later slab allocator replaces this bootstrap budget.
+const HEAP_PAGES: usize = 512;
 const HEAP_SIZE: usize = HEAP_PAGES * memory::PAGE_SIZE as usize;
 const MAX_FREE_BLOCKS: usize = 256;
 

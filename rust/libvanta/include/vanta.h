@@ -24,6 +24,14 @@ typedef struct {
     uint64_t fd;
 } vanta_stream_t;
 
+typedef struct {
+    uint64_t fd;
+    uint32_t mode;
+    uint32_t buffer_pos;
+    uint32_t buffer_len;
+    uint8_t buffer[256];
+} vanta_file_t;
+
 #define VANTA_OPEN_READ 0x10
 #define VANTA_OPEN_WRITE 0x11
 #define VANTA_OPEN_CREATE 0x13
@@ -58,6 +66,13 @@ int64_t vanta_stream_write(vanta_stream_t *stream, const uint8_t *buffer,
                            size_t length);
 int64_t vanta_stream_close(vanta_stream_t *stream);
 int64_t vanta_stream_flush(vanta_stream_t *stream);
+int64_t vanta_file_open(const uint8_t *path, size_t length, uint64_t flags,
+                        vanta_file_t *file);
+int64_t vanta_file_flush(vanta_file_t *file);
+int64_t vanta_file_write(vanta_file_t *file, const uint8_t *buffer, size_t length);
+int64_t vanta_file_getc(vanta_file_t *file);
+int64_t vanta_file_putc(vanta_file_t *file, uint8_t byte);
+int64_t vanta_file_close(vanta_file_t *file);
 void *vanta_malloc(size_t size);
 void vanta_free(void *pointer);
 void vanta_exit(int32_t status);
