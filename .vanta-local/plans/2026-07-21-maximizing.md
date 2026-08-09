@@ -13,7 +13,7 @@ compatibility strategy—Linux, Win32, Android, guests, service extraction,
 phase gates, and Codex execution rules—is maintained in
 [2026-07-30-universal-compatibility-roadmap.md](2026-07-30-universal-compatibility-roadmap.md).
 
-## Implementation status — 2026-07-29
+## Implementation status — 2026-08-10
 
 ### Immediate roadmap deliverables — 2026-07-30
 
@@ -51,7 +51,7 @@ program during native acceptance. These are foundation deliverables, not
 completion of the full C runtime or Linux personality. The broader status and remaining gates are in
 [2026-07-30-universal-compatibility-roadmap.md](2026-07-30-universal-compatibility-roadmap.md).
 
-**Current state:** Track A has a verified native-terminal milestone on `main`.
+**Current state:** the scoped native-terminal boot slice is verified on `main`.
 The GPT image boots RedoxFS, starts native `/sbin/init` and `/bin/vsh`, enforces
 developer ownership/modes, blocks pipe readers in the kernel until wakeup,
 executes real shell pipeline/redirection paths, and passes the native,
@@ -59,6 +59,12 @@ legacy, VirtIO, network, and GPT acceptance gates. Vanta is not yet a full
 developer-platform release: the C runtime remains a bootstrap profile,
 `linuxd` is still a translation contract, and full POSIX signal handlers,
 process groups, `fork`, and dynamic runtime support remain later work.
+
+The broader Gate A definition is not fully closed yet. GPT acceptance still
+needs explicit non-root login/account behavior, unauthorized-operation tests,
+reboot persistence, and absent/corrupt-root recovery checks in one generated
+image workflow. The current result is therefore a strong native-terminal
+milestone, not a claim that the complete developer-OS release gate has passed.
 
 Completed foundation work:
 
@@ -73,11 +79,8 @@ Completed foundation work:
   the legacy VantaFS path when no Vanta root partition exists.
 - `cargo xtask image`, which emits `target/vanta-gpt.img` with a FAT ESP,
   Limine/kernel payload, formatted RedoxFS root, and source-revision manifest.
-- Existing ABI, GPT, RedoxFS-adapter, kernel-release, legacy QEMU, and VirtIO
-  QEMU regressions remain passing. The separate VirtIO+network run currently
-  reaches scheduler/process completion but reports `DnsUnreachable` and misses
-  the expected UDP DNS reply marker; this is tracked as an existing network
-  gate rather than counted as native filesystem/process completion.
+- Existing ABI, GPT, RedoxFS-adapter, kernel-release, legacy QEMU, VirtIO,
+  and VirtIO-network QEMU regressions were last verified passing on 2026-08-07.
 - Native `/sbin/init`, `/bin/vsh`, and static base commands are installed into
   the generated RedoxFS image; GPT QEMU boots the native-init path.
 - Descriptor-backed TTY, pipe resources, capability rights, descriptor close
@@ -107,11 +110,11 @@ Completed foundation work:
   gates pass. Native syscall clients now declare the x86_64 syscall clobbers,
   while the kernel keeps the legacy and native register-return paths separate.
 
-Track A is complete at its defined QEMU/native acceptance scope. The explicit
-post-Track-A limitations are full custom signal-handler delivery, process
-groups/job control, copy-on-write `fork`, and the complete C/relibc runtime.
-Release work after Track A is `libvanta`/relibc expansion, the static C
-toolchain, and the Linux personality.
+The scoped Track A boot milestone is complete. The explicit remaining Gate A
+work is non-root account behavior, unauthorized-operation and reboot/recovery
+acceptance, full custom signal-handler delivery, process groups/job control,
+and copy-on-write `fork`. After that gate is closed, release work moves to
+`libvanta`/relibc expansion, the static C toolchain, and the Linux personality.
 
 ## Architecture and interface contract
 

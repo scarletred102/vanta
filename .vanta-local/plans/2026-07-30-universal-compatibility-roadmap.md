@@ -1,10 +1,27 @@
 # Vanta Universal Compatibility Roadmap
 
-Status: active roadmap; Track A native-terminal gate completed on `main`  
+Status: active roadmap; native-terminal boot slice complete, Gate A hardening outstanding
 Date: 2026-07-30  
 Scope: make Vanta a credible alternative platform for desktop, server, developer, and mobile workloads while preserving a Rust-first security boundary.
 
 ## Immediate-deliverable status — 2026-07-30
+
+### Reality check — 2026-08-10
+
+Vanta currently has a verified Rust/QEMU native-terminal prototype, not a
+universally compatible or production-ready operating system. The completed
+slice covers UEFI/Limine boot, SMP, GPT/RedoxFS mounting, native init and shell,
+real pipelines/redirection, persistence checks, network regressions, ABI v0,
+and a bounded static C SDK. The remaining Gate A proof is explicit non-root
+account behavior, unauthorized-operation rejection, GPT reboot persistence,
+and absent/corrupt-root recovery in the acceptance workflow.
+
+The compatibility tracks are mostly architectural plans today: `linuxd` is a
+translation contract without an ELF loader or syscall broker; service crates
+define headers without restartable services; and Tracks D-H have no product
+implementation. The immediate goal is therefore a dependable native terminal
+developer OS, followed by a tested static-Linux CLI personality, not broad
+desktop/Windows/Android compatibility yet.
 
 ### ABI v0 contract update — 2026-08-01
 
@@ -23,7 +40,7 @@ Implemented and verified on `main`:
 - `vanta-linuxd` translation contract for the first static x86_64 Linux syscall subset, with deterministic unsupported-syscall and dynamic-interpreter rejection;
 - `vanta-services` request/response headers with explicit service identity, request IDs, capability authority, and stable service errors;
 - the kernel bootstrap heap is 2 MiB so the buffered external C image loads safely;
-- native kernel release build, GPT native-init regression including the C program, legacy QEMU regression, and VirtIO QEMU regression remain passing.
+- native kernel release build, GPT native-init regression including the C program, legacy QEMU, VirtIO QEMU, and network QEMU regressions were last verified passing on 2026-08-07.
 - kernel pipe wait states with writer/close wakeups;
 - foreground-child Ctrl-C targeting and default/ignore signal dispositions;
 - real native shell pipeline/redirection execution;
@@ -40,16 +57,15 @@ verifies bounded `vanta_file_t` buffering, `putc`, bulk write, `getc`, EOF,
 flush, close, and removal. Environment, threading, and full `FILE`/relibc
 compatibility remain open.
 
-Track A is complete at its defined native acceptance scope. Post-Track-A work:
+The scoped native-terminal boot milestone is complete. Gate A hardening and
+post-milestone work remain:
 
 - environment, directory, and full process portions of the C runtime; bounded
   buffered stdio, unbuffered stream wrappers, the first CRT entry, and bounded
   allocator now exist;
 - connecting `vanta-linuxd` to a Linux-personality ELF loader and syscall trap broker;
 - full custom signal-handler delivery and POSIX process groups/job control;
-- full `FILE`/relibc stdio, directory, environment, and process portions of the
-  C runtime;
-- connecting `vanta-linuxd` to a Linux-personality ELF loader and syscall trap broker;
+- full `FILE`/relibc stdio and process-runtime compatibility;
 - copy-on-write `fork`, dynamic linking, and broader compatibility personalities.
 
 Verification note: `cargo test --workspace` is currently not a valid Windows command for this repository because the vendored RedoxFS test dependency requires libfuse and the GNU host lacks `dlltool`. Focused workspace package tests and all available QEMU gates remain the required checks until that host-test dependency is isolated.
@@ -360,6 +376,11 @@ Complete the remaining bundles 1–3 gaps from `2026-07-21-maximizing.md`: block
 
 Acceptance: Gate A passes from a generated GPT image, including unauthorized-write rejection and reboot verification.
 
+Status: the boot, shell, filesystem-mode, pipe, signal-default, and generated
+image portions are passing. Non-root account behavior, explicit unauthorized
+operation rejection, GPT reboot persistence, and absent/corrupt-root recovery
+still need a single end-to-end acceptance workflow.
+
 ### 2. Ship the first external SDK
 
 Expand the usable `libvanta`/CRT profile: startup, allocator, errno, file I/O,
@@ -372,7 +393,9 @@ bounded stdio bootstrap. Keep `echo`, `cat`,
 
 Acceptance: C programs use only the documented SDK and pass file, directory,
 allocation, process, pipe, exit-status, and mode tests. Status: direct-wrapper
-and smoke coverage pass; full libc/runtime coverage remains pending.
+and buffered-stdio smoke coverage pass; environment, directory runtime
+wrappers, broader process behavior, and full libc/runtime coverage remain
+pending.
 
 ### 3. Define service seams without extraction risk
 
@@ -380,11 +403,17 @@ Turn the existing RedoxFS adapter, process manager, network path, and device pat
 
 Acceptance: interfaces compile in host tests and a service failure is returned as an error rather than a kernel panic.
 
+Status: request/response headers exist, but no service process, IPC transport,
+restart, crash containment, revocation, or audit implementation exists yet.
+
 ### 4. Linux static personality spike
 
 Implement a separate `linuxd` harness that loads a static x86_64 ELF and translates only process identity, memory setup, file I/O, directories, pipes, `execve`, `wait`, and exit. Add explicit unsupported-syscall reporting.
 
 Acceptance: static musl hello, cat, and ls run in QEMU; native ABI tests remain unchanged.
+
+Status: translation tables and rejection tests exist; the ELF personality
+loader, syscall trap broker, and QEMU Linux samples are not implemented.
 
 ### 5. Compatibility scorecard and corpus
 
@@ -392,11 +421,15 @@ Create `tests/compat/` with per-target manifests, expected results, ABI version,
 
 Acceptance: every compatibility run emits machine-readable pass/fail/unsupported results and a reproducible artifact manifest.
 
+Status: not started.
+
 ### 6. VM feasibility prototype
 
 Do not build a full VMM yet. Define the capability and device contracts, evaluate existing Rust VMM components, and boot a minimal Linux guest only when the kernel has stable memory/device ownership primitives.
 
 Acceptance: architecture review document plus a minimal isolated guest prototype; no guest code is merged into the native syscall path.
+
+Status: not started.
 
 ## 8. Verification strategy
 
