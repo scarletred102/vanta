@@ -165,6 +165,13 @@ rust/
   verified through an attached-disk write/read round trip and a second boot
 - Persistent GPT RedoxFS root with ownership, group, mode, traversal, and umask
   enforcement for the `vanta` developer account
+- Gate A native developer acceptance: root `/sbin/init` demotes spawned
+  programs to `vanta`, rejects unauthorized system-file creation, verifies
+  authorized home-directory file operations, confirms persistence after a
+  same-image reboot, and enters the recovery shell for a corrupt GPT root
+- `test-gpt-qemu.ps1` runs the complete first-boot, reboot-persistence, and
+  corrupt-root recovery workflow; legacy, VirtIO, and network QEMU regressions
+  remain separate compatibility checks
 - Native `/sbin/init`, `/bin/vsh`, and static Rust base commands installed in
   the GPT image
 - Native shell execution with command arguments, `<`, `>`, `>>`, `2>`, a real
