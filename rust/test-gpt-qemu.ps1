@@ -67,7 +67,8 @@ $common = @(
     "vanta native shell",
     "hello from C on Vanta",
     "libvanta SDK smoke passed",
-    "libvanta stdio smoke passed"
+    "libvanta stdio smoke passed",
+    "libvanta directory smoke passed"
 )
 
 $first = Invoke-GptBoot -DiskImage $image -Label "first boot" -Required ($common + "[storage] RedoxFS reboot persistence marker: false")

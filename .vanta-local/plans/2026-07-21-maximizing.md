@@ -15,6 +15,19 @@ phase gates, and Codex execution rules—is maintained in
 
 ## Implementation status — 2026-08-10
 
+### Track B SDK directory bundle — 2026-08-10
+
+The first post-Gate-A SDK bundle is complete. `libvanta` now provides a
+bounded directory handle wrapper over native directory descriptors, including
+open, sequential name reads, and close; the generated SDK includes a directory
+smoke program that also exercises the bounded allocator. GPT acceptance runs
+both the existing SDK smoke and the new directory smoke, while legacy, VirtIO,
+network, and focused host/cross-target checks remain green.
+
+The next SDK bundle is environment and CRT process context. Full environment
+storage, broader process-runtime behavior, and `FILE`/relibc compatibility are
+not claimed by this change.
+
 ### Immediate roadmap deliverables — 2026-07-30
 
 ### ABI v0 contract update — 2026-08-01

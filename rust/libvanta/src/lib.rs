@@ -94,6 +94,15 @@ pub struct VantaStream {
     pub fd: u64,
 }
 
+#[repr(C)]
+pub struct VantaDir {
+    pub fd: u64,
+    pub buffer_pos: u32,
+    pub buffer_len: u32,
+    pub buffer: [u8; 256],
+    pub name: [u8; 257],
+}
+
 #[no_mangle]
 pub extern "C" fn vanta_stream_open(
     path: *const u8,
@@ -296,6 +305,79 @@ pub extern "C" fn vanta_fstat(fd: u64, stat: *mut VantaStat) -> isize {
 #[no_mangle]
 pub extern "C" fn vanta_getdents(fd: u64, buffer: *mut u8, length: usize) -> isize {
     call(Syscall::GetDents, [fd, buffer as u64, length as u64, 0])
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_dir_open(
+    path: *const u8,
+    length: usize,
+    directory: *mut VantaDir,
+) -> isize {
+    let fd = vanta_open(path, length, 0x10);
+    if fd < 0 {
+        return fd;
+    }
+    unsafe {
+        core::ptr::write(
+            directory,
+            VantaDir {
+                fd: fd as u64,
+                buffer_pos: 0,
+                buffer_len: 0,
+                buffer: [0; 256],
+                name: [0; 257],
+            },
+        );
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_dir_read(directory: *mut VantaDir, name: *mut i8, length: usize) -> isize {
+    if length == 0 {
+        return -(VANTA_EINVAL as isize);
+    }
+    unsafe {
+        let directory = &mut *directory;
+        loop {
+            if directory.buffer_pos >= directory.buffer_len {
+                let count = vanta_getdents(
+                    directory.fd,
+                    directory.buffer.as_mut_ptr(),
+                    directory.buffer.len(),
+                );
+                if count < 0 {
+                    return count;
+                }
+                if count == 0 {
+                    return 0;
+                }
+                directory.buffer_pos = 0;
+                directory.buffer_len = count as u32;
+            }
+            let start = directory.buffer_pos as usize;
+            let remaining = &directory.buffer[start..directory.buffer_len as usize];
+            let entry_len = remaining
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .unwrap_or(remaining.len());
+            if entry_len == 0 {
+                directory.buffer_pos += 1;
+                continue;
+            }
+            let copy_len = core::cmp::min(entry_len, length - 1);
+            core::ptr::copy_nonoverlapping(remaining.as_ptr(), name.cast::<u8>(), copy_len);
+            *name.add(copy_len) = 0;
+            directory.buffer_pos +=
+                (entry_len + if entry_len < remaining.len() { 1 } else { 0 }) as u32;
+            return copy_len as isize;
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_dir_close(directory: *mut VantaDir) -> isize {
+    unsafe { vanta_close((*directory).fd) }
 }
 
 #[no_mangle]

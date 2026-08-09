@@ -94,6 +94,16 @@ fn native_acceptance() -> bool {
             b"[native] acceptance: c-stdio-smoke failed\n"
         },
     );
+    let c_dir_smoke = vanta_userland::spawn(b"/bin/c-dir-smoke");
+    let c_dir_smoke_ok = c_dir_smoke != u64::MAX && vanta_userland::wait(c_dir_smoke) == 0;
+    vanta_userland::write(
+        2,
+        if c_dir_smoke_ok {
+            b"[native] acceptance: c-dir-smoke ok\n"
+        } else {
+            b"[native] acceptance: c-dir-smoke failed\n"
+        },
+    );
     vanta_userland::write(2, b"w1 ");
     vanta_userland::write(2, if stat_ok { b"s1 " } else { b"s0 " });
     vanta_userland::write(2, if read_ok { b"r1 " } else { b"r0 " });
@@ -111,4 +121,5 @@ fn native_acceptance() -> bool {
         && c_hello_ok
         && c_sdk_smoke_ok
         && c_stdio_smoke_ok
+        && c_dir_smoke_ok
 }

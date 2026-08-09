@@ -26,6 +26,14 @@ typedef struct {
 
 typedef struct {
     uint64_t fd;
+    uint32_t buffer_pos;
+    uint32_t buffer_len;
+    uint8_t buffer[256];
+    char name[257];
+} vanta_dir_t;
+
+typedef struct {
+    uint64_t fd;
     uint32_t mode;
     uint32_t buffer_pos;
     uint32_t buffer_len;
@@ -50,6 +58,9 @@ int64_t vanta_dup(uint64_t fd);
 int64_t vanta_pipe(vanta_pipe_t *pipe);
 int64_t vanta_fstat(uint64_t fd, vanta_stat_t *stat);
 int64_t vanta_getdents(uint64_t fd, uint8_t *buffer, size_t length);
+int64_t vanta_dir_open(const uint8_t *path, size_t length, vanta_dir_t *directory);
+int64_t vanta_dir_read(vanta_dir_t *directory, char *name, size_t length);
+int64_t vanta_dir_close(vanta_dir_t *directory);
 int64_t vanta_mkdir(const uint8_t *path, size_t length);
 int64_t vanta_unlink(const uint8_t *path, size_t length);
 int64_t vanta_rename(const uint8_t *old_path, size_t old_length,

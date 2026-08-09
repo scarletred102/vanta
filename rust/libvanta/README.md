@@ -18,11 +18,13 @@ The header and sample are the contract surface:
 - `examples/hello.c`
 - `examples/sdk_smoke.c`
 - `examples/stdio_smoke.c`
+- `examples/dir_smoke.c`
 
 `cargo xtask sdk` builds the C samples. The generated GPT image runs the SDK
-and buffered stdio smoke samples during native acceptance and requires their
-success markers. The stdio sample exercises buffered `putc`, bulk write,
-`getc`, EOF, flush, close, and file removal behavior.
+and buffered stdio plus directory smoke samples during native acceptance and
+requires their success markers. The stdio sample exercises buffered `putc`,
+bulk write, `getc`, EOF, flush, close, and file removal behavior. The directory
+sample exercises the directory handle wrapper and bounded allocator.
 
 The next SDK steps are environment, broader process runtime support, and the
-eventual `FILE`/relibc compatibility surface beyond this bounded file object.
+eventual `FILE`/relibc compatibility surface beyond these bounded wrappers.

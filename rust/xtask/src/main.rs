@@ -81,6 +81,11 @@ fn build_sdk(root: &Path) -> Result<(), String> {
         output.join("stdio_smoke.c"),
     )
     .map_err(|error| format!("SDK stdio sample: {error}"))?;
+    fs::copy(
+        root.join("libvanta/examples/dir_smoke.c"),
+        output.join("dir_smoke.c"),
+    )
+    .map_err(|error| format!("SDK directory sample: {error}"))?;
     fs::write(
         output.join("manifest.txt"),
         format!(
@@ -103,7 +108,8 @@ fn compile_c_sample(root: &Path) -> Result<(), String> {
         "stdio_smoke.c",
         "stdio_smoke.o",
         "stdio-smoke-vanta.elf",
-    )
+    )?;
+    compile_c_program(root, "dir_smoke.c", "dir_smoke.o", "dir-smoke-vanta.elf")
 }
 
 fn compile_c_program(
@@ -188,6 +194,7 @@ fn build_default_image() -> Result<(), String> {
     let c_hello = read_file(root.join("target/sdk/hello-vanta.elf"))?;
     let c_sdk_smoke = read_file(root.join("target/sdk/sdk-smoke-vanta.elf"))?;
     let c_stdio_smoke = read_file(root.join("target/sdk/stdio-smoke-vanta.elf"))?;
+    let c_dir_smoke = read_file(root.join("target/sdk/dir-smoke-vanta.elf"))?;
     let root_files = [
         RootFile {
             path: "/sbin/init",
@@ -297,6 +304,13 @@ fn build_default_image() -> Result<(), String> {
         RootFile {
             path: "/bin/c-stdio-smoke",
             contents: &c_stdio_smoke,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/c-dir-smoke",
+            contents: &c_dir_smoke,
             mode: 0o755,
             uid: 0,
             gid: 0,

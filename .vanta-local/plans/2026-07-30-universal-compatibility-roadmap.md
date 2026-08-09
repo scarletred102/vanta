@@ -1,6 +1,6 @@
 # Vanta Universal Compatibility Roadmap
 
-Status: active roadmap; Gate A native developer OS milestone complete; Track B pending
+Status: active roadmap; Gate A complete; Track B native SDK expansion in progress
 Date: 2026-07-30  
 Scope: make Vanta a credible alternative platform for desktop, server, developer, and mobile workloads while preserving a Rust-first security boundary.
 
@@ -58,7 +58,8 @@ compatibility remain open.
 
 Gate A is complete. Post-milestone work remains:
 
-- environment, directory, and full process portions of the C runtime; bounded
+- environment and full process portions of the C runtime; bounded
+  directory handles, bounded
   buffered stdio, unbuffered stream wrappers, the first CRT entry, and bounded
   allocator now exist;
 - connecting `vanta-linuxd` to a Linux-personality ELF loader and syscall trap broker;
@@ -379,6 +380,14 @@ reboot persistence on the same image, root-to-`vanta` child demotion,
 unauthorized `/etc` creation rejection, authorized `/home/vanta` file
 operations, and corrupt-root recovery into the kernel shell. Legacy, VirtIO,
 network, focused Rust, formatting, kernel, and userland regressions pass.
+
+### 1a. Expand the native SDK
+
+Status: directory and allocator bundle complete on 2026-08-10. `libvanta`
+provides a bounded directory handle API over native descriptors, and the
+generated GPT image runs a directory smoke program alongside the existing file,
+stdio, process, and ABI samples. Environment propagation, broader process
+runtime behavior, and full `FILE`/relibc compatibility remain next.
 
 ### 2. Ship the first external SDK
 
