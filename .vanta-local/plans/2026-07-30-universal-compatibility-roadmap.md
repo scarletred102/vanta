@@ -58,10 +58,10 @@ compatibility remain open.
 
 Gate A is complete. Post-milestone work remains:
 
-- environment and full process portions of the C runtime; bounded
-  directory handles, bounded
+- full environment and broader process portions of the C runtime; bounded
+  directory handles, bootstrap environment lookup, bounded
   buffered stdio, unbuffered stream wrappers, the first CRT entry, and bounded
-  allocator now exist;
+  allocator now exist, with static launch/wait/exec smoke coverage;
 - connecting `vanta-linuxd` to a Linux-personality ELF loader and syscall trap broker;
 - full custom signal-handler delivery and POSIX process groups/job control;
 - full `FILE`/relibc stdio and process-runtime compatibility;
@@ -383,11 +383,12 @@ network, focused Rust, formatting, kernel, and userland regressions pass.
 
 ### 1a. Expand the native SDK
 
-Status: directory and allocator bundle complete on 2026-08-10. `libvanta`
-provides a bounded directory handle API over native descriptors, and the
-generated GPT image runs a directory smoke program alongside the existing file,
-stdio, process, and ABI samples. Environment propagation, broader process
-runtime behavior, and full `FILE`/relibc compatibility remain next.
+Status: SDK/process-context bundle complete on 2026-08-10. `libvanta`
+provides bounded directory handles, bootstrap environment lookup, and static
+launch/wait/exec wrappers. The generated GPT image runs directory, environment,
+process-status, and exec replacement smokes alongside the existing file, stdio,
+and ABI samples. Full environment propagation, broader process-runtime
+behavior, and full `FILE`/relibc compatibility remain pending.
 
 ### 2. Ship the first external SDK
 

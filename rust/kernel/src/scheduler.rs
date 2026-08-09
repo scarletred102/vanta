@@ -658,7 +658,7 @@ pub fn can_mutate_path(path: &str) -> bool {
 }
 
 pub fn spawn_current(process: Box<Process>) -> Result<u64, ()> {
-    const MAX_TASKS: usize = 8;
+    const MAX_TASKS: usize = 16;
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
     if scheduler.tasks.len() == MAX_TASKS {
@@ -690,7 +690,7 @@ pub fn spawn_with_stdio_current(
     stdout: u64,
     stderr: u64,
 ) -> Result<u64, ()> {
-    const MAX_TASKS: usize = 8;
+    const MAX_TASKS: usize = 16;
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
     if scheduler.tasks.len() == MAX_TASKS {

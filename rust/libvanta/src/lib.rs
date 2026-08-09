@@ -14,6 +14,8 @@ const VANTA_FILE_READ: u32 = 1;
 const VANTA_FILE_WRITE: u32 = 2;
 
 static mut ERRNO: i32 = 0;
+static mut ENVIRON: [*const u8; 2] = [core::ptr::null(); 2];
+static ENVIRONMENT_VALUE: &[u8] = b"VANTA_ABI_VERSION=0\0";
 static mut BOOTSTRAP_HEAP: [u8; BOOTSTRAP_HEAP_SIZE] = [0; BOOTSTRAP_HEAP_SIZE];
 static mut BOOTSTRAP_HEAP_OFFSET: usize = 0;
 
@@ -37,6 +39,30 @@ pub unsafe extern "C" fn _start() -> ! {
 #[no_mangle]
 pub extern "C" fn vanta_errno_location() -> *mut i32 {
     core::ptr::addr_of_mut!(ERRNO)
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_environ() -> *const *const u8 {
+    unsafe {
+        let environment = core::ptr::addr_of_mut!(ENVIRON);
+        if (*environment)[0].is_null() {
+            (*environment)[0] = ENVIRONMENT_VALUE.as_ptr();
+        }
+        (*environment).as_ptr()
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_getenv(name: *const u8, length: usize) -> *const u8 {
+    if name.is_null() || length != b"VANTA_ABI_VERSION".len() {
+        return core::ptr::null();
+    }
+    unsafe {
+        if core::slice::from_raw_parts(name, length) == b"VANTA_ABI_VERSION" {
+            return ENVIRONMENT_VALUE.as_ptr().add(length + 1);
+        }
+    }
+    core::ptr::null()
 }
 
 #[no_mangle]
@@ -67,6 +93,11 @@ pub extern "C" fn vanta_spawn(path: *const u8, length: usize) -> isize {
 #[no_mangle]
 pub extern "C" fn vanta_waitpid(pid: u64) -> isize {
     call(Syscall::WaitPid, [pid, 0, 0, 0])
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_exec(path: *const u8, length: usize) -> isize {
+    call(Syscall::ExecVe, [path as u64, length as u64, 0, 0])
 }
 
 #[no_mangle]

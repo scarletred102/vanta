@@ -47,12 +47,15 @@ typedef struct {
 #define VANTA_OPEN_APPEND 0x19
 
 int32_t *vanta_errno_location(void);
+const uint8_t *const *vanta_environ(void);
+const uint8_t *vanta_getenv(const uint8_t *name, size_t length);
 int64_t vanta_write(uint64_t fd, const uint8_t *buffer, size_t length);
 int64_t vanta_read(uint64_t fd, uint8_t *buffer, size_t length);
 int64_t vanta_open(const uint8_t *path, size_t length, uint64_t flags);
 int64_t vanta_close(uint64_t fd);
 int64_t vanta_spawn(const uint8_t *path, size_t length);
 int64_t vanta_waitpid(uint64_t pid);
+int64_t vanta_exec(const uint8_t *path, size_t length);
 int64_t vanta_get_abi_info(vanta_abi_info_t *info);
 int64_t vanta_dup(uint64_t fd);
 int64_t vanta_pipe(vanta_pipe_t *pipe);

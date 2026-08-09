@@ -86,6 +86,21 @@ fn build_sdk(root: &Path) -> Result<(), String> {
         output.join("dir_smoke.c"),
     )
     .map_err(|error| format!("SDK directory sample: {error}"))?;
+    fs::copy(
+        root.join("libvanta/examples/env_smoke.c"),
+        output.join("env_smoke.c"),
+    )
+    .map_err(|error| format!("SDK environment sample: {error}"))?;
+    fs::copy(
+        root.join("libvanta/examples/process_smoke.c"),
+        output.join("process_smoke.c"),
+    )
+    .map_err(|error| format!("SDK process sample: {error}"))?;
+    fs::copy(
+        root.join("libvanta/examples/exec_smoke.c"),
+        output.join("exec_smoke.c"),
+    )
+    .map_err(|error| format!("SDK exec sample: {error}"))?;
     fs::write(
         output.join("manifest.txt"),
         format!(
@@ -109,7 +124,15 @@ fn compile_c_sample(root: &Path) -> Result<(), String> {
         "stdio_smoke.o",
         "stdio-smoke-vanta.elf",
     )?;
-    compile_c_program(root, "dir_smoke.c", "dir_smoke.o", "dir-smoke-vanta.elf")
+    compile_c_program(root, "dir_smoke.c", "dir_smoke.o", "dir-smoke-vanta.elf")?;
+    compile_c_program(root, "env_smoke.c", "env_smoke.o", "env-smoke-vanta.elf")?;
+    compile_c_program(
+        root,
+        "process_smoke.c",
+        "process_smoke.o",
+        "process-smoke-vanta.elf",
+    )?;
+    compile_c_program(root, "exec_smoke.c", "exec_smoke.o", "exec-smoke-vanta.elf")
 }
 
 fn compile_c_program(
@@ -195,6 +218,9 @@ fn build_default_image() -> Result<(), String> {
     let c_sdk_smoke = read_file(root.join("target/sdk/sdk-smoke-vanta.elf"))?;
     let c_stdio_smoke = read_file(root.join("target/sdk/stdio-smoke-vanta.elf"))?;
     let c_dir_smoke = read_file(root.join("target/sdk/dir-smoke-vanta.elf"))?;
+    let c_env_smoke = read_file(root.join("target/sdk/env-smoke-vanta.elf"))?;
+    let c_process_smoke = read_file(root.join("target/sdk/process-smoke-vanta.elf"))?;
+    let c_exec_smoke = read_file(root.join("target/sdk/exec-smoke-vanta.elf"))?;
     let root_files = [
         RootFile {
             path: "/sbin/init",
@@ -311,6 +337,27 @@ fn build_default_image() -> Result<(), String> {
         RootFile {
             path: "/bin/c-dir-smoke",
             contents: &c_dir_smoke,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/c-env-smoke",
+            contents: &c_env_smoke,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/c-process-smoke",
+            contents: &c_process_smoke,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/c-exec-smoke",
+            contents: &c_exec_smoke,
             mode: 0o755,
             uid: 0,
             gid: 0,
