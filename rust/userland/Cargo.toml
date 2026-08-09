@@ -32,3 +32,7 @@ path = "src/bin/true.rs"
 [[bin]]
 name = "false"
 path = "src/bin/false.rs"
+
+[[bin]]
+name = "native-gate"
+path = "src/bin/native_gate.rs"

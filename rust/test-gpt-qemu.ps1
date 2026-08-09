@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateRange(5, 60)]
+    [ValidateRange(5, 120)]
     [int]$TimeoutSeconds = 45
 )
 
@@ -17,50 +17,75 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $image = (Resolve-Path .\target\vanta-gpt.img).Path
-Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
-$arguments = @(
-    "-drive", "if=pflash,format=raw,readonly=on,file=`"$ovmf`"",
-    "-drive", "file=`"$image`",if=none,format=raw,id=vd0",
-    "-device", "virtio-blk-pci,disable-modern=on,ioeventfd=off,drive=vd0",
-    "-serial", "file:$log",
-    "-smp", "2",
-    "-m", "256M",
-    "-no-reboot", "-no-shutdown", "-display", "none"
-)
-
-$process = Start-Process -FilePath $qemu -ArgumentList $arguments -PassThru -WindowStyle Hidden
-try {
-    $required = @(
-        "[storage] RedoxFS root mounted",
-        "[storage] RedoxFS persistence check: true",
-        "[proc] launching native /sbin/init",
-        "[native] terminal/filesystem acceptance passed",
-        "vanta native shell",
-        "hello from C on Vanta",
-        "libvanta SDK smoke passed",
-        "libvanta stdio smoke passed"
+function Invoke-GptBoot {
+    param(
+        [Parameter(Mandatory)] [string]$DiskImage,
+        [Parameter(Mandatory)] [string[]]$Required,
+        [Parameter(Mandatory)] [string]$Label
     )
-    $output = ""
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-Path -LiteralPath $log) {
-            $output = Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue
-            if ($null -eq $output) {
-                $output = ""
+
+    Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    $arguments = @(
+        "-drive", "if=pflash,format=raw,readonly=on,file=`"$ovmf`"",
+        "-drive", "file=`"$DiskImage`",if=none,format=raw,id=vd0",
+        "-device", "virtio-blk-pci,disable-modern=on,ioeventfd=off,drive=vd0",
+        "-serial", "file:$log",
+        "-smp", "2",
+        "-m", "256M",
+        "-no-reboot", "-no-shutdown", "-display", "none"
+    )
+    $process = Start-Process -FilePath $qemu -ArgumentList $arguments -PassThru -WindowStyle Hidden
+    try {
+        $output = ""
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while ((Get-Date) -lt $deadline) {
+            if (Test-Path -LiteralPath $log) {
+                $output = Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue
+                if ($null -eq $output) { $output = "" }
+                if (($Required | Where-Object { !$output.Contains($_) }).Count -eq 0) {
+                    Write-Host "[test] GPT $Label passed"
+                    return $output
+                }
             }
-            if (($required | Where-Object { !$output.Contains($_) }).Count -eq 0) {
-                Write-Host "[test] GPT native-init regression passed"
-                exit 0
-            }
+            if ($process.HasExited) { break }
+            Start-Sleep -Milliseconds 100
         }
-        if ($process.HasExited) {
-            break
+        throw "GPT $Label failed. Serial log:`n$output"
+    } finally {
+        if (!$process.HasExited) {
+            Stop-Process -Id $process.Id -Force
         }
-        Start-Sleep -Milliseconds 100
-    }
-    throw "GPT native-init regression failed. Serial log:`n$output"
-} finally {
-    if (!$process.HasExited) {
-        Stop-Process -Id $process.Id -Force
     }
 }
+
+$common = @(
+    "[storage] RedoxFS root mounted",
+    "[storage] RedoxFS persistence check: true",
+    "[proc] launching native /sbin/init",
+    "[native] acceptance: developer-gate ok",
+    "[native] terminal/filesystem acceptance passed",
+    "vanta native shell",
+    "hello from C on Vanta",
+    "libvanta SDK smoke passed",
+    "libvanta stdio smoke passed"
+)
+
+$first = Invoke-GptBoot -DiskImage $image -Label "first boot" -Required ($common + "[storage] RedoxFS reboot persistence marker: false")
+$second = Invoke-GptBoot -DiskImage $image -Label "reboot persistence" -Required ($common + "[storage] RedoxFS reboot persistence marker: true")
+
+$corruptRoot = Join-Path $env:TEMP "vanta-gpt-corrupt-root.img"
+Copy-Item -LiteralPath $image -Destination $corruptRoot -Force
+$corruptLength = (Get-Item -LiteralPath $corruptRoot).Length - (2 * 1024 * 1024)
+$stream = [IO.File]::Open($corruptRoot, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+try {
+    $stream.SetLength($corruptLength)
+} finally {
+    $stream.Dispose()
+}
+Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required @(
+    "[recovery] entering kernel recovery shell",
+    "[shell] entering main loop"
+) | Out-Null
+Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
+
+Write-Host "[test] GPT Gate A native developer OS acceptance passed"

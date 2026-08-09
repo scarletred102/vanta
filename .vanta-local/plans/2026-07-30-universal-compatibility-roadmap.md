@@ -1,6 +1,6 @@
 # Vanta Universal Compatibility Roadmap
 
-Status: active roadmap; native-terminal boot slice complete, Gate A hardening outstanding
+Status: active roadmap; Gate A native developer OS milestone complete; Track B pending
 Date: 2026-07-30  
 Scope: make Vanta a credible alternative platform for desktop, server, developer, and mobile workloads while preserving a Rust-first security boundary.
 
@@ -8,13 +8,12 @@ Scope: make Vanta a credible alternative platform for desktop, server, developer
 
 ### Reality check — 2026-08-10
 
-Vanta currently has a verified Rust/QEMU native-terminal prototype, not a
+Vanta currently has a verified Gate A Rust/QEMU native developer OS, not a
 universally compatible or production-ready operating system. The completed
-slice covers UEFI/Limine boot, SMP, GPT/RedoxFS mounting, native init and shell,
-real pipelines/redirection, persistence checks, network regressions, ABI v0,
-and a bounded static C SDK. The remaining Gate A proof is explicit non-root
-account behavior, unauthorized-operation rejection, GPT reboot persistence,
-and absent/corrupt-root recovery in the acceptance workflow.
+gate covers UEFI/Limine boot, SMP, GPT/RedoxFS mounting, root init with
+non-root developer children, native shell, real pipelines/redirection,
+authorized and forbidden file operations, reboot persistence, corrupt-root
+recovery, network regressions, ABI v0, and a bounded static C SDK.
 
 The compatibility tracks are mostly architectural plans today: `linuxd` is a
 translation contract without an ELF loader or syscall broker; service crates
@@ -57,8 +56,7 @@ verifies bounded `vanta_file_t` buffering, `putc`, bulk write, `getc`, EOF,
 flush, close, and removal. Environment, threading, and full `FILE`/relibc
 compatibility remain open.
 
-The scoped native-terminal boot milestone is complete. Gate A hardening and
-post-milestone work remain:
+Gate A is complete. Post-milestone work remains:
 
 - environment, directory, and full process portions of the C runtime; bounded
   buffered stdio, unbuffered stream wrappers, the first CRT entry, and bounded
@@ -376,10 +374,11 @@ Complete the remaining bundles 1–3 gaps from `2026-07-21-maximizing.md`: block
 
 Acceptance: Gate A passes from a generated GPT image, including unauthorized-write rejection and reboot verification.
 
-Status: the boot, shell, filesystem-mode, pipe, signal-default, and generated
-image portions are passing. Non-root account behavior, explicit unauthorized
-operation rejection, GPT reboot persistence, and absent/corrupt-root recovery
-still need a single end-to-end acceptance workflow.
+Status: complete on 2026-08-10. The generated GPT workflow passes first boot,
+reboot persistence on the same image, root-to-`vanta` child demotion,
+unauthorized `/etc` creation rejection, authorized `/home/vanta` file
+operations, and corrupt-root recovery into the kernel shell. Legacy, VirtIO,
+network, focused Rust, formatting, kernel, and userland regressions pass.
 
 ### 2. Ship the first external SDK
 

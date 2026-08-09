@@ -51,7 +51,8 @@ program during native acceptance. These are foundation deliverables, not
 completion of the full C runtime or Linux personality. The broader status and remaining gates are in
 [2026-07-30-universal-compatibility-roadmap.md](2026-07-30-universal-compatibility-roadmap.md).
 
-**Current state:** the scoped native-terminal boot slice is verified on `main`.
+**Current state:** the real Gate A native developer OS milestone is verified on
+`main` as of 2026-08-10.
 The GPT image boots RedoxFS, starts native `/sbin/init` and `/bin/vsh`, enforces
 developer ownership/modes, blocks pipe readers in the kernel until wakeup,
 executes real shell pipeline/redirection paths, and passes the native,
@@ -60,11 +61,13 @@ developer-platform release: the C runtime remains a bootstrap profile,
 `linuxd` is still a translation contract, and full POSIX signal handlers,
 process groups, `fork`, and dynamic runtime support remain later work.
 
-The broader Gate A definition is not fully closed yet. GPT acceptance still
-needs explicit non-root login/account behavior, unauthorized-operation tests,
-reboot persistence, and absent/corrupt-root recovery checks in one generated
-image workflow. The current result is therefore a strong native-terminal
-milestone, not a claim that the complete developer-OS release gate has passed.
+Gate A is now closed by one generated-image workflow: `/sbin/init` starts as
+root and demotes spawned developer programs to `vanta` (`1000:1000`), the
+developer gate rejects `/etc` creation while allowing `/home/vanta` file
+creation/write/removal, the same GPT image passes first boot and reboot
+persistence checks, and a truncated root image enters the kernel recovery
+shell without launching native tasks. Legacy, VirtIO, network, focused Rust,
+formatting, kernel, and userland checks also pass.
 
 Completed foundation work:
 
@@ -110,11 +113,10 @@ Completed foundation work:
   gates pass. Native syscall clients now declare the x86_64 syscall clobbers,
   while the kernel keeps the legacy and native register-return paths separate.
 
-The scoped Track A boot milestone is complete. The explicit remaining Gate A
-work is non-root account behavior, unauthorized-operation and reboot/recovery
-acceptance, full custom signal-handler delivery, process groups/job control,
-and copy-on-write `fork`. After that gate is closed, release work moves to
-`libvanta`/relibc expansion, the static C toolchain, and the Linux personality.
+Gate A is complete. The explicit remaining work is full custom signal-handler
+delivery, process groups/job control, and copy-on-write `fork`; release work
+now moves to `libvanta`/relibc expansion, the static C toolchain, and the Linux
+personality.
 
 ## Architecture and interface contract
 

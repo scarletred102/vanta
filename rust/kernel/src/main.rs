@@ -467,7 +467,7 @@ extern "C" fn bootstrap_main() -> ! {
     x86_64::instructions::interrupts::enable();
     kprintln!("[ok] pic + sti");
     serial_println!("[boot] interrupts enabled");
-    let gpt_root_mounted = run_virtio_self_check();
+    let (gpt_root_mounted, recovery_required) = run_virtio_self_check();
     serial_println!("[boot] initializing network");
     let network_info = match network::initialize() {
         Ok(info) => {
@@ -559,6 +559,10 @@ extern "C" fn bootstrap_main() -> ! {
         Err(error) => serial_println!("[proc] ELF load self-check failed: {:?}", error),
     }
 
+    if recovery_required {
+        serial_println!("[recovery] entering kernel recovery shell");
+    }
+
     if syscall_ready && gpt_root_mounted {
         match vfs::read_root("/sbin/init")
             .and_then(|image| process::load_elf(&image).map_err(|_| vfs::VfsError::InvalidFormat))
@@ -574,7 +578,7 @@ extern "C" fn bootstrap_main() -> ! {
         }
     }
 
-    if syscall_ready {
+    if syscall_ready && !recovery_required {
         if smp.online_aps > 0 {
             match (
                 process::load_elf(&elf::EXEC_ELF),
@@ -621,10 +625,11 @@ extern "C" fn bootstrap_main() -> ! {
     shell::run()
 }
 
-fn run_virtio_self_check() -> bool {
+fn run_virtio_self_check() -> (bool, bool) {
     match virtio::VirtioBlock::probe() {
         Ok(mut device) => {
             let sectors = device.sector_count();
+            let gpt_signature = storage::has_gpt_signature(&device);
             match storage::discover_vanta_root(&device) {
                 Ok(root) => {
                     serial_println!(
@@ -636,25 +641,35 @@ fn run_virtio_self_check() -> bool {
                         Ok(()) => {
                             serial_println!("[storage] RedoxFS root mounted");
                             let marker = b"vanta-redoxfs-persistent\n";
+                            let reboot_persisted =
+                                vfs::read_root("/etc/persistent").ok().as_deref() == Some(marker);
                             let persistence = vfs::write_root("/etc/persistent", marker).is_ok()
                                 && vfs::remount_root().is_ok()
                                 && vfs::read_root("/etc/persistent").ok().as_deref()
                                     == Some(marker);
+                            serial_println!(
+                                "[storage] RedoxFS reboot persistence marker: {}",
+                                reboot_persisted
+                            );
                             serial_println!("[storage] RedoxFS persistence check: {}", persistence);
-                            true
+                            (true, false)
                         }
                         Err(error) => {
                             serial_println!("[storage] RedoxFS root mount failed: {:?}", error);
-                            false
+                            (false, true)
                         }
                     };
                     serial_println!(
                         "[storage] virtio-blk ready: sectors={} write=false read=false equal=false root={}",
-                        sectors, mounted
+                        sectors, mounted.0
                     );
                     mounted
                 }
                 Err(_) => {
+                    if gpt_signature {
+                        serial_println!("[storage] GPT root discovery failed; recovery required");
+                        return (false, true);
+                    }
                     serial_println!("[storage] no Vanta GPT root; using legacy VantaFS fallback");
                     let mut written = [0u8; storage::SECTOR_SIZE];
                     written[..16].copy_from_slice(b"vanta-virtio-ok\n");
@@ -700,17 +715,17 @@ fn run_virtio_self_check() -> bool {
                         read_back == written,
                         root_ready
                     );
-                    false
+                    (false, false)
                 }
             }
         }
         Err(virtio::VirtioError::NotFound) => {
             serial_println!("[storage] no VirtIO block device; using RAM bootstrap disk");
-            false
+            (false, false)
         }
         Err(error) => {
             serial_println!("[storage] VirtIO block probe failed: {:?}", error);
-            false
+            (false, false)
         }
     }
 }

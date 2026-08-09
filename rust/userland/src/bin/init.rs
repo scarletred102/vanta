@@ -4,14 +4,28 @@
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     vanta_userland::write(1, b"vanta init: starting /bin/vsh\n");
-    if native_acceptance() {
+    let acceptance_ok = native_acceptance();
+    let gate = vanta_userland::spawn(b"/bin/native-gate");
+    let gate_ok = gate != u64::MAX && vanta_userland::wait(gate) == 0;
+    vanta_userland::write(
+        2,
+        if gate_ok {
+            b"[native] acceptance: developer-gate ok\n"
+        } else {
+            b"[native] acceptance: developer-gate failed\n"
+        },
+    );
+    if acceptance_ok && gate_ok {
         vanta_userland::write(1, b"[native] terminal/filesystem acceptance passed\n");
     } else {
         vanta_userland::write(2, b"[native] terminal/filesystem acceptance failed\n");
     }
-    let result = vanta_userland::exec(b"/bin/vsh");
-    vanta_userland::write(2, b"vanta init: could not exec /bin/vsh\n");
-    vanta_userland::exit(result)
+    let shell = vanta_userland::spawn(b"/bin/vsh");
+    if shell == u64::MAX {
+        vanta_userland::write(2, b"vanta init: could not spawn /bin/vsh\n");
+        vanta_userland::exit(1)
+    }
+    vanta_userland::exit(vanta_userland::wait(shell))
 }
 
 fn native_acceptance() -> bool {

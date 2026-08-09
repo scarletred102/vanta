@@ -298,7 +298,7 @@ unsafe fn start_on_current_cpu(processes: Vec<Box<Process>>, label: &str, native
             new_task(
                 allocate_pid(),
                 None,
-                Credentials::vanta(),
+                Credentials::root(),
                 process,
                 standard_descriptors(native_tty),
             )
@@ -665,7 +665,12 @@ pub fn spawn_current(process: Box<Process>) -> Result<u64, ()> {
         return Err(());
     }
     let parent_pid = scheduler.tasks[scheduler.current].pid;
-    let credentials = scheduler.tasks[scheduler.current].credentials;
+    let parent_credentials = scheduler.tasks[scheduler.current].credentials;
+    let credentials = if parent_credentials.is_root() {
+        Credentials::vanta()
+    } else {
+        parent_credentials
+    };
     let descriptors = scheduler.tasks[scheduler.current].descriptors.clone();
     let pid = allocate_pid();
     scheduler.tasks.push(new_task(
@@ -692,7 +697,12 @@ pub fn spawn_with_stdio_current(
         return Err(());
     }
     let parent_pid = scheduler.tasks[scheduler.current].pid;
-    let credentials = scheduler.tasks[scheduler.current].credentials;
+    let parent_credentials = scheduler.tasks[scheduler.current].credentials;
+    let credentials = if parent_credentials.is_root() {
+        Credentials::vanta()
+    } else {
+        parent_credentials
+    };
     let mut descriptors = scheduler.tasks[scheduler.current].descriptors.clone();
     for (target, source) in [(0usize, stdin), (1usize, stdout), (2usize, stderr)] {
         if source == u64::MAX {
