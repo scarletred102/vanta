@@ -29,6 +29,25 @@ network, and focused host/cross-target checks remain green.
 Full environment propagation/storage, broader process-runtime behavior, and
 `FILE`/relibc compatibility are not claimed by this change.
 
+### Native platform sprint foundation — 2026-08-10
+
+The sprint is now advancing the whole native-platform sequence instead of
+landing isolated SDK samples. The process stack constructs `argc`, `argv`, and
+`envp`; the freestanding CRT discovers real child environments while retaining
+the ABI bootstrap variable when no environment is supplied; and
+`vanta_spawn_with_args`/`vanta_spawn_with_env` exercise the native spawn path.
+
+`vanta-services` now contains bounded IPC frames, service lifecycle states,
+restart and crash containment, generation-bearing authority checks, revocation,
+and a bounded audit ring. `vanta-linuxd` now parses static x86_64 ELF load
+metadata, rejects `PT_INTERP`, and returns explicit native/process/unsupported
+broker decisions for Linux syscall requests.
+
+Host tests, SDK generation, GPT first/reboot/recovery acceptance, and serial
+legacy/VirtIO/network QEMU regressions pass after the environment-stack change.
+The next integrated work is kernel IPC transport, first restartable service
+processes, Linux personality trap routing, and static Linux QEMU samples.
+
 ### Immediate roadmap deliverables — 2026-07-30
 
 ### ABI v0 contract update — 2026-08-01

@@ -99,6 +99,14 @@ pub fn load_elf(bytes: &[u8]) -> Result<Process, ProcessError> {
 }
 
 pub fn load_elf_with_args(bytes: &[u8], args: &[&[u8]]) -> Result<Process, ProcessError> {
+    load_elf_with_args_and_env(bytes, args, &[])
+}
+
+pub fn load_elf_with_args_and_env(
+    bytes: &[u8],
+    args: &[&[u8]],
+    environment: &[&[u8]],
+) -> Result<Process, ProcessError> {
     let image = ElfImage::parse(bytes).map_err(ProcessError::Elf)?;
     let plans = plan_pages(image)?;
     let space = paging::create_address_space().map_err(ProcessError::Map)?;
@@ -164,13 +172,18 @@ pub fn load_elf_with_args(bytes: &[u8], args: &[&[u8]]) -> Result<Process, Proce
         });
     }
 
-    initialize_stack(&mut process, args)?;
+    initialize_stack(&mut process, args, environment)?;
     Ok(process)
 }
 
-fn initialize_stack(process: &mut Process, args: &[&[u8]]) -> Result<(), ProcessError> {
+fn initialize_stack(
+    process: &mut Process,
+    args: &[&[u8]],
+    environment: &[&[u8]],
+) -> Result<(), ProcessError> {
     let mut stack_pointer = USER_STACK_TOP;
     let mut argument_pointers = Vec::new();
+    let mut environment_pointers = Vec::new();
     for argument in args.iter().rev() {
         let size = argument
             .len()
@@ -183,11 +196,29 @@ fn initialize_stack(process: &mut Process, args: &[&[u8]]) -> Result<(), Process
         write_user_byte(process.space, stack_pointer + argument.len() as u64, 0)?;
         argument_pointers.push(stack_pointer);
     }
+    for value in environment.iter().rev() {
+        let size = value
+            .len()
+            .checked_add(1)
+            .ok_or(ProcessError::InvalidUserAddress)?;
+        stack_pointer = stack_pointer
+            .checked_sub(size as u64)
+            .ok_or(ProcessError::InvalidUserAddress)?;
+        write_user_bytes(process.space, stack_pointer, value)?;
+        write_user_byte(process.space, stack_pointer + value.len() as u64, 0)?;
+        environment_pointers.push(stack_pointer);
+    }
     stack_pointer &= !15;
     stack_pointer = stack_pointer
         .checked_sub(8)
         .ok_or(ProcessError::InvalidUserAddress)?;
     write_user_u64(process.space, stack_pointer, 0)?;
+    for pointer in environment_pointers.iter().rev() {
+        stack_pointer = stack_pointer
+            .checked_sub(8)
+            .ok_or(ProcessError::InvalidUserAddress)?;
+        write_user_u64(process.space, stack_pointer, *pointer)?;
+    }
     stack_pointer = stack_pointer
         .checked_sub(8)
         .ok_or(ProcessError::InvalidUserAddress)?;
@@ -198,6 +229,10 @@ fn initialize_stack(process: &mut Process, args: &[&[u8]]) -> Result<(), Process
             .ok_or(ProcessError::InvalidUserAddress)?;
         write_user_u64(process.space, stack_pointer, *pointer)?;
     }
+    stack_pointer = stack_pointer
+        .checked_sub(8)
+        .ok_or(ProcessError::InvalidUserAddress)?;
+    write_user_u64(process.space, stack_pointer, 0)?;
     stack_pointer = stack_pointer
         .checked_sub(8)
         .ok_or(ProcessError::InvalidUserAddress)?;

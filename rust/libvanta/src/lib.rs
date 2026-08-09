@@ -15,6 +15,7 @@ const VANTA_FILE_WRITE: u32 = 2;
 
 static mut ERRNO: i32 = 0;
 static mut ENVIRON: [*const u8; 2] = [core::ptr::null(); 2];
+static mut PROCESS_ENVIRON: *const *const u8 = core::ptr::null();
 static ENVIRONMENT_VALUE: &[u8] = b"VANTA_ABI_VERSION=0\0";
 static mut BOOTSTRAP_HEAP: [u8; BOOTSTRAP_HEAP_SIZE] = [0; BOOTSTRAP_HEAP_SIZE];
 static mut BOOTSTRAP_HEAP_OFFSET: usize = 0;
@@ -33,6 +34,7 @@ pub unsafe extern "C" fn _start() -> ! {
     asm!("mov {}, rsp", out(reg) stack, options(nostack, preserves_flags));
     let argc = *stack as i32;
     let argv = stack.add(1) as *const *const u8;
+    PROCESS_ENVIRON = argv.add(argc.max(0) as usize + 1);
     vanta_exit(main(argc, argv));
 }
 
@@ -44,6 +46,9 @@ pub extern "C" fn vanta_errno_location() -> *mut i32 {
 #[no_mangle]
 pub extern "C" fn vanta_environ() -> *const *const u8 {
     unsafe {
+        if !PROCESS_ENVIRON.is_null() && !(*PROCESS_ENVIRON).is_null() {
+            return PROCESS_ENVIRON;
+        }
         let environment = core::ptr::addr_of_mut!(ENVIRON);
         if (*environment)[0].is_null() {
             (*environment)[0] = ENVIRONMENT_VALUE.as_ptr();
@@ -58,6 +63,27 @@ pub extern "C" fn vanta_getenv(name: *const u8, length: usize) -> *const u8 {
         return core::ptr::null();
     }
     unsafe {
+        if !PROCESS_ENVIRON.is_null() {
+            let mut index = 0;
+            loop {
+                let value = *PROCESS_ENVIRON.add(index);
+                if value.is_null() {
+                    break;
+                }
+                let mut value_length = 0;
+                while *value.add(value_length) != 0 && value_length <= 256 {
+                    value_length += 1;
+                }
+                if value_length > length
+                    && *value.add(length) == b'='
+                    && core::slice::from_raw_parts(value, length)
+                        == core::slice::from_raw_parts(name, length)
+                {
+                    return value.add(length + 1);
+                }
+                index += 1;
+            }
+        }
         if core::slice::from_raw_parts(name, length) == b"VANTA_ABI_VERSION" {
             return ENVIRONMENT_VALUE.as_ptr().add(length + 1);
         }
@@ -88,6 +114,47 @@ pub extern "C" fn vanta_close(fd: u64) -> isize {
 #[no_mangle]
 pub extern "C" fn vanta_spawn(path: *const u8, length: usize) -> isize {
     call(Syscall::SpawnVe, [path as u64, length as u64, 0, 0])
+}
+
+#[repr(C)]
+pub struct VantaSpawnOptions {
+    pub stdin_fd: u64,
+    pub stdout_fd: u64,
+    pub stderr_fd: u64,
+    pub argv: *const *const u8,
+    pub argc: u64,
+    pub envp: *const *const u8,
+    pub envc: u64,
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_spawn_with_args(
+    path: *const u8,
+    length: usize,
+    options: *const VantaSpawnOptions,
+) -> isize {
+    if options.is_null() {
+        return -(VANTA_EINVAL as isize);
+    }
+    call(
+        Syscall::SpawnVe,
+        [path as u64, length as u64, options as u64, 1],
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn vanta_spawn_with_env(
+    path: *const u8,
+    length: usize,
+    options: *const VantaSpawnOptions,
+) -> isize {
+    if options.is_null() {
+        return -(VANTA_EINVAL as isize);
+    }
+    call(
+        Syscall::SpawnVe,
+        [path as u64, length as u64, options as u64, 2],
+    )
 }
 
 #[no_mangle]

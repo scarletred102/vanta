@@ -1,6 +1,7 @@
 # Vanta Universal Compatibility Roadmap
 
-Status: active roadmap; Gate A complete; Track B native SDK expansion in progress
+Status: active sprint; Gate A complete; native platform, service, and Linux
+personality foundations in progress
 Date: 2026-07-30  
 Scope: make Vanta a credible alternative platform for desktop, server, developer, and mobile workloads while preserving a Rust-first security boundary.
 
@@ -15,12 +16,12 @@ non-root developer children, native shell, real pipelines/redirection,
 authorized and forbidden file operations, reboot persistence, corrupt-root
 recovery, network regressions, ABI v0, and a bounded static C SDK.
 
-The compatibility tracks are mostly architectural plans today: `linuxd` is a
-translation contract without an ELF loader or syscall broker; service crates
-define headers without restartable services; and Tracks D-H have no product
-implementation. The immediate goal is therefore a dependable native terminal
-developer OS, followed by a tested static-Linux CLI personality, not broad
-desktop/Windows/Android compatibility yet.
+The compatibility tracks remain ordered, but the current sprint is landing the
+native platform foundations rather than leaving them as architecture only:
+`libvanta` now has real argv/envp process setup, `vanta-services` has bounded
+IPC and lifecycle behavior, and `linuxd` has static ELF metadata and an
+explicit broker decision path. Kernel transport, Linux QEMU binaries, and the
+later GUI/Windows/Android/VM tracks remain the next integration layers.
 
 ### ABI v0 contract update — 2026-08-01
 
@@ -412,8 +413,9 @@ Turn the existing RedoxFS adapter, process manager, network path, and device pat
 
 Acceptance: interfaces compile in host tests and a service failure is returned as an error rather than a kernel panic.
 
-Status: request/response headers exist, but no service process, IPC transport,
-restart, crash containment, revocation, or audit implementation exists yet.
+Status: bounded IPC frames, service lifecycle state, restart/crash containment,
+capability revocation, and audit ring are implemented and host-tested in
+`vanta-services`. Kernel channel transport and first service processes remain.
 
 ### 4. Linux static personality spike
 
@@ -421,8 +423,10 @@ Implement a separate `linuxd` harness that loads a static x86_64 ELF and transla
 
 Acceptance: static musl hello, cat, and ls run in QEMU; native ABI tests remain unchanged.
 
-Status: translation tables and rejection tests exist; the ELF personality
-loader, syscall trap broker, and QEMU Linux samples are not implemented.
+Status: static x86_64 ELF metadata parsing, `PT_INTERP` rejection, syscall
+translation, and an explicit broker decision contract are implemented and
+host-tested in `vanta-linuxd`. Kernel trap integration and QEMU Linux samples
+remain.
 
 ### 5. Compatibility scorecard and corpus
 

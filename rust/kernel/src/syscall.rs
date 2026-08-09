@@ -578,7 +578,11 @@ fn spawn_native_user(pointer: u64, length: u64, stdio_pointer: u64, with_args: u
     let Ok(path) = core::str::from_utf8(&path) else {
         return SYSCALL_ERROR;
     };
-    let stdio_length = if with_args == 1 { 40 } else { 24 };
+    let stdio_length = match with_args {
+        1 => 40,
+        2 => 56,
+        _ => 24,
+    };
     let Ok(stdio) = copy_from_user(stdio_pointer, stdio_length, false) else {
         return SYSCALL_ERROR;
     };
@@ -586,7 +590,8 @@ fn spawn_native_user(pointer: u64, length: u64, stdio_pointer: u64, with_args: u
         return SYSCALL_ERROR;
     };
     let mut arguments = Vec::new();
-    if with_args == 1 {
+    let mut environment = Vec::new();
+    if with_args == 1 || with_args == 2 {
         let argv_pointer = u64::from_ne_bytes(stdio[24..32].try_into().unwrap());
         let argc = u64::from_ne_bytes(stdio[32..40].try_into().unwrap()).min(8);
         for index in 0..argc {
@@ -599,8 +604,30 @@ fn spawn_native_user(pointer: u64, length: u64, stdio_pointer: u64, with_args: u
             };
             arguments.push(argument);
         }
+        if with_args == 2 {
+            let envp_pointer = u64::from_ne_bytes(stdio[40..48].try_into().unwrap());
+            let envc = u64::from_ne_bytes(stdio[48..56].try_into().unwrap()).min(16);
+            for index in 0..envc {
+                let Ok(pointer_bytes) = copy_from_user(envp_pointer + index * 8, 8, false) else {
+                    return SYSCALL_ERROR;
+                };
+                let pointer = u64::from_ne_bytes(pointer_bytes.try_into().unwrap());
+                let Ok(value) = copy_cstring(pointer, 256) else {
+                    return SYSCALL_ERROR;
+                };
+                environment.push(value);
+            }
+        }
     }
-    let Ok(process) = (if with_args == 1 {
+    let Ok(process) = (if with_args == 2 {
+        let argument_references = arguments.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let environment_references = environment.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        crate::process::load_elf_with_args_and_env(
+            &image,
+            &argument_references,
+            &environment_references,
+        )
+    } else if with_args == 1 {
         let references = arguments.iter().map(Vec::as_slice).collect::<Vec<_>>();
         crate::process::load_elf_with_args(&image, &references)
     } else {

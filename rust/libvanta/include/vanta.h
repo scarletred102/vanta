@@ -25,6 +25,16 @@ typedef struct {
 } vanta_stream_t;
 
 typedef struct {
+    uint64_t stdin_fd;
+    uint64_t stdout_fd;
+    uint64_t stderr_fd;
+    const uint8_t *const *argv;
+    uint64_t argc;
+    const uint8_t *const *envp;
+    uint64_t envc;
+} vanta_spawn_options_t;
+
+typedef struct {
     uint64_t fd;
     uint32_t buffer_pos;
     uint32_t buffer_len;
@@ -54,6 +64,10 @@ int64_t vanta_read(uint64_t fd, uint8_t *buffer, size_t length);
 int64_t vanta_open(const uint8_t *path, size_t length, uint64_t flags);
 int64_t vanta_close(uint64_t fd);
 int64_t vanta_spawn(const uint8_t *path, size_t length);
+int64_t vanta_spawn_with_args(const uint8_t *path, size_t length,
+                              const vanta_spawn_options_t *options);
+int64_t vanta_spawn_with_env(const uint8_t *path, size_t length,
+                             const vanta_spawn_options_t *options);
 int64_t vanta_waitpid(uint64_t pid);
 int64_t vanta_exec(const uint8_t *path, size_t length);
 int64_t vanta_get_abi_info(vanta_abi_info_t *info);

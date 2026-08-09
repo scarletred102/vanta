@@ -1,9 +1,14 @@
-# linuxd first spike
+# linuxd static Linux personality foundation
 
 This crate is the translation contract for the first Linux x86_64 static-ELF
-personality. It deliberately maps only the syscall families that the current
-Vanta ABI can represent and reports all other numbers as unsupported.
+personality. It parses static x86_64 `ET_EXEC`/`ET_DYN` images, rejects
+`PT_INTERP`, maps supported Linux syscall families to Vanta-owned syscall
+numbers, and reports all other numbers as unsupported.
 
-It is not yet a syscall-trap broker or a complete Linux process runtime. The
-next implementation step is to connect this table to a Linux-personality ELF
-loader and an explicit `linuxd` service request path.
+`StaticElf` is the loader metadata contract and `broker` is the explicit trap
+decision contract. The broker preserves the caller capability authority and
+never silently turns unsupported Linux syscalls into native operations.
+
+It is not yet a kernel trap endpoint or a complete Linux process runtime. The
+next integration step is to attach `LinuxSyscallRequest` to a Linux-personality
+process context and route decisions through the service IPC contract.
