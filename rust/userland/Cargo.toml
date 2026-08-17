@@ -36,3 +36,11 @@ path = "src/bin/false.rs"
 [[bin]]
 name = "native-gate"
 path = "src/bin/native_gate.rs"
+
+[[bin]]
+name = "procd"
+path = "src/bin/procd.rs"
+
+[[bin]]
+name = "service-test"
+path = "src/bin/service_test.rs"

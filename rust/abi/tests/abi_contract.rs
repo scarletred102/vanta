@@ -94,6 +94,10 @@ fn syscall_numbers_are_frozen() {
         (Syscall::Yield, 0x001C),
         (Syscall::Socket, 0x0020),
         (Syscall::Connect, 0x0021),
+        (Syscall::IpcPair, 0x0030),
+        (Syscall::IpcSend, 0x0031),
+        (Syscall::IpcRecv, 0x0032),
+        (Syscall::IpcRevoke, 0x0033),
     ];
 
     for (syscall, number) in vectors {

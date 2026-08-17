@@ -45,8 +45,13 @@ broker decisions for Linux syscall requests.
 
 Host tests, SDK generation, GPT first/reboot/recovery acceptance, and serial
 legacy/VirtIO/network QEMU regressions pass after the environment-stack change.
-The next integrated work is kernel IPC transport, first restartable service
-processes, Linux personality trap routing, and static Linux QEMU samples.
+The first kernel IPC/service vertical slice is now executable: bounded channel
+descriptors, inherited request/response endpoints, and revocation are wired
+through the native ABI; GPT init launches `/bin/procd`, which restarts a
+crashing `/bin/service-test` and emits audit markers without destabilizing the
+shell. The next integrated work is broader service extraction, persistent
+kernel audit storage, Linux personality trap routing, and static Linux QEMU
+samples.
 
 ### Immediate roadmap deliverables — 2026-07-30
 

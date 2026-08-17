@@ -5,6 +5,16 @@
 pub extern "C" fn _start() -> ! {
     vanta_userland::write(1, b"vanta init: starting /bin/vsh\n");
     let acceptance_ok = native_acceptance();
+    let procd = vanta_userland::spawn(b"/bin/procd");
+    let procd_ok = procd != u64::MAX && vanta_userland::wait(procd) == 0;
+    vanta_userland::write(
+        2,
+        if procd_ok {
+            b"[native] acceptance: procd-gate ok\n"
+        } else {
+            b"[native] acceptance: procd-gate failed\n"
+        },
+    );
     let gate = vanta_userland::spawn(b"/bin/native-gate");
     let gate_ok = gate != u64::MAX && vanta_userland::wait(gate) == 0;
     vanta_userland::write(
@@ -15,8 +25,9 @@ pub extern "C" fn _start() -> ! {
             b"[native] acceptance: developer-gate failed\n"
         },
     );
-    if acceptance_ok && gate_ok {
+    if acceptance_ok && gate_ok && procd_ok {
         vanta_userland::write(1, b"[native] terminal/filesystem acceptance passed\n");
+        vanta_userland::write(1, b"[native] Gate B IPC acceptance passed\n");
     } else {
         vanta_userland::write(2, b"[native] terminal/filesystem acceptance failed\n");
     }

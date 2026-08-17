@@ -34,3 +34,4 @@ __pycache__/
 *.pyc
 actions-runner/
 .worktrees/
+/starling/

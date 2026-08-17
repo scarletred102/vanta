@@ -189,8 +189,12 @@ rust/
 - Buffered `libvanta` C file objects over Vanta descriptors; the GPT
   `c-stdio-smoke` program exercises `putc`, bulk write, `getc`, EOF, flush,
   close, and file removal
-- Linux syscall translation and restartable-service contract crates as the
-  foundation for later compatibility personalities
+- Kernel-backed bounded IPC descriptors with inherited process endpoints,
+  revocation, and request/response filtering
+- A booted `/bin/procd` supervisor and `/bin/service-test` acceptance path that
+  proves crash detection, restart, audit markers, and authority revocation
+- Linux syscall translation and static-ELF metadata contracts as the foundation
+  for the later executable Linux personality
 
 ## TCP user ABI
 
@@ -221,9 +225,11 @@ tcp_port=18080
   DNS resolver; the QEMU DNS regression path itself is passing
 - `sigaction` currently supports default and ignore dispositions; custom user
   handler delivery and full POSIX process groups are not implemented
-- The native C runtime is only the bootstrap profile; environment, directories,
-  broader process runtime, and full `FILE`/relibc compatibility remain Track B
-  work
+- The native C runtime is only the bootstrap profile; broader process runtime,
+  full `FILE`/relibc compatibility, and threading remain Track B work
+- Kernel IPC is now executable for bounded native service traffic, but service
+  extraction beyond the supervisor test service and live kernel audit storage
+  remain open
 - ABI v1 negotiation is not implemented; the current native query reports the
   frozen ABI v0 contract and rejects no unknown mandatory bits implicitly
 - No mouse, no windowing — terminal only

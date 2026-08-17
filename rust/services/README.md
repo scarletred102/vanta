@@ -5,10 +5,11 @@ services and the kernel service supervisor. It defines fixed-size IPC frames,
 service lifecycle states, capability authority on every request, restart and
 crash accounting, capability revocation, and a bounded audit ring.
 
-The supervisor is a no-std, host-testable reference implementation. The next
-integration step is to transport `IpcFrame` through kernel channels and launch
-the first `vfsd`/`procd` service processes without changing the frozen native
-ABI.
+The no-std supervisor remains a host-testable policy reference. The kernel now
+also exposes bounded IPC channel descriptors, and the GPT image boots a real
+`procd` plus a crash/restart service. The current acceptance proves request /
+response, restart after a nonzero service exit, audit markers, and authority
+revocation without changing the frozen native ABI.
 
 ```powershell
 cargo test -p vanta-services

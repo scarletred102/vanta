@@ -71,7 +71,9 @@ $common = @(
     "libvanta directory smoke passed",
     "libvanta environment smoke passed",
     "libvanta process smoke passed",
-    "[native] acceptance: c-exec-smoke ok"
+    "[native] acceptance: c-exec-smoke ok",
+    "[native] acceptance: procd-gate ok",
+    "[native] Gate B IPC acceptance passed"
 )
 
 $first = Invoke-GptBoot -DiskImage $image -Label "first boot" -Required ($common + "[storage] RedoxFS reboot persistence marker: false")
@@ -92,4 +94,4 @@ Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required 
 ) | Out-Null
 Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
 
-Write-Host "[test] GPT Gate A native developer OS acceptance passed"
+Write-Host "[test] GPT Gate A and Gate B native acceptance passed"

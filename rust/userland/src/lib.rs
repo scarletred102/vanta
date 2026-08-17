@@ -22,6 +22,10 @@ const SYS_MKDIR: u64 = 0x000a;
 const SYS_UNLINK: u64 = 0x000b;
 const SYS_RENAME: u64 = 0x000c;
 const SYS_GET_ABI_INFO: u64 = Syscall::GetAbiInfo.number() as u64;
+const SYS_IPC_PAIR: u64 = Syscall::IpcPair.number() as u64;
+const SYS_IPC_SEND: u64 = Syscall::IpcSend.number() as u64;
+const SYS_IPC_RECV: u64 = Syscall::IpcRecv.number() as u64;
+const SYS_IPC_REVOKE: u64 = Syscall::IpcRevoke.number() as u64;
 pub const READ_WOULD_BLOCK: u64 = u64::MAX - 5;
 
 pub fn write(fd: u64, bytes: &[u8]) -> u64 {
@@ -92,6 +96,36 @@ pub fn abi_info(info: &mut AbiInfo) -> u64 {
         core::mem::size_of::<AbiInfo>() as u64,
         0,
     )
+}
+
+pub fn ipc_pair() -> Option<(u64, u64)> {
+    let mut fds = [0_u32; 2];
+    if syscall(SYS_IPC_PAIR, fds.as_mut_ptr() as u64, 0, 0) == u64::MAX - 1 {
+        return None;
+    }
+    Some((fds[0] as u64, fds[1] as u64))
+}
+
+pub fn ipc_send(fd: u64, message: &[u8]) -> u64 {
+    syscall(
+        SYS_IPC_SEND,
+        fd,
+        message.as_ptr() as u64,
+        message.len() as u64,
+    )
+}
+
+pub fn ipc_recv(fd: u64, buffer: &mut [u8]) -> u64 {
+    syscall(
+        SYS_IPC_RECV,
+        fd,
+        buffer.as_mut_ptr() as u64,
+        buffer.len() as u64,
+    )
+}
+
+pub fn ipc_revoke(fd: u64) -> u64 {
+    syscall(SYS_IPC_REVOKE, fd, 0, 0)
 }
 
 pub fn spawn(path: &[u8]) -> u64 {

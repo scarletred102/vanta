@@ -35,6 +35,10 @@ pub const SYS_KILL: u64 = Syscall::Kill.number() as u64;
 pub const SYS_SIGACTION: u64 = Syscall::SigAction.number() as u64;
 pub const SYS_SPAWN: u64 = Syscall::SpawnVe.number() as u64;
 pub const SYS_GET_ABI_INFO: u64 = Syscall::GetAbiInfo.number() as u64;
+pub const SYS_IPC_PAIR: u64 = Syscall::IpcPair.number() as u64;
+pub const SYS_IPC_SEND: u64 = Syscall::IpcSend.number() as u64;
+pub const SYS_IPC_RECV: u64 = Syscall::IpcRecv.number() as u64;
+pub const SYS_IPC_REVOKE: u64 = Syscall::IpcRevoke.number() as u64;
 const SYSCALL_RETURN_EXIT: u64 = u64::MAX;
 const SYSCALL_RETURN_YIELD: u64 = u64::MAX - 2;
 const SYSCALL_RETURN_WAIT: u64 = u64::MAX - 3;
@@ -311,6 +315,12 @@ extern "C" fn vanta_syscall_dispatch(
         SYS_KILL => kill_user(arg1, arg2),
         SYS_SIGACTION => sigaction_user(arg1, arg2, arg3),
         SYS_GET_ABI_INFO => abi_info_user(arg1, arg2),
+        SYS_IPC_PAIR => ipc_pair_user(arg1),
+        SYS_IPC_SEND => ipc_send_user(arg1, arg2, arg3),
+        SYS_IPC_RECV => ipc_recv_user(arg1, arg2, arg3),
+        SYS_IPC_REVOKE => crate::scheduler::ipc_revoke_current(arg1)
+            .map(|()| 0)
+            .unwrap_or(SYSCALL_ERROR),
         SYS_EXEC => SYSCALL_RETURN_EXEC,
         SYS_YIELD => SYSCALL_RETURN_YIELD,
         SYS_GETPID => crate::scheduler::current_pid(),
@@ -443,6 +453,48 @@ fn close_user(descriptor: u64) -> u64 {
     crate::scheduler::close_current(descriptor)
         .map(|()| 0)
         .unwrap_or(SYSCALL_ERROR)
+}
+
+fn ipc_pair_user(pointer: u64) -> u64 {
+    let Ok((sender, receiver)) = crate::scheduler::open_ipc_pair_current() else {
+        return SYSCALL_ERROR;
+    };
+    let bytes = [
+        (sender as u32).to_ne_bytes(),
+        (receiver as u32).to_ne_bytes(),
+    ];
+    if copy_to_user(pointer, &bytes.concat()).is_err() {
+        return SYSCALL_ERROR;
+    }
+    0
+}
+
+fn ipc_send_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
+    if length > 256 {
+        return SYSCALL_ERROR;
+    }
+    let Ok(bytes) = copy_from_user(pointer, length, false) else {
+        return SYSCALL_ERROR;
+    };
+    crate::scheduler::ipc_send_current(descriptor, &bytes)
+        .map(|()| length)
+        .unwrap_or(SYSCALL_ERROR)
+}
+
+fn ipc_recv_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
+    if length > 256 {
+        return SYSCALL_ERROR;
+    }
+    let result = match crate::scheduler::ipc_receive_current(descriptor) {
+        Ok(result) => result,
+        Err(()) => return SYSCALL_ERROR,
+    };
+    let Some(bytes) = result else { return 0 };
+    let bytes = &bytes[..bytes.len().min(length as usize)];
+    if copy_to_user(pointer, bytes).is_err() {
+        return SYSCALL_ERROR;
+    }
+    bytes.len() as u64
 }
 
 fn seek_user(descriptor: u64, offset: i64, whence: u64) -> u64 {

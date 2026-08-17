@@ -136,6 +136,10 @@ pub enum Syscall {
     Yield = 0x001C,
     Socket = 0x0020,
     Connect = 0x0021,
+    IpcPair = 0x0030,
+    IpcSend = 0x0031,
+    IpcRecv = 0x0032,
+    IpcRevoke = 0x0033,
 }
 
 impl Syscall {

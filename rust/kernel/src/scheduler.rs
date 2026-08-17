@@ -110,6 +110,7 @@ enum DescriptorResource {
     PipeRead(Arc<Mutex<PipeReader>>),
     PipeWrite(Arc<Mutex<PipeWriter>>),
     Socket(Arc<Mutex<OpenSocket>>),
+    Ipc(Arc<Mutex<IpcEndpoint>>),
 }
 
 struct OpenFile {
@@ -127,6 +128,25 @@ struct OpenDirectory {
 struct OpenSocket {
     connection: Option<crate::network::TcpConnection>,
 }
+
+struct IpcEndpoint {
+    state: Arc<Mutex<IpcState>>,
+    send: bool,
+}
+
+struct IpcState {
+    id: u64,
+    queue: Vec<IpcMessage>,
+    revoked: bool,
+}
+
+struct IpcMessage {
+    sender_pid: u64,
+    bytes: Vec<u8>,
+}
+
+const IPC_QUEUE_LIMIT: usize = 8;
+const IPC_MESSAGE_LIMIT: usize = 256;
 
 struct Pipe;
 
@@ -214,6 +234,7 @@ struct Scheduler {
 static SCHEDULERS: [Mutex<Option<Scheduler>>; MAX_CPUS] = [const { Mutex::new(None) }; MAX_CPUS];
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 static NEXT_PIPE_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_IPC_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_CAPABILITY_SLOT: AtomicU64 = AtomicU64::new(1);
 static TTY_CTRL_HELD: AtomicBool = AtomicBool::new(false);
 // The terminal has one foreground process for now.  This is deliberately
@@ -1076,6 +1097,107 @@ pub fn open_pipe_current() -> Result<(u64, u64), ()> {
     Ok((reader, writer))
 }
 
+pub fn open_ipc_pair_current() -> Result<(u64, u64), ()> {
+    let state = Arc::new(Mutex::new(IpcState {
+        id: NEXT_IPC_ID.fetch_add(1, Ordering::Relaxed),
+        queue: Vec::new(),
+        revoked: false,
+    }));
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let descriptors = &mut scheduler.tasks[scheduler.current].descriptors;
+    let sender = install_descriptor(
+        descriptors,
+        FileDescriptor {
+            capability: allocate_capability(),
+            rights: Rights::WRITE | Rights::TRANSFER,
+            resource: DescriptorResource::Ipc(Arc::new(Mutex::new(IpcEndpoint {
+                state: Arc::clone(&state),
+                send: true,
+            }))),
+        },
+    )?;
+    let receiver = install_descriptor(
+        descriptors,
+        FileDescriptor {
+            capability: allocate_capability(),
+            rights: Rights::READ | Rights::TRANSFER,
+            resource: DescriptorResource::Ipc(Arc::new(Mutex::new(IpcEndpoint {
+                state,
+                send: false,
+            }))),
+        },
+    )?;
+    Ok((sender, receiver))
+}
+
+pub fn ipc_send_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
+    let descriptor = current_descriptor(descriptor)?;
+    if !descriptor.rights.contains(Rights::WRITE) || bytes.len() > IPC_MESSAGE_LIMIT {
+        return Err(());
+    }
+    let DescriptorResource::Ipc(endpoint) = descriptor.resource else {
+        return Err(());
+    };
+    let endpoint = endpoint.lock();
+    if !endpoint.send {
+        return Err(());
+    }
+    let mut state = endpoint.state.lock();
+    if state.revoked || state.queue.len() >= IPC_QUEUE_LIMIT {
+        return Err(());
+    }
+    state.queue.push(IpcMessage {
+        sender_pid: current_pid(),
+        bytes: bytes.to_vec(),
+    });
+    crate::serial_println!("[ipc] send id={} queue={}", state.id, state.queue.len());
+    Ok(())
+}
+
+pub fn ipc_receive_current(descriptor: u64) -> Result<Option<Vec<u8>>, ()> {
+    let descriptor = current_descriptor(descriptor)?;
+    if !descriptor.rights.contains(Rights::READ) {
+        return Err(());
+    }
+    let DescriptorResource::Ipc(endpoint) = descriptor.resource else {
+        return Err(());
+    };
+    let endpoint = endpoint.lock();
+    if endpoint.send {
+        return Err(());
+    }
+    let mut state = endpoint.state.lock();
+    if state.revoked {
+        return Err(());
+    }
+    let position = state
+        .queue
+        .iter()
+        .position(|message| message.sender_pid != current_pid());
+    let message = if let Some(position) = position {
+        Some(state.queue.remove(position).bytes)
+    } else {
+        None
+    };
+    if message.is_some() {
+        crate::serial_println!("[ipc] recv id={} queue={}", state.id, state.queue.len());
+    }
+    Ok(message)
+}
+
+pub fn ipc_revoke_current(descriptor: u64) -> Result<(), ()> {
+    let descriptor = current_descriptor(descriptor)?;
+    if !descriptor.rights.contains(Rights::TRANSFER) {
+        return Err(());
+    }
+    let DescriptorResource::Ipc(endpoint) = descriptor.resource else {
+        return Err(());
+    };
+    endpoint.lock().state.lock().revoked = true;
+    Ok(())
+}
+
 pub fn seek_current(descriptor: u64, offset: i64, whence: u64) -> Result<u64, ()> {
     let descriptor = current_descriptor(descriptor)?;
     if !descriptor.rights.contains(Rights::READ) {
@@ -1173,6 +1295,7 @@ pub fn read_current(descriptor: u64, length: usize) -> Result<Vec<u8>, ()> {
         DescriptorResource::Tty => Ok(read_tty(length)),
         DescriptorResource::PipeRead(reader) => Ok(reader.lock().read(length)),
         DescriptorResource::PipeWrite(_) => Err(()),
+        DescriptorResource::Ipc(_) => Err(()),
     }
 }
 
@@ -1184,6 +1307,11 @@ pub fn read_would_block(descriptor: u64) -> bool {
         DescriptorResource::PipeRead(reader) => {
             let state = reader.lock();
             state.state.lock().bytes.is_empty() && state.state.lock().writer_open
+        }
+        DescriptorResource::Ipc(endpoint) => {
+            let state = endpoint.lock();
+            let waiting = !state.state.lock().revoked;
+            waiting
         }
         _ => false,
     }
@@ -1214,7 +1342,8 @@ pub fn close_current(descriptor: u64) -> Result<(), ()> {
         | DescriptorResource::Directory(_)
         | DescriptorResource::Serial
         | DescriptorResource::Tty
-        | DescriptorResource::PipeRead(_) => {}
+        | DescriptorResource::PipeRead(_)
+        | DescriptorResource::Ipc(_) => {}
     }
     Ok(())
 }
@@ -1257,6 +1386,7 @@ pub fn write_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
             crate::vfs::write_root_as(&file.path, &file.contents, &credentials).map_err(|_| ())
         }
         DescriptorResource::Directory(_) | DescriptorResource::PipeRead(_) => Err(()),
+        DescriptorResource::Ipc(_) => Err(()),
     }
 }
 

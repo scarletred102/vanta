@@ -9,6 +9,7 @@ numbers, and reports all other numbers as unsupported.
 decision contract. The broker preserves the caller capability authority and
 never silently turns unsupported Linux syscalls into native operations.
 
-It is not yet a kernel trap endpoint or a complete Linux process runtime. The
-next integration step is to attach `LinuxSyscallRequest` to a Linux-personality
-process context and route decisions through the service IPC contract.
+It is not yet a kernel Linux trap endpoint or a complete Linux process runtime.
+The next integration step is to attach `LinuxSyscallRequest` to a
+Linux-personality process context and route decisions through the now-booted
+kernel IPC service path.

@@ -414,8 +414,11 @@ Turn the existing RedoxFS adapter, process manager, network path, and device pat
 Acceptance: interfaces compile in host tests and a service failure is returned as an error rather than a kernel panic.
 
 Status: bounded IPC frames, service lifecycle state, restart/crash containment,
-capability revocation, and audit ring are implemented and host-tested in
-`vanta-services`. Kernel channel transport and first service processes remain.
+capability revocation, and audit ring are implemented in `vanta-services`.
+Kernel channel descriptors and a booted `procd`/`service-test` QEMU acceptance
+path now prove request/response, restart after crash, audit markers, and
+revocation. Broader service extraction and persistent kernel audit storage
+remain.
 
 ### 4. Linux static personality spike
 
