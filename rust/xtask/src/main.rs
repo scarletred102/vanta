@@ -210,8 +210,7 @@ fn build_default_image() -> Result<(), String> {
     let native_gate = read_file(root.join("target/x86_64-unknown-none/release/native-gate"))?;
     let procd = read_file(root.join("target/x86_64-unknown-none/release/procd"))?;
     let service_test = read_file(root.join("target/x86_64-unknown-none/release/service-test"))?;
-    let service_test_v2 =
-        read_file(root.join("target/x86_64-unknown-none/release/service-test-v2"))?;
+    let vfsd = read_file(root.join("target/x86_64-unknown-none/release/vfsd"))?;
     let ls = read_file(root.join("target/x86_64-unknown-none/release/ls"))?;
     let mkdir = read_file(root.join("target/x86_64-unknown-none/release/mkdir"))?;
     let rm = read_file(root.join("target/x86_64-unknown-none/release/rm"))?;
@@ -290,8 +289,8 @@ fn build_default_image() -> Result<(), String> {
             gid: 0,
         },
         RootFile {
-            path: "/bin/service-test-v2",
-            contents: &service_test_v2,
+            path: "/bin/vfsd",
+            contents: &vfsd,
             mode: 0o755,
             uid: 0,
             gid: 0,
@@ -405,18 +404,29 @@ fn build_default_image() -> Result<(), String> {
     let output = root.join("target/vanta-gpt.img");
     fs::write(&output, image.bytes()).map_err(|error| format!("{}: {error}", output.display()))?;
     let manifest = output.with_extension("manifest");
-    fs::write(
-        &manifest,
-        format!(
-            "image-builder=vanta-image@{}\nkernel-revision={}\nredoxfs-revision={}\nroot-start-lba={}\nroot-sectors={}\n",
-            env!("CARGO_PKG_VERSION"),
-            git_revision(&root),
-            REDOXFS_REVISION,
-            image.root_partition().start_lba,
-            image.root_partition().sector_count(),
-        ),
-    )
-    .map_err(|error| format!("{}: {error}", manifest.display()))?;
+    let mut manifest_text = format!(
+        "manifest-format=1\nimage-builder=vanta-image@{}\nkernel-revision={}\nredoxfs-revision={}\nroot-start-lba={}\nroot-sectors={}\nimage-size={}\nimage-hash-fnv1a64={:016x}\n",
+        env!("CARGO_PKG_VERSION"),
+        git_revision(&root),
+        REDOXFS_REVISION,
+        image.root_partition().start_lba,
+        image.root_partition().sector_count(),
+        image.bytes().len(),
+        deterministic_hash(image.bytes()),
+    );
+    for file in &root_files {
+        manifest_text.push_str(&format!(
+            "root-file={}\tsize={}\tmode={:o}\tuid={}\tgid={}\thash-fnv1a64={:016x}\n",
+            file.path,
+            file.contents.len(),
+            file.mode,
+            file.uid,
+            file.gid,
+            deterministic_hash(file.contents),
+        ));
+    }
+    fs::write(&manifest, manifest_text)
+        .map_err(|error| format!("{}: {error}", manifest.display()))?;
 
     println!("[image] {}", output.display());
     println!("[image] {}", manifest.display());
@@ -514,4 +524,13 @@ fn git_revision(root: &Path) -> String {
         .map(|revision| revision.trim().to_owned())
         .filter(|revision| !revision.is_empty())
         .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn deterministic_hash(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }

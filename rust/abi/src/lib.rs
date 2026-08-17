@@ -231,6 +231,14 @@ impl CapabilityId {
         (self.0 >> 32) as u32
     }
 
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+
     pub const fn is_invalid(self) -> bool {
         self.0 == 0
     }

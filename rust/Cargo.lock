@@ -954,6 +954,7 @@ name = "vanta-userland"
 version = "0.1.0"
 dependencies = [
  "vanta-abi",
+ "vanta-services",
 ]
 
 [[package]]

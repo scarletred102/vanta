@@ -17,6 +17,19 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $image = (Resolve-Path .\target\vanta-gpt.img).Path
+$manifest = (Resolve-Path .\target\vanta-gpt.manifest).Path
+$imageHash = (Get-FileHash -LiteralPath $image -Algorithm SHA256).Hash
+$manifestHash = (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash
+cargo xtask image
+if ($LASTEXITCODE -ne 0) {
+    throw "GPT reproducibility rebuild failed with exit code $LASTEXITCODE"
+}
+if ((Get-FileHash -LiteralPath $image -Algorithm SHA256).Hash -ne $imageHash -or
+    (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash -ne $manifestHash) {
+    throw "GPT image reproducibility mismatch"
+}
+Write-Host "[test] GPT image reproducibility passed"
+
 function Invoke-GptBoot {
     param(
         [Parameter(Mandatory)] [string]$DiskImage,
@@ -72,8 +85,11 @@ $common = @(
     "libvanta environment smoke passed",
     "libvanta process smoke passed",
     "[native] acceptance: c-exec-smoke ok",
-    "[procd] audit service registered",
-    "[procd] audit service upgraded",
+    "[procd] service registered",
+    "[procd] service upgraded",
+    "[procd] service discovered",
+    "[procd] vfs backend passed",
+    "[procd] service authority revoked",
     "[native] acceptance: procd-gate ok",
     "[native] acceptance: audit-persistence ok",
     "[native] Gate B IPC acceptance passed"

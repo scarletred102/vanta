@@ -45,7 +45,10 @@ Build the persistent GPT disk artifact:
 cargo xtask image
 ```
 
-This writes `target/vanta-gpt.img` and `target/vanta-gpt.manifest`. The image
+This writes `target/vanta-gpt.img` and `target/vanta-gpt.manifest`. The
+manifest records the pinned source/toolchain inputs plus deterministic image
+and per-root-artifact hashes, and the test gate rebuilds it to verify
+reproducibility. The image
 has a FAT ESP containing Limine and the kernel plus a bounded, formatted
 RedoxFS root partition. The kernel mounts that RedoxFS partition as the
 writable root and enters the serial recovery path if it is absent or invalid.
@@ -191,9 +194,12 @@ rust/
   close, and file removal
 - Kernel-backed bounded IPC descriptors with inherited process endpoints,
   blocking wakeups, revocation, and request/response filtering
-- A booted `/bin/procd` supervisor and service acceptance path that proves crash
-  detection, restart/upgrade, blocking IPC, durable audit records, and authority
+- A booted `/bin/procd` supervisor and `/bin/vfsd` service acceptance path that
+  proves crash detection, restart/upgrade, framed registration/discovery, a
+  service-owned VFS read, blocking IPC, durable audit records, and authority
   revocation
+- Reproducible GPT image builds with source/toolchain revisions, image hashes,
+  and deterministic per-root-artifact metadata in `target/vanta-gpt.manifest`
 - Linux syscall translation and static-ELF metadata contracts as the foundation
   for the later executable Linux personality
 
@@ -228,9 +234,9 @@ tcp_port=18080
   handler delivery and full POSIX process groups are not implemented
 - The native C runtime is only the bootstrap profile; broader process runtime,
   full `FILE`/relibc compatibility, and threading remain Track B work
-- Kernel IPC is now executable for bounded native service traffic, but service
-  extraction beyond the supervisor test service, live kernel audit authority,
-  and package rollback/signing remain open
+- Kernel IPC and the first framed service authority path are executable, but
+  broader backend extraction, live kernel audit authority, package signing,
+  and rollback remain open
 - ABI v1 negotiation is not implemented; the current native query reports the
   frozen ABI v0 contract and rejects no unknown mandatory bits implicitly
 - No mouse, no windowing — terminal only

@@ -8,6 +8,7 @@ path = "src/lib.rs"
 
 [dependencies]
 vanta-abi = { path = "../abi" }
+vanta-services = { path = "../services" }
 
 [[bin]]
 name = "init"
@@ -45,6 +46,7 @@ path = "src/bin/procd.rs"
 name = "service-test"
 path = "src/bin/service_test.rs"
 
+
 [[bin]]
-name = "service-test-v2"
-path = "src/bin/service_test_v2.rs"
+name = "vfsd"
+path = "src/bin/vfsd.rs"

@@ -5,6 +5,10 @@ use vanta_abi::CapabilityId;
 pub const MAX_IPC_PAYLOAD: usize = 256;
 pub const MAX_SERVICES: usize = 16;
 pub const MAX_AUDIT_EVENTS: usize = 64;
+const REQUEST_PAYLOAD_OFFSET: usize = 23;
+const RESPONSE_PAYLOAD_OFFSET: usize = 34;
+pub const MAX_REQUEST_PAYLOAD: usize = MAX_IPC_PAYLOAD - REQUEST_PAYLOAD_OFFSET;
+pub const MAX_RESPONSE_PAYLOAD: usize = MAX_IPC_PAYLOAD - RESPONSE_PAYLOAD_OFFSET;
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,6 +35,229 @@ pub enum ServiceError {
     ServiceUnavailable = 6,
     QueueFull = 7,
     Revoked = 8,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServiceOperation {
+    Register = 1,
+    Discover = 2,
+    Healthy = 3,
+    Crash = 4,
+    ReadFile = 5,
+}
+
+impl ServiceOperation {
+    fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Register),
+            2 => Some(Self::Discover),
+            3 => Some(Self::Healthy),
+            4 => Some(Self::Crash),
+            5 => Some(Self::ReadFile),
+            _ => None,
+        }
+    }
+}
+
+impl ServiceId {
+    fn from_raw(raw: u16) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Process),
+            2 => Some(Self::Vfs),
+            3 => Some(Self::Network),
+            4 => Some(Self::Device),
+            5 => Some(Self::Display),
+            6 => Some(Self::Audio),
+            7 => Some(Self::Input),
+            8 => Some(Self::Package),
+            9 => Some(Self::Security),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ServiceRequest {
+    pub operation: ServiceOperation,
+    pub service: ServiceId,
+    pub request_id: u64,
+    pub authority: CapabilityId,
+    pub payload: [u8; MAX_REQUEST_PAYLOAD],
+    pub payload_len: u16,
+}
+
+impl ServiceRequest {
+    pub const fn empty(
+        operation: ServiceOperation,
+        service: ServiceId,
+        request_id: u64,
+        authority: CapabilityId,
+    ) -> Self {
+        Self {
+            operation,
+            service,
+            request_id,
+            authority,
+            payload: [0; MAX_REQUEST_PAYLOAD],
+            payload_len: 0,
+        }
+    }
+
+    pub fn with_payload(mut self, payload: &[u8]) -> Result<Self, ServiceError> {
+        if payload.len() > MAX_REQUEST_PAYLOAD {
+            return Err(ServiceError::InvalidRequest);
+        }
+        self.payload[..payload.len()].copy_from_slice(payload);
+        self.payload_len = payload.len() as u16;
+        Ok(self)
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        &self.payload[..self.payload_len as usize]
+    }
+
+    pub fn encode(&self) -> [u8; MAX_IPC_PAYLOAD] {
+        let mut bytes = [0; MAX_IPC_PAYLOAD];
+        bytes[0] = b'V';
+        bytes[1] = b'S';
+        bytes[2] = self.operation as u8;
+        bytes[3..5].copy_from_slice(&(self.service as u16).to_le_bytes());
+        bytes[5..13].copy_from_slice(&self.request_id.to_le_bytes());
+        bytes[13..21].copy_from_slice(&self.authority.raw().to_le_bytes());
+        bytes[21..23].copy_from_slice(&self.payload_len.to_le_bytes());
+        bytes[REQUEST_PAYLOAD_OFFSET..REQUEST_PAYLOAD_OFFSET + self.payload_len as usize]
+            .copy_from_slice(self.payload());
+        bytes
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, ServiceError> {
+        if bytes.len() != MAX_IPC_PAYLOAD || bytes[0..2] != [b'V', b'S'] {
+            return Err(ServiceError::InvalidRequest);
+        }
+        let payload_len = u16::from_le_bytes([bytes[21], bytes[22]]) as usize;
+        if payload_len > MAX_REQUEST_PAYLOAD {
+            return Err(ServiceError::InvalidRequest);
+        }
+        let mut payload = [0; MAX_REQUEST_PAYLOAD];
+        payload[..payload_len]
+            .copy_from_slice(&bytes[REQUEST_PAYLOAD_OFFSET..REQUEST_PAYLOAD_OFFSET + payload_len]);
+        Ok(Self {
+            operation: ServiceOperation::from_raw(bytes[2]).ok_or(ServiceError::InvalidRequest)?,
+            service: ServiceId::from_raw(u16::from_le_bytes([bytes[3], bytes[4]]))
+                .ok_or(ServiceError::InvalidRequest)?,
+            request_id: u64::from_le_bytes(bytes[5..13].try_into().unwrap()),
+            authority: CapabilityId::from_raw(u64::from_le_bytes(
+                bytes[13..21].try_into().unwrap(),
+            )),
+            payload,
+            payload_len: payload_len as u16,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ServiceResponse {
+    pub request_id: u64,
+    pub service: ServiceId,
+    pub generation: u64,
+    pub authority: CapabilityId,
+    pub result: i32,
+    pub payload: [u8; MAX_RESPONSE_PAYLOAD],
+    pub payload_len: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ServiceEndpoint {
+    pub service: ServiceId,
+    pub generation: u64,
+    pub authority: CapabilityId,
+}
+
+impl ServiceResponse {
+    pub const fn success(
+        request_id: u64,
+        service: ServiceId,
+        generation: u64,
+        authority: CapabilityId,
+    ) -> Self {
+        Self {
+            request_id,
+            service,
+            generation,
+            authority,
+            result: 0,
+            payload: [0; MAX_RESPONSE_PAYLOAD],
+            payload_len: 0,
+        }
+    }
+
+    pub const fn error(request_id: u64, service: ServiceId, error: ServiceError) -> Self {
+        Self {
+            request_id,
+            service,
+            generation: 0,
+            authority: CapabilityId::INVALID,
+            result: -(error as i32),
+            payload: [0; MAX_RESPONSE_PAYLOAD],
+            payload_len: 0,
+        }
+    }
+
+    pub fn with_payload(mut self, payload: &[u8]) -> Result<Self, ServiceError> {
+        if payload.len() > MAX_RESPONSE_PAYLOAD {
+            return Err(ServiceError::InvalidRequest);
+        }
+        self.payload[..payload.len()].copy_from_slice(payload);
+        self.payload_len = payload.len() as u16;
+        Ok(self)
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        &self.payload[..self.payload_len as usize]
+    }
+
+    pub fn encode(&self) -> [u8; MAX_IPC_PAYLOAD] {
+        let mut bytes = [0; MAX_IPC_PAYLOAD];
+        bytes[0] = b'V';
+        bytes[1] = b'R';
+        bytes[2..6].copy_from_slice(&self.result.to_le_bytes());
+        bytes[6..14].copy_from_slice(&self.request_id.to_le_bytes());
+        bytes[14..16].copy_from_slice(&(self.service as u16).to_le_bytes());
+        bytes[16..24].copy_from_slice(&self.generation.to_le_bytes());
+        bytes[24..32].copy_from_slice(&self.authority.raw().to_le_bytes());
+        bytes[32..34].copy_from_slice(&self.payload_len.to_le_bytes());
+        bytes[RESPONSE_PAYLOAD_OFFSET..RESPONSE_PAYLOAD_OFFSET + self.payload_len as usize]
+            .copy_from_slice(self.payload());
+        bytes
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, ServiceError> {
+        if bytes.len() != MAX_IPC_PAYLOAD || bytes[0..2] != [b'V', b'R'] {
+            return Err(ServiceError::InvalidRequest);
+        }
+        let payload_len = u16::from_le_bytes([bytes[32], bytes[33]]) as usize;
+        if payload_len > MAX_RESPONSE_PAYLOAD {
+            return Err(ServiceError::InvalidRequest);
+        }
+        let mut payload = [0; MAX_RESPONSE_PAYLOAD];
+        payload[..payload_len].copy_from_slice(
+            &bytes[RESPONSE_PAYLOAD_OFFSET..RESPONSE_PAYLOAD_OFFSET + payload_len],
+        );
+        Ok(Self {
+            request_id: u64::from_le_bytes(bytes[6..14].try_into().unwrap()),
+            service: ServiceId::from_raw(u16::from_le_bytes([bytes[14], bytes[15]]))
+                .ok_or(ServiceError::InvalidRequest)?,
+            generation: u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            authority: CapabilityId::from_raw(u64::from_le_bytes(
+                bytes[24..32].try_into().unwrap(),
+            )),
+            result: i32::from_le_bytes(bytes[2..6].try_into().unwrap()),
+            payload,
+            payload_len: payload_len as u16,
+        })
+    }
 }
 
 #[repr(C)]
@@ -133,6 +360,7 @@ pub struct AuditEvent {
 struct ServiceSlot {
     id: ServiceId,
     authority: CapabilityId,
+    generation: u64,
     state: ServiceState,
     restart_count: u32,
 }
@@ -166,6 +394,7 @@ impl ServiceSupervisor {
         self.slots[index] = Some(ServiceSlot {
             id,
             authority,
+            generation: 1,
             state: ServiceState::Registered,
             restart_count: 0,
         });
@@ -247,6 +476,29 @@ impl ServiceSupervisor {
 
     pub fn restart_count(&self, id: ServiceId) -> Option<u32> {
         self.find(id).map(|slot| slot.restart_count)
+    }
+
+    pub fn discover(&self, id: ServiceId) -> Result<ServiceEndpoint, ServiceError> {
+        let slot = self.find(id).ok_or(ServiceError::NotFound)?;
+        if slot.state == ServiceState::Revoked {
+            return Err(ServiceError::Revoked);
+        }
+        Ok(ServiceEndpoint {
+            service: slot.id,
+            generation: slot.generation,
+            authority: slot.authority,
+        })
+    }
+
+    pub fn upgrade(&mut self, id: ServiceId, authority: CapabilityId) -> Result<(), ServiceError> {
+        let slot = self.slot_mut(id)?;
+        if slot.state == ServiceState::Revoked {
+            return Err(ServiceError::Revoked);
+        }
+        slot.authority = authority;
+        slot.generation = slot.generation.saturating_add(1);
+        slot.state = ServiceState::Running;
+        Ok(())
     }
 
     pub fn audit_events(&self) -> impl Iterator<Item = AuditEvent> + '_ {
@@ -351,6 +603,40 @@ mod tests {
         assert_eq!(
             supervisor.dispatch(&frame).result,
             -(ServiceError::Revoked as i32)
+        );
+    }
+
+    #[test]
+    fn wire_frames_round_trip_identity_and_payload() {
+        let authority = authority();
+        let request =
+            ServiceRequest::empty(ServiceOperation::Register, ServiceId::Vfs, 41, authority)
+                .with_payload(b"vfsd")
+                .unwrap();
+        assert_eq!(ServiceRequest::decode(&request.encode()), Ok(request));
+
+        let response = ServiceResponse::success(41, ServiceId::Vfs, 2, authority)
+            .with_payload(b"discovered")
+            .unwrap();
+        assert_eq!(ServiceResponse::decode(&response.encode()), Ok(response));
+    }
+
+    #[test]
+    fn discovery_changes_generation_on_upgrade_and_rejects_revoke() {
+        let old = authority();
+        let new = CapabilityId::from_parts(4, 10);
+        let mut supervisor = ServiceSupervisor::new();
+        supervisor.register(ServiceId::Vfs, old).unwrap();
+        assert_eq!(supervisor.discover(ServiceId::Vfs).unwrap().generation, 1);
+        supervisor.start(ServiceId::Vfs).unwrap();
+        supervisor.upgrade(ServiceId::Vfs, new).unwrap();
+        let endpoint = supervisor.discover(ServiceId::Vfs).unwrap();
+        assert_eq!(endpoint.generation, 2);
+        assert_eq!(endpoint.authority, new);
+        supervisor.revoke(ServiceId::Vfs).unwrap();
+        assert_eq!(
+            supervisor.discover(ServiceId::Vfs),
+            Err(ServiceError::Revoked)
         );
     }
 }

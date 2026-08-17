@@ -48,8 +48,11 @@ legacy/VirtIO/network QEMU regressions pass after the environment-stack change.
 The first kernel IPC/service vertical slice is now executable: bounded channel
 descriptors, inherited request/response endpoints, blocking wakeups, upgrade,
 and revocation are wired through the native ABI; GPT init launches `/bin/procd`,
-which contains a crashing service, upgrades it, and persists audit records
-without destabilizing the shell. The next integrated work is broader service
+which exchanges framed registration/discovery records, contains a crashing
+service, upgrades it to `/bin/vfsd`, serves a real `/etc/config` read, and
+persists audit records without destabilizing the shell. GPT image
+reproducibility is now checked with source/toolchain metadata and deterministic
+artifact hashes. The next integrated work is broader filesystem authority
 extraction, kernel-owned audit authority, package rollback/signing, Linux
 personality trap routing, and static Linux QEMU samples.
 
