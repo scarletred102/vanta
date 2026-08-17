@@ -49,13 +49,13 @@ The first kernel IPC/service vertical slice is now executable: bounded channel
 descriptors, inherited request/response endpoints, blocking wakeups, upgrade,
 and revocation are wired through the native ABI; GPT init launches `/bin/procd`,
 which exchanges framed registration/discovery records, contains a crashing
-service, upgrades it to `/bin/vfsd`, serves a real `/etc/config` read, and
-rejects the stale pre-upgrade authority, and persists audit records without
-destabilizing the shell. GPT image
+service, upgrades it to `/bin/vfsd`, serves a real `/etc/config` read, rejects
+the stale pre-upgrade authority, and routes durable audit events through
+`/bin/auditd` without destabilizing the shell. GPT image
 reproducibility is now checked with source/toolchain metadata and deterministic
 artifact hashes. The next integrated work is broader filesystem authority
-extraction, kernel-owned audit authority, package rollback/signing, Linux
-personality trap routing, and static Linux QEMU samples.
+extraction, package rollback/signing, Linux personality trap routing, and
+static Linux QEMU samples.
 
 ### Immediate roadmap deliverables — 2026-07-30
 

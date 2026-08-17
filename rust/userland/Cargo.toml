@@ -50,3 +50,7 @@ path = "src/bin/service_test.rs"
 [[bin]]
 name = "vfsd"
 path = "src/bin/vfsd.rs"
+
+[[bin]]
+name = "auditd"
+path = "src/bin/auditd.rs"

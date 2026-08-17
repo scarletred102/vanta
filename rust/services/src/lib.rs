@@ -45,6 +45,8 @@ pub enum ServiceOperation {
     Healthy = 3,
     Crash = 4,
     ReadFile = 5,
+    Audit = 6,
+    Shutdown = 7,
 }
 
 impl ServiceOperation {
@@ -55,6 +57,8 @@ impl ServiceOperation {
             3 => Some(Self::Healthy),
             4 => Some(Self::Crash),
             5 => Some(Self::ReadFile),
+            6 => Some(Self::Audit),
+            7 => Some(Self::Shutdown),
             _ => None,
         }
     }

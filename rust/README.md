@@ -194,9 +194,9 @@ rust/
   close, and file removal
 - Kernel-backed bounded IPC descriptors with inherited process endpoints,
   blocking wakeups, revocation, and request/response filtering
-- A booted `/bin/procd` supervisor and `/bin/vfsd` service acceptance path that
-  proves crash detection, restart/upgrade, framed registration/discovery, a
-  service-owned VFS read, blocking IPC, durable audit records, and authority
+- A booted `/bin/procd`, `/bin/auditd`, and `/bin/vfsd` service acceptance path
+  that proves crash detection, restart/upgrade, framed registration/discovery,
+  a service-owned VFS read, blocking IPC, durable audit records, and authority
   revocation
 - Reproducible GPT image builds with source/toolchain revisions, image hashes,
   and deterministic per-root-artifact metadata in `target/vanta-gpt.manifest`

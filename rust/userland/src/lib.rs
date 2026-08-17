@@ -27,6 +27,7 @@ const SYS_IPC_SEND: u64 = Syscall::IpcSend.number() as u64;
 const SYS_IPC_RECV: u64 = Syscall::IpcRecv.number() as u64;
 const SYS_IPC_REVOKE: u64 = Syscall::IpcRevoke.number() as u64;
 pub const READ_WOULD_BLOCK: u64 = u64::MAX - 5;
+pub const WAIT_WOULD_BLOCK: u64 = u64::MAX - 3;
 const IPC_WOULD_BLOCK: u64 = READ_WOULD_BLOCK;
 
 pub fn write(fd: u64, bytes: &[u8]) -> u64 {
@@ -212,6 +213,16 @@ pub fn close(fd: u64) -> u64 {
 
 pub fn wait(pid: u64) -> u64 {
     syscall(SYS_WAITPID, pid, 0, 0)
+}
+
+pub fn wait_blocking(pid: u64) -> u64 {
+    loop {
+        let result = wait(pid);
+        if result != WAIT_WOULD_BLOCK {
+            return result;
+        }
+        yield_now();
+    }
 }
 
 pub fn kill(pid: u64, signal: u64) -> u64 {

@@ -417,11 +417,12 @@ Status: bounded IPC frames, service lifecycle state, restart/crash containment,
 capability revocation, and audit ring are implemented in `vanta-services`.
 Kernel channel descriptors and a booted `procd`/service QEMU acceptance path
 now prove fixed-size framed registration/discovery, blocking request/response,
-restart/upgrade after crash, a real `/bin/vfsd` file request, filesystem audit
-persistence across reboot, stale-authority rejection, and revocation. The generated GPT artifact now
+restart/upgrade after crash, a real `/bin/vfsd` file request, framed audit
+drain through `/bin/auditd`, filesystem persistence across reboot,
+stale-authority rejection, and revocation. The generated GPT artifact now
 carries deterministic image and per-root-file hashes. Broader filesystem
-authority extraction, kernel-owned audit authority, package rollback/signing,
-and additional service backends remain.
+authority extraction, package rollback/signing, and additional service backends
+remain.
 
 ### 4. Linux static personality spike
 

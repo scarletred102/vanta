@@ -211,6 +211,7 @@ fn build_default_image() -> Result<(), String> {
     let procd = read_file(root.join("target/x86_64-unknown-none/release/procd"))?;
     let service_test = read_file(root.join("target/x86_64-unknown-none/release/service-test"))?;
     let vfsd = read_file(root.join("target/x86_64-unknown-none/release/vfsd"))?;
+    let auditd = read_file(root.join("target/x86_64-unknown-none/release/auditd"))?;
     let ls = read_file(root.join("target/x86_64-unknown-none/release/ls"))?;
     let mkdir = read_file(root.join("target/x86_64-unknown-none/release/mkdir"))?;
     let rm = read_file(root.join("target/x86_64-unknown-none/release/rm"))?;
@@ -291,6 +292,13 @@ fn build_default_image() -> Result<(), String> {
         RootFile {
             path: "/bin/vfsd",
             contents: &vfsd,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/auditd",
+            contents: &auditd,
             mode: 0o755,
             uid: 0,
             gid: 0,
