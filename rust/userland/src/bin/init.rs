@@ -15,6 +15,15 @@ pub extern "C" fn _start() -> ! {
             b"[native] acceptance: procd-gate failed\n"
         },
     );
+    let audit_ok = audit_persistence();
+    vanta_userland::write(
+        2,
+        if audit_ok {
+            b"[native] acceptance: audit-persistence ok\n"
+        } else {
+            b"[native] acceptance: audit-persistence failed\n"
+        },
+    );
     let gate = vanta_userland::spawn(b"/bin/native-gate");
     let gate_ok = gate != u64::MAX && vanta_userland::wait(gate) == 0;
     vanta_userland::write(
@@ -25,7 +34,7 @@ pub extern "C" fn _start() -> ! {
             b"[native] acceptance: developer-gate failed\n"
         },
     );
-    if acceptance_ok && gate_ok && procd_ok {
+    if acceptance_ok && gate_ok && procd_ok && audit_ok {
         vanta_userland::write(1, b"[native] terminal/filesystem acceptance passed\n");
         vanta_userland::write(1, b"[native] Gate B IPC acceptance passed\n");
     } else {
@@ -37,6 +46,36 @@ pub extern "C" fn _start() -> ! {
         vanta_userland::exit(1)
     }
     vanta_userland::exit(vanta_userland::wait(shell))
+}
+
+fn audit_persistence() -> bool {
+    let fd = vanta_userland::open(b"/home/vanta/service-audit.log", vanta_userland::OPEN_READ);
+    if fd == u64::MAX - 1 {
+        return false;
+    }
+    let mut bytes = [0_u8; 128];
+    let count = vanta_userland::read(fd, &mut bytes);
+    vanta_userland::close(fd);
+    count > 0
+        && contains(&bytes[..count as usize], b"registered\n")
+        && contains(&bytes[..count as usize], b"crashed\n")
+        && contains(&bytes[..count as usize], b"upgraded\n")
+        && contains(&bytes[..count as usize], b"revoked\n")
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return needle.is_empty();
+    }
+    let limit = haystack.len() - needle.len();
+    let mut offset = 0;
+    while offset <= limit {
+        if &haystack[offset..offset + needle.len()] == needle {
+            return true;
+        }
+        offset += 1;
+    }
+    false
 }
 
 fn native_acceptance() -> bool {

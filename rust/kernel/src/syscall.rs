@@ -489,7 +489,10 @@ fn ipc_recv_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
         Ok(result) => result,
         Err(()) => return SYSCALL_ERROR,
     };
-    let Some(bytes) = result else { return 0 };
+    let Some(bytes) = result else {
+        current_cpu_local().block_descriptor = descriptor;
+        return SYSCALL_WOULD_BLOCK;
+    };
     let bytes = &bytes[..bytes.len().min(length as usize)];
     if copy_to_user(pointer, bytes).is_err() {
         return SYSCALL_ERROR;

@@ -27,6 +27,7 @@ const SYS_IPC_SEND: u64 = Syscall::IpcSend.number() as u64;
 const SYS_IPC_RECV: u64 = Syscall::IpcRecv.number() as u64;
 const SYS_IPC_REVOKE: u64 = Syscall::IpcRevoke.number() as u64;
 pub const READ_WOULD_BLOCK: u64 = u64::MAX - 5;
+const IPC_WOULD_BLOCK: u64 = READ_WOULD_BLOCK;
 
 pub fn write(fd: u64, bytes: &[u8]) -> u64 {
     syscall(SYS_WRITE, fd, bytes.as_ptr() as u64, bytes.len() as u64)
@@ -116,12 +117,18 @@ pub fn ipc_send(fd: u64, message: &[u8]) -> u64 {
 }
 
 pub fn ipc_recv(fd: u64, buffer: &mut [u8]) -> u64 {
-    syscall(
-        SYS_IPC_RECV,
-        fd,
-        buffer.as_mut_ptr() as u64,
-        buffer.len() as u64,
-    )
+    loop {
+        let result = syscall(
+            SYS_IPC_RECV,
+            fd,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+        );
+        if result != IPC_WOULD_BLOCK {
+            return result;
+        }
+        yield_now();
+    }
 }
 
 pub fn ipc_revoke(fd: u64) -> u64 {

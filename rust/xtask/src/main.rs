@@ -210,6 +210,8 @@ fn build_default_image() -> Result<(), String> {
     let native_gate = read_file(root.join("target/x86_64-unknown-none/release/native-gate"))?;
     let procd = read_file(root.join("target/x86_64-unknown-none/release/procd"))?;
     let service_test = read_file(root.join("target/x86_64-unknown-none/release/service-test"))?;
+    let service_test_v2 =
+        read_file(root.join("target/x86_64-unknown-none/release/service-test-v2"))?;
     let ls = read_file(root.join("target/x86_64-unknown-none/release/ls"))?;
     let mkdir = read_file(root.join("target/x86_64-unknown-none/release/mkdir"))?;
     let rm = read_file(root.join("target/x86_64-unknown-none/release/rm"))?;
@@ -283,6 +285,13 @@ fn build_default_image() -> Result<(), String> {
         RootFile {
             path: "/bin/service-test",
             contents: &service_test,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/service-test-v2",
+            contents: &service_test_v2,
             mode: 0o755,
             uid: 0,
             gid: 0,

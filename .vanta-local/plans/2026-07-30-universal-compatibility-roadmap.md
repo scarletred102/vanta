@@ -415,10 +415,10 @@ Acceptance: interfaces compile in host tests and a service failure is returned a
 
 Status: bounded IPC frames, service lifecycle state, restart/crash containment,
 capability revocation, and audit ring are implemented in `vanta-services`.
-Kernel channel descriptors and a booted `procd`/`service-test` QEMU acceptance
-path now prove request/response, restart after crash, audit markers, and
-revocation. Broader service extraction and persistent kernel audit storage
-remain.
+Kernel channel descriptors and a booted `procd`/service QEMU acceptance path
+now prove blocking request/response, restart/upgrade after crash, filesystem
+audit persistence across reboot, and revocation. Broader service extraction,
+kernel-owned audit authority, and package rollback/signing remain.
 
 ### 4. Linux static personality spike
 

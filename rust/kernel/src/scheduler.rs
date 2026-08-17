@@ -807,6 +807,7 @@ pub fn pipe_wait_key(descriptor: u64) -> Option<u64> {
     let descriptor = current_descriptor(descriptor).ok()?;
     match descriptor.resource {
         DescriptorResource::PipeRead(reader) => Some(reader.lock().state.lock().id),
+        DescriptorResource::Ipc(endpoint) => Some(endpoint.lock().state.lock().id),
         _ => None,
     }
 }
@@ -1147,11 +1148,16 @@ pub fn ipc_send_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
     if state.revoked || state.queue.len() >= IPC_QUEUE_LIMIT {
         return Err(());
     }
+    let id = state.id;
     state.queue.push(IpcMessage {
         sender_pid: current_pid(),
         bytes: bytes.to_vec(),
     });
-    crate::serial_println!("[ipc] send id={} queue={}", state.id, state.queue.len());
+    crate::serial_println!("[ipc] send id={} queue={}", id, state.queue.len());
+    let queue_id = state.id;
+    drop(state);
+    drop(endpoint);
+    wake_pipe_waiters(queue_id);
     Ok(())
 }
 
@@ -1194,7 +1200,13 @@ pub fn ipc_revoke_current(descriptor: u64) -> Result<(), ()> {
     let DescriptorResource::Ipc(endpoint) = descriptor.resource else {
         return Err(());
     };
-    endpoint.lock().state.lock().revoked = true;
+    let id = {
+        let endpoint = endpoint.lock();
+        let mut state = endpoint.state.lock();
+        state.revoked = true;
+        state.id
+    };
+    wake_pipe_waiters(id);
     Ok(())
 }
 
@@ -1309,9 +1321,13 @@ pub fn read_would_block(descriptor: u64) -> bool {
             state.state.lock().bytes.is_empty() && state.state.lock().writer_open
         }
         DescriptorResource::Ipc(endpoint) => {
-            let state = endpoint.lock();
-            let waiting = !state.state.lock().revoked;
-            waiting
+            let endpoint = endpoint.lock();
+            let state = endpoint.state.lock();
+            !state.revoked
+                && !state
+                    .queue
+                    .iter()
+                    .any(|message| message.sender_pid != current_pid())
         }
         _ => false,
     }

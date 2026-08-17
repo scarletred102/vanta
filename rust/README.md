@@ -190,9 +190,10 @@ rust/
   `c-stdio-smoke` program exercises `putc`, bulk write, `getc`, EOF, flush,
   close, and file removal
 - Kernel-backed bounded IPC descriptors with inherited process endpoints,
-  revocation, and request/response filtering
-- A booted `/bin/procd` supervisor and `/bin/service-test` acceptance path that
-  proves crash detection, restart, audit markers, and authority revocation
+  blocking wakeups, revocation, and request/response filtering
+- A booted `/bin/procd` supervisor and service acceptance path that proves crash
+  detection, restart/upgrade, blocking IPC, durable audit records, and authority
+  revocation
 - Linux syscall translation and static-ELF metadata contracts as the foundation
   for the later executable Linux personality
 
@@ -228,8 +229,8 @@ tcp_port=18080
 - The native C runtime is only the bootstrap profile; broader process runtime,
   full `FILE`/relibc compatibility, and threading remain Track B work
 - Kernel IPC is now executable for bounded native service traffic, but service
-  extraction beyond the supervisor test service and live kernel audit storage
-  remain open
+  extraction beyond the supervisor test service, live kernel audit authority,
+  and package rollback/signing remain open
 - ABI v1 negotiation is not implemented; the current native query reports the
   frozen ABI v0 contract and rejects no unknown mandatory bits implicitly
 - No mouse, no windowing — terminal only

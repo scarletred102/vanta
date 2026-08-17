@@ -44,3 +44,7 @@ path = "src/bin/procd.rs"
 [[bin]]
 name = "service-test"
 path = "src/bin/service_test.rs"
+
+[[bin]]
+name = "service-test-v2"
+path = "src/bin/service_test_v2.rs"

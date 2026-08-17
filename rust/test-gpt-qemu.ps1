@@ -73,7 +73,9 @@ $common = @(
     "libvanta process smoke passed",
     "[native] acceptance: c-exec-smoke ok",
     "[procd] audit service registered",
+    "[procd] audit service upgraded",
     "[native] acceptance: procd-gate ok",
+    "[native] acceptance: audit-persistence ok",
     "[native] Gate B IPC acceptance passed"
 )
 
