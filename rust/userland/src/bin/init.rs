@@ -62,6 +62,7 @@ fn audit_persistence() -> bool {
         && contains(&bytes[..count as usize], b"upgraded\n")
         && contains(&bytes[..count as usize], b"discovered\n")
         && contains(&bytes[..count as usize], b"backend-read\n")
+        && contains(&bytes[..count as usize], b"stale-revoked\n")
         && contains(&bytes[..count as usize], b"revoked\n")
 }
 

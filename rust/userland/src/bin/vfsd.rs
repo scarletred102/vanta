@@ -19,8 +19,20 @@ pub extern "C" fn _start() -> ! {
         let Ok(request) = ServiceRequest::decode(&bytes) else {
             vanta_userland::exit(2)
         };
-        if request.service != ServiceId::Vfs || request.authority != AUTHORITY {
+        if request.service != ServiceId::Vfs {
             vanta_userland::exit(3)
+        }
+        if request.authority != AUTHORITY {
+            let encoded = ServiceResponse::error(
+                request.request_id,
+                ServiceId::Vfs,
+                vanta_services::ServiceError::Revoked,
+            )
+            .encode();
+            if vanta_userland::ipc_send(SEND_FD, &encoded) == u64::MAX - 1 {
+                vanta_userland::exit(5)
+            }
+            continue;
         }
         let response = match request.operation {
             ServiceOperation::Register => response(request.request_id, 2, b"registered"),

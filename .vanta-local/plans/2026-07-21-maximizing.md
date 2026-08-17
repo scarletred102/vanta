@@ -50,7 +50,8 @@ descriptors, inherited request/response endpoints, blocking wakeups, upgrade,
 and revocation are wired through the native ABI; GPT init launches `/bin/procd`,
 which exchanges framed registration/discovery records, contains a crashing
 service, upgrades it to `/bin/vfsd`, serves a real `/etc/config` read, and
-persists audit records without destabilizing the shell. GPT image
+rejects the stale pre-upgrade authority, and persists audit records without
+destabilizing the shell. GPT image
 reproducibility is now checked with source/toolchain metadata and deterministic
 artifact hashes. The next integrated work is broader filesystem authority
 extraction, kernel-owned audit authority, package rollback/signing, Linux

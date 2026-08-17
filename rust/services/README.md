@@ -14,6 +14,8 @@ nonzero service exit, framed registration/discovery, a VFS read through the
 service, filesystem-backed audit persistence across reboot, and authority
 revocation without changing the frozen native ABI. The QEMU service flow now
 exchanges these framed records rather than ad-hoc command strings.
+It also sends a stale pre-upgrade authority to `vfsd` and requires an explicit
+`Revoked` response before accepting the new-generation file request.
 
 ```powershell
 cargo test -p vanta-services

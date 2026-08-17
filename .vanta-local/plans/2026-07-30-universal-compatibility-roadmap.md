@@ -418,7 +418,7 @@ capability revocation, and audit ring are implemented in `vanta-services`.
 Kernel channel descriptors and a booted `procd`/service QEMU acceptance path
 now prove fixed-size framed registration/discovery, blocking request/response,
 restart/upgrade after crash, a real `/bin/vfsd` file request, filesystem audit
-persistence across reboot, and revocation. The generated GPT artifact now
+persistence across reboot, stale-authority rejection, and revocation. The generated GPT artifact now
 carries deterministic image and per-root-file hashes. Broader filesystem
 authority extraction, kernel-owned audit authority, package rollback/signing,
 and additional service backends remain.

@@ -88,6 +88,7 @@ $common = @(
     "[procd] service registered",
     "[procd] service upgraded",
     "[procd] service discovered",
+    "[procd] stale service authority revoked",
     "[procd] vfs backend passed",
     "[procd] service authority revoked",
     "[native] acceptance: procd-gate ok",

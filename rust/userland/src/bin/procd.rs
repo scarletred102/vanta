@@ -92,39 +92,56 @@ pub extern "C" fn _start() -> ! {
         sender,
         ServiceOperation::ReadFile,
         5,
+        OLD_AUTHORITY,
+        b"/etc/config",
+    ) || !expect_error(
+        receiver,
+        &mut response_bytes,
+        5,
+        vanta_services::ServiceError::Revoked,
+    ) {
+        fail(audit_fd, 11, b"[procd] stale authority was accepted\n")
+    }
+    vanta_userland::write(1, b"[procd] stale service authority revoked\n");
+    audit(audit_fd, b"stale-revoked\n");
+
+    if send_payload(
+        sender,
+        ServiceOperation::ReadFile,
+        6,
         NEW_AUTHORITY,
         b"/etc/config",
     ) || !expect(
         receiver,
         &mut response_bytes,
-        5,
+        6,
         NEW_AUTHORITY,
         2,
         b"vanta-vfs-syscall\n",
     ) {
-        fail(audit_fd, 11, b"[procd] vfs backend failed\n")
+        fail(audit_fd, 12, b"[procd] vfs backend failed\n")
     }
     vanta_userland::write(1, b"[procd] vfs backend passed\n");
     audit(audit_fd, b"backend-read\n");
 
-    if send(sender, ServiceOperation::Healthy, 6, NEW_AUTHORITY)
+    if send(sender, ServiceOperation::Healthy, 7, NEW_AUTHORITY)
         || !expect(
             receiver,
             &mut response_bytes,
-            6,
+            7,
             NEW_AUTHORITY,
             2,
             b"upgraded",
         )
         || vanta_userland::wait(second) != 0
     {
-        fail(audit_fd, 12, b"[procd] upgrade containment failed\n")
+        fail(audit_fd, 13, b"[procd] upgrade containment failed\n")
     }
 
     if vanta_userland::ipc_revoke(sender) == u64::MAX - 1
         || vanta_userland::ipc_send(sender, &[0; vanta_services::MAX_IPC_PAYLOAD]) != u64::MAX - 1
     {
-        fail(audit_fd, 13, b"[procd] revocation failed\n")
+        fail(audit_fd, 14, b"[procd] revocation failed\n")
     }
     vanta_userland::write(1, b"[procd] service authority revoked\n");
     audit(audit_fd, b"revoked\n");
@@ -176,6 +193,25 @@ fn expect(
         && response.authority == authority
         && response.result == 0
         && response.payload() == payload
+}
+
+fn expect_error(
+    fd: u64,
+    buffer: &mut [u8; vanta_services::MAX_IPC_PAYLOAD],
+    request_id: u64,
+    error: vanta_services::ServiceError,
+) -> bool {
+    let length = receive(fd, buffer);
+    if length != vanta_services::MAX_IPC_PAYLOAD as u64 {
+        return false;
+    }
+    let Ok(response) = ServiceResponse::decode(buffer) else {
+        return false;
+    };
+    response.request_id == request_id
+        && response.service == ServiceId::Vfs
+        && response.result == -(error as i32)
+        && response.authority == CapabilityId::INVALID
 }
 
 fn receive(fd: u64, buffer: &mut [u8]) -> u64 {
