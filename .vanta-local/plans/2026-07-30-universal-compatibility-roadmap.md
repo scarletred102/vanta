@@ -1,7 +1,7 @@
 # Vanta Universal Compatibility Roadmap
 
-Status: active sprint; Gate A complete; native platform, service, and Linux
-personality foundations in progress
+Status: active sprint; Gate A and Gate B complete; Linux personality and
+post-Gate-B platform expansion in progress
 Date: 2026-07-30  
 Scope: make Vanta a credible alternative platform for desktop, server, developer, and mobile workloads while preserving a Rust-first security boundary.
 
@@ -16,12 +16,14 @@ non-root developer children, native shell, real pipelines/redirection,
 authorized and forbidden file operations, reboot persistence, corrupt-root
 recovery, network regressions, ABI v0, and a bounded static C SDK.
 
-The compatibility tracks remain ordered, but the current sprint is landing the
-native platform foundations rather than leaving them as architecture only:
+The compatibility tracks remain ordered, but the completed native platform
+sprint now has executable Gate A and Gate B evidence rather than architecture
+only:
 `libvanta` now has real argv/envp process setup, `vanta-services` has bounded
-IPC and lifecycle behavior, and `linuxd` has static ELF metadata and an
-explicit broker decision path. Kernel transport, Linux QEMU binaries, and the
-later GUI/Windows/Android/VM tracks remain the next integration layers.
+IPC and lifecycle behavior, a booted `/bin/procd`/`/bin/vfsd`/`/bin/auditd`
+service flow, and `linuxd` has static ELF metadata and an explicit broker
+decision path. Linux QEMU binaries and the later GUI/Windows/Android/VM tracks
+remain the next integration layers.
 
 ### ABI v0 contract update — 2026-08-01
 
@@ -413,16 +415,16 @@ Turn the existing RedoxFS adapter, process manager, network path, and device pat
 
 Acceptance: interfaces compile in host tests and a service failure is returned as an error rather than a kernel panic.
 
-Status: bounded IPC frames, service lifecycle state, restart/crash containment,
-capability revocation, and audit ring are implemented in `vanta-services`.
-Kernel channel descriptors and a booted `procd`/service QEMU acceptance path
-now prove fixed-size framed registration/discovery, blocking request/response,
-restart/upgrade after crash, a real `/bin/vfsd` file request, framed audit
-drain through `/bin/auditd`, filesystem persistence across reboot,
-stale-authority rejection, and revocation. The generated GPT artifact now
-carries deterministic image and per-root-file hashes. Broader filesystem
-authority extraction, package rollback/signing, and additional service backends
-remain.
+Status: Gate B complete. Bounded IPC frames, service lifecycle state,
+restart/crash containment, capability revocation, and audit ring are implemented
+in `vanta-services`. Kernel channel descriptors and a booted
+`procd`/`vfsd`/`auditd` QEMU acceptance path prove fixed-size framed
+registration/discovery, blocking request/response, restart/upgrade after crash,
+a real VFS file request, framed audit drain through `auditd`, filesystem
+persistence across reboot, stale-authority rejection, and revocation. The
+generated GPT artifact carries deterministic image and per-root-file hashes,
+and the test rebuilds it byte-for-byte. Broader filesystem/network/device
+authority extraction and package rollback/signing are post-Gate-B work.
 
 ### 4. Linux static personality spike
 

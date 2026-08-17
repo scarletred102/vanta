@@ -53,9 +53,9 @@ service, upgrades it to `/bin/vfsd`, serves a real `/etc/config` read, rejects
 the stale pre-upgrade authority, and routes durable audit events through
 `/bin/auditd` without destabilizing the shell. GPT image
 reproducibility is now checked with source/toolchain metadata and deterministic
-artifact hashes. The next integrated work is broader filesystem authority
-extraction, package rollback/signing, Linux personality trap routing, and
-static Linux QEMU samples.
+artifact hashes. Gate B is closed; the next post-Gate-B work is broader
+filesystem/network/device authority extraction, package rollback/signing,
+Linux personality trap routing, and static Linux QEMU samples.
 
 ### Immediate roadmap deliverables — 2026-07-30
 
