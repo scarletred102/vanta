@@ -6,8 +6,8 @@
 use vanta_abi::{DisplayInfo, InputEvent};
 use vanta_userland::graphics::{Canvas, Color};
 
-const MAX_WIDTH: usize = 1024;
-const MAX_HEIGHT: usize = 768;
+const MAX_WIDTH: usize = 1280;
+const MAX_HEIGHT: usize = 800;
 static mut SCREEN_BUFFER: [u8; MAX_WIDTH * MAX_HEIGHT * 4] = [0u8; MAX_WIDTH * MAX_HEIGHT * 4];
 
 #[no_mangle]

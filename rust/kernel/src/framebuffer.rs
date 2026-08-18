@@ -12,16 +12,16 @@ const BACKDROP: [u8; 3] = [0x12, 0x12, 0x18];
 const FOREGROUND: [u8; 3] = [0xe6, 0xe6, 0xe6];
 
 pub struct Writer {
-    addr: *mut u8,
-    width: usize,
-    height: usize,
-    pitch: usize,
-    bpp: usize,
-    red_shift: u32,
-    green_shift: u32,
-    blue_shift: u32,
-    x: usize,
-    y: usize,
+    pub(crate) addr: *mut u8,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+    pub(crate) pitch: usize,
+    pub(crate) bpp: usize,
+    pub(crate) red_shift: u32,
+    pub(crate) green_shift: u32,
+    pub(crate) blue_shift: u32,
+    pub(crate) x: usize,
+    pub(crate) y: usize,
 }
 
 unsafe impl Send for Writer {}

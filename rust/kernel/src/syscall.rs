@@ -1434,8 +1434,8 @@ fn dispatch_native(
     arg1: u64,
     arg2: u64,
     arg3: u64,
-    _arg4: u64,
-    _arg5: u64,
+    arg4: u64,
+    arg5: u64,
     _arg6: u64,
 ) -> u64 {
     match number {
@@ -1454,7 +1454,7 @@ fn dispatch_native(
         SYS_GETDENTS => read_user(arg1, arg2, arg3),
         SYS_MKDIR => path_mutation_user(arg1, arg2, 0, 0),
         SYS_UNLINK => path_mutation_user(arg1, arg2, 1, 0),
-        SYS_RENAME => path_mutation_user(arg1, arg2, arg3, _arg4),
+        SYS_RENAME => path_mutation_user(arg1, arg2, arg3, arg4),
         SYS_DUP => {
             if arg2 != 0 {
                 crate::scheduler::duplicate_to_current(arg1, arg2).unwrap_or(SYSCALL_ERROR)
@@ -1469,7 +1469,7 @@ fn dispatch_native(
             if arg3 == 0 {
                 spawn_legacy_user(arg1, arg2)
             } else {
-                let native = spawn_native_user(arg1, arg2, arg3, _arg4);
+                let native = spawn_native_user(arg1, arg2, arg3, arg4);
                 if native == SYSCALL_ERROR {
                     spawn_legacy_user(arg1, arg2)
                 } else {
@@ -1488,7 +1488,7 @@ fn dispatch_native(
             .map(|()| 0)
             .unwrap_or(SYSCALL_ERROR),
         SYS_BRK => crate::scheduler::brk_current(arg1),
-        SYS_MMAP => linux_mmap_user(arg1, arg2, arg3, _arg4, _arg5, _arg6),
+        SYS_MMAP => linux_mmap_user(arg1, arg2, arg3, arg4, arg5, _arg6),
         SYS_MUNMAP => {
             crate::scheduler::munmap_current(arg1, arg2).map(|()| 0).unwrap_or(SYSCALL_ERROR)
         }
@@ -1497,7 +1497,7 @@ fn dispatch_native(
         SYS_GETPID => crate::scheduler::current_pid(),
         SYS_GETPPID => crate::scheduler::current_parent_pid(),
         SYS_DISPLAY_INFO => display_info_user(arg1),
-        SYS_DISPLAY_BLIT => display_blit_user(arg1, arg2, arg3, _arg4, _arg5),
+        SYS_DISPLAY_BLIT => display_blit_user(arg1, arg2, arg3, arg4, arg5),
         SYS_DISPLAY_FLUSH => display_flush_user(),
         SYS_INPUT_POLL => input_poll_user(arg1),
         SYS_AUDIO_PLAY => audio_play_user(arg1, arg2),
@@ -2141,15 +2141,51 @@ fn display_info_user(info_ptr: u64) -> u64 {
 }
 
 fn display_blit_user(x: u64, y: u64, w: u64, h: u64, buf_ptr: u64) -> u64 {
-    let byte_len = w.saturating_mul(h).saturating_mul(4);
-    let Ok(buf) = copy_from_user(buf_ptr, byte_len, false) else {
+    let mut writer = crate::framebuffer::WRITER.lock();
+    let Some(ref mut writer) = *writer else {
         return SYSCALL_ERROR;
     };
-    if crate::framebuffer::display_blit(x as usize, y as usize, w as usize, h as usize, &buf) {
-        0
-    } else {
-        SYSCALL_ERROR
+    let width = writer.width as u64;
+    let height = writer.height as u64;
+    let pitch = writer.pitch as u64;
+    let bpp = writer.bpp as u64;
+    if x >= width || y >= height {
+        return SYSCALL_ERROR;
     }
+    let actual_w = w.min(width - x);
+    let actual_h = h.min(height - y);
+    let row_bytes = actual_w * bpp;
+    let src_stride = w * bpp;
+
+    for row in 0..actual_h {
+        let src_row_addr = match buf_ptr.checked_add(row * src_stride) {
+            Some(a) => a,
+            None => return SYSCALL_ERROR,
+        };
+        let dst_off = ((y + row) * pitch + x * bpp) as usize;
+
+        let mut copied = 0u64;
+        while copied < row_bytes {
+            let cur_src = src_row_addr + copied;
+            let cur_dst = dst_off + copied as usize;
+            let page_offset = cur_src & 0xfff;
+            let bytes_in_page = 0x1000 - page_offset;
+            let chunk = (row_bytes - copied).min(bytes_in_page) as usize;
+
+            let Ok(phys_virt) = user_physical_address(cur_src, false) else {
+                return SYSCALL_ERROR;
+            };
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    phys_virt as *const u8,
+                    writer.addr.add(cur_dst),
+                    chunk,
+                );
+            }
+            copied += chunk as u64;
+        }
+    }
+    0
 }
 
 fn display_flush_user() -> u64 {

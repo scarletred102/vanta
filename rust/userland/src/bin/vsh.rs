@@ -50,7 +50,7 @@ fn run_command(command: &[u8]) {
         b"help" => {
             vanta_userland::write(
                 1,
-                b"help clear echo cat true false ls mkdir rm mv pwd stat\n",
+                b"help clear echo cat true false ls mkdir rm mv pwd stat displayd desktop audiod\n",
             );
         }
         b"clear" => {

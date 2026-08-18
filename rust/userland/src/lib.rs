@@ -302,6 +302,9 @@ pub fn command_path(command: &[u8]) -> Option<&'static [u8]> {
         b"pwd" => Some(b"/bin/pwd"),
         b"stat" => Some(b"/bin/stat"),
         b"c-hello" => Some(b"/bin/c-hello"),
+        b"displayd" => Some(b"/bin/displayd"),
+        b"desktop" => Some(b"/bin/desktop"),
+        b"audiod" => Some(b"/bin/audiod"),
         _ => None,
     }
 }
