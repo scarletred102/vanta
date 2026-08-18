@@ -8,7 +8,8 @@ use core::arch::asm;
 
 use spin::Mutex;
 
-use crate::memory::{self, PAGE_SIZE};
+pub use crate::memory::PAGE_SIZE;
+use crate::memory::{self};
 
 const PRESENT: u64 = 1 << 0;
 const HUGE_PAGE: u64 = 1 << 7;
@@ -243,6 +244,36 @@ pub fn unmap(space: AddressSpace, virtual_address: u64) -> Result<Option<u64>, M
     }
     flush_if_active(space, virtual_address);
     Ok(Some(current & ADDRESS_MASK))
+}
+
+/// Change protection flags on an existing range of mapped 4 KiB leaf pages.
+pub fn protect(
+    space: AddressSpace,
+    virtual_address: u64,
+    pages: usize,
+    flags: u64,
+) -> Result<(), MapError> {
+    if virtual_address & (PAGE_SIZE - 1) != 0 {
+        return Err(MapError::UnalignedAddress);
+    }
+    for index in 0..pages {
+        let page_vaddr = virtual_address
+            .checked_add((index as u64) * PAGE_SIZE)
+            .ok_or(MapError::UnalignedAddress)?;
+        let location = pte_location(space, page_vaddr, false, false)?
+            .ok_or(MapError::NoHhdm)?;
+        let entry = read_entry(location.table_phys, location.index).ok_or(MapError::NoHhdm)?;
+        if entry & PRESENT == 0 {
+            return Err(MapError::NoHhdm);
+        }
+        let physical = entry & ADDRESS_MASK;
+        let new_entry = physical | flags | PRESENT;
+        if !write_entry(location.table_phys, location.index, new_entry) {
+            return Err(MapError::NoHhdm);
+        }
+        flush_if_active(space, page_vaddr);
+    }
+    Ok(())
 }
 
 /// Destroy a non-active address space after all of its leaf mappings are gone.

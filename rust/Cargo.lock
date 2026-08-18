@@ -921,6 +921,7 @@ dependencies = [
  "uart_16550",
  "vanta-abi",
  "vanta-gpt",
+ "vanta-linuxd",
  "vanta-redoxfs-adapter",
  "x86_64",
 ]

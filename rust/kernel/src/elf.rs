@@ -15,8 +15,24 @@ const ET_DYN: u16 = 3;
 const EM_X86_64: u16 = 0x3e;
 
 pub const PT_LOAD: u32 = 1;
+#[allow(dead_code)]
+pub const PT_DYNAMIC: u32 = 2;
+pub const PT_INTERP: u32 = 3;
+#[allow(dead_code)]
+pub const PT_NOTE: u32 = 4;
+#[allow(dead_code)]
+pub const PT_SHLIB: u32 = 5;
+pub const PT_PHDR: u32 = 6;
+#[allow(dead_code)]
+pub const PT_TLS: u32 = 7;
+#[allow(dead_code)]
+pub const PT_GNU_STACK: u32 = 0x6474_e551;
+#[allow(dead_code)]
+pub const PT_GNU_RELRO: u32 = 0x6474_e552;
 pub const PF_X: u32 = 1;
 pub const PF_W: u32 = 2;
+#[allow(dead_code)]
+pub const PF_R: u32 = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ElfError {
@@ -29,6 +45,7 @@ pub enum ElfError {
     InvalidHeaderSize,
     InvalidProgramHeaders,
     NoLoadSegments,
+    DynamicInterpreter,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,6 +125,43 @@ impl<'a> ElfImage<'a> {
         Ok(image)
     }
 
+    pub fn interpreter(self) -> Option<&'a str> {
+        let header = self
+            .program_headers()
+            .find(|header| header.kind == PT_INTERP)?;
+        let raw = self.file_bytes(header)?;
+        let trimmed = raw.strip_suffix(b"\0").unwrap_or(raw);
+        core::str::from_utf8(trimmed).ok()
+    }
+
+    #[allow(dead_code)]
+    pub fn is_dynamic(self) -> bool {
+        self.interpreter().is_some()
+    }
+
+    pub fn is_pie(self) -> bool {
+        read_u16(self.bytes, 16) == Some(ET_DYN)
+    }
+
+    pub fn phdr_virtual_address(self, base: u64) -> u64 {
+        if let Some(header) = self.program_headers().find(|h| h.kind == PT_PHDR) {
+            return base.wrapping_add(header.virtual_address);
+        }
+        let phoff = self.program_header_offset as u64;
+        let phtable_end = phoff + (self.program_header_size * self.program_header_count) as u64;
+        for header in self.program_headers().filter(|h| h.kind == PT_LOAD) {
+            if header.offset <= phoff && header.offset + header.file_size >= phtable_end {
+                return base.wrapping_add(header.virtual_address) + (phoff - header.offset);
+            }
+        }
+        base.wrapping_add((self.entry & !4095) + self.program_header_offset as u64)
+    }
+
+    #[allow(dead_code)]
+    pub fn bytes(self) -> &'a [u8] {
+        self.bytes
+    }
+
     pub fn program_headers(self) -> ProgramHeaders<'a> {
         ProgramHeaders {
             image: self,
@@ -120,6 +174,19 @@ impl<'a> ElfImage<'a> {
         let length: usize = header.file_size.try_into().ok()?;
         let end = start.checked_add(length)?;
         self.bytes.get(start..end)
+    }
+
+    #[allow(dead_code)]
+    pub fn program_header_offset(self) -> usize {
+        self.program_header_offset
+    }
+
+    pub fn program_header_size(self) -> usize {
+        self.program_header_size
+    }
+
+    pub fn program_header_count(self) -> usize {
+        self.program_header_count
     }
 }
 

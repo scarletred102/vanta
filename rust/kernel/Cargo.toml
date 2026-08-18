@@ -18,5 +18,6 @@ heapless = "0.8"
 lazy_static = { version = "1.5", features = ["spin_no_std"] }
 noto-sans-mono-bitmap = { version = "0.3", default-features = false, features = ["regular", "size_16", "unicode-basic-latin"] }
 vanta-abi = { path = "../abi" }
+vanta-linuxd = { path = "../linuxd" }
 vanta-gpt = { path = "../gpt" }
 vanta-redoxfs-adapter = { path = "../redoxfs-adapter" }

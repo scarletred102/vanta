@@ -13,12 +13,10 @@ use spin::Mutex;
 use crate::{memory, paging};
 
 const HEAP_BASE: u64 = 0xffff_ff00_0000_0000;
-// RedoxFS keeps an LZ4 cache for one 128 KiB metadata record, and native C
-// images now exceed 1 MiB during process loading. Keep a bounded 4 MiB heap
-// until the later slab allocator replaces this bootstrap budget.
-const HEAP_PAGES: usize = 1024;
+// Support loading multiple native and Linux static ELFs into memory.
+const HEAP_PAGES: usize = 8192;
 const HEAP_SIZE: usize = HEAP_PAGES * memory::PAGE_SIZE as usize;
-const MAX_FREE_BLOCKS: usize = 256;
+const MAX_FREE_BLOCKS: usize = 2048;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeapStats {
