@@ -24,6 +24,24 @@ pub extern "C" fn _start() -> ! {
             b"[native] acceptance: audit-persistence failed\n"
         },
     );
+    let linux_ok = linux_acceptance();
+    vanta_userland::write(
+        2,
+        if linux_ok {
+            b"[linux] Gate C personality acceptance passed\n"
+        } else {
+            b"[linux] Gate C personality acceptance failed\n"
+        },
+    );
+    let gate_d_ok = gate_d_acceptance();
+    vanta_userland::write(
+        2,
+        if gate_d_ok {
+            b"[linux] Gate D dynamic & networking acceptance passed\n"
+        } else {
+            b"[linux] Gate D dynamic & networking acceptance failed\n"
+        },
+    );
     let gate = vanta_userland::spawn(b"/bin/native-gate");
     let gate_ok = gate != u64::MAX && vanta_userland::wait(gate) == 0;
     vanta_userland::write(
@@ -46,6 +64,219 @@ pub extern "C" fn _start() -> ! {
         vanta_userland::exit(1)
     }
     vanta_userland::exit(vanta_userland::wait(shell))
+}
+
+fn print_val(label: &[u8], spawn_res: u64, exit_code: u64) {
+    vanta_userland::write(2, label);
+    vanta_userland::write(2, b": spawn=");
+    print_u64(spawn_res);
+    vanta_userland::write(2, b" exit=");
+    print_u64(exit_code);
+    vanta_userland::write(2, b"\n");
+}
+
+fn print_u64(mut n: u64) {
+    if n == 0 {
+        vanta_userland::write(2, b"0");
+        return;
+    }
+    if n == u64::MAX {
+        vanta_userland::write(2, b"MAX");
+        return;
+    }
+    let mut buf = [0u8; 20];
+    let mut i = 0;
+    while n > 0 {
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        i += 1;
+    }
+    let slice = &mut buf[..i];
+    slice.reverse();
+    vanta_userland::write(2, slice);
+}
+
+fn linux_acceptance() -> bool {
+    let hello = vanta_userland::spawn_linux(b"/compat/linux/hello");
+    let hello_exit = if hello != u64::MAX {
+        vanta_userland::wait(hello)
+    } else {
+        999
+    };
+    print_val(b"[linux] hello", hello, hello_exit);
+    let hello_ok = hello != u64::MAX && hello_exit == 0;
+
+    let cat = vanta_userland::spawn_linux(b"/compat/linux/cat");
+    let cat_exit = if cat != u64::MAX {
+        vanta_userland::wait(cat)
+    } else {
+        999
+    };
+    print_val(b"[linux] cat", cat, cat_exit);
+    let cat_ok = cat != u64::MAX && cat_exit == 0;
+
+    let unsupported = vanta_userland::spawn_linux(b"/compat/linux/unsupported");
+    let unsupported_exit = if unsupported != u64::MAX {
+        vanta_userland::wait(unsupported)
+    } else {
+        999
+    };
+    print_val(b"[linux] unsupported", unsupported, unsupported_exit);
+    let unsupported_ok = unsupported != u64::MAX && unsupported_exit == 42;
+
+    let ls = vanta_userland::spawn_linux(b"/compat/linux/ls");
+    let ls_exit = if ls != u64::MAX {
+        vanta_userland::wait(ls)
+    } else {
+        999
+    };
+    print_val(b"[linux] ls", ls, ls_exit);
+    let ls_ok = ls != u64::MAX && ls_exit == 0;
+
+    let server = vanta_userland::spawn_linux(b"/compat/linux/server");
+    let server_exit = if server != u64::MAX {
+        vanta_userland::wait(server)
+    } else {
+        999
+    };
+    print_val(b"[linux] server", server, server_exit);
+    let server_ok = server != u64::MAX && server_exit == 0;
+
+    let musl_hello = vanta_userland::spawn_linux(b"/compat/linux/musl-hello");
+    let musl_hello_exit = if musl_hello != u64::MAX {
+        vanta_userland::wait(musl_hello)
+    } else {
+        999
+    };
+    print_val(b"[linux] musl-hello", musl_hello, musl_hello_exit);
+    let musl_hello_ok = musl_hello != u64::MAX && musl_hello_exit == 0;
+
+    let musl_alloc = vanta_userland::spawn_linux(b"/compat/linux/musl-alloc");
+    let musl_alloc_exit = if musl_alloc != u64::MAX {
+        vanta_userland::wait(musl_alloc)
+    } else {
+        999
+    };
+    print_val(b"[linux] musl-alloc", musl_alloc, musl_alloc_exit);
+    let musl_alloc_ok = musl_alloc != u64::MAX && musl_alloc_exit == 0;
+
+    let musl_io = vanta_userland::spawn_linux(b"/compat/linux/musl-io");
+    let musl_io_exit = if musl_io != u64::MAX {
+        vanta_userland::wait(musl_io)
+    } else {
+        999
+    };
+    print_val(b"[linux] musl-io", musl_io, musl_io_exit);
+    let musl_io_ok = musl_io != u64::MAX && musl_io_exit == 0;
+
+    let musl_dir = vanta_userland::spawn_linux(b"/compat/linux/musl-dir");
+    let musl_dir_exit = if musl_dir != u64::MAX {
+        vanta_userland::wait(musl_dir)
+    } else {
+        999
+    };
+    print_val(b"[linux] musl-dir", musl_dir, musl_dir_exit);
+    let musl_dir_ok = musl_dir != u64::MAX && musl_dir_exit == 0;
+
+    let musl_pipe = vanta_userland::spawn_linux(b"/compat/linux/musl-pipe");
+    let musl_pipe_exit = if musl_pipe != u64::MAX {
+        vanta_userland::wait(musl_pipe)
+    } else {
+        999
+    };
+    print_val(b"[linux] musl-pipe", musl_pipe, musl_pipe_exit);
+    let musl_pipe_ok = musl_pipe != u64::MAX && musl_pipe_exit == 0;
+
+    let musl_proc = vanta_userland::spawn_linux(b"/compat/linux/musl-proc");
+    let musl_proc_exit = if musl_proc != u64::MAX {
+        vanta_userland::wait(musl_proc)
+    } else {
+        999
+    };
+    print_val(b"[linux] musl-proc", musl_proc, musl_proc_exit);
+    let musl_proc_ok = musl_proc != u64::MAX && musl_proc_exit == 0;
+
+    let musl_script = vanta_userland::spawn_linux(b"/compat/linux/musl-script");
+    let musl_script_exit = if musl_script != u64::MAX {
+        vanta_userland::wait(musl_script)
+    } else {
+        999
+    };
+    print_val(b"[linux] musl-script", musl_script, musl_script_exit);
+    let musl_script_ok = musl_script != u64::MAX && musl_script_exit == 0;
+
+    let musl_server = vanta_userland::spawn_linux(b"/compat/linux/musl-server");
+    let musl_server_exit = if musl_server != u64::MAX {
+        vanta_userland::wait(musl_server)
+    } else {
+        999
+    };
+    print_val(b"[linux] musl-server", musl_server, musl_server_exit);
+    let musl_server_ok = musl_server != u64::MAX && musl_server_exit == 0;
+    let dynamic = vanta_userland::spawn_linux(b"/compat/linux/dynamic");
+    let dynamic_ok = dynamic == u64::MAX - 1;
+    vanta_userland::write(
+        2,
+        if dynamic_ok {
+            b"[linux] dynamic interpreter rejected\n"
+        } else {
+            b"[linux] dynamic interpreter rejection failed\n"
+        },
+    );
+    hello_ok
+        && cat_ok
+        && unsupported_ok
+        && ls_ok
+        && server_ok
+        && musl_hello_ok
+        && musl_alloc_ok
+        && musl_io_ok
+        && musl_dir_ok
+        && musl_pipe_ok
+        && musl_proc_ok
+        && musl_script_ok
+        && musl_server_ok
+        && dynamic_ok
+}
+
+fn gate_d_acceptance() -> bool {
+    let dyn_hello = vanta_userland::spawn_linux(b"/compat/linux/dynamic-hello");
+    let dyn_hello_exit = if dyn_hello != u64::MAX {
+        vanta_userland::wait(dyn_hello)
+    } else {
+        999
+    };
+    print_val(b"[linux] dynamic-hello", dyn_hello, dyn_hello_exit);
+    let dyn_hello_ok = dyn_hello != u64::MAX && dyn_hello_exit == 0;
+
+    let dyn_signal = vanta_userland::spawn_linux(b"/compat/linux/dynamic-signal");
+    let dyn_signal_exit = if dyn_signal != u64::MAX {
+        vanta_userland::wait(dyn_signal)
+    } else {
+        999
+    };
+    print_val(b"[linux] dynamic-signal", dyn_signal, dyn_signal_exit);
+    let dyn_signal_ok = dyn_signal != u64::MAX && dyn_signal_exit == 0;
+
+    let dyn_threads = vanta_userland::spawn_linux(b"/compat/linux/dynamic-threads");
+    let dyn_threads_exit = if dyn_threads != u64::MAX {
+        vanta_userland::wait(dyn_threads)
+    } else {
+        999
+    };
+    print_val(b"[linux] dynamic-threads", dyn_threads, dyn_threads_exit);
+    let dyn_threads_ok = dyn_threads != u64::MAX && dyn_threads_exit == 0;
+
+    let dyn_net = vanta_userland::spawn_linux(b"/compat/linux/dynamic-net");
+    let dyn_net_exit = if dyn_net != u64::MAX {
+        vanta_userland::wait(dyn_net)
+    } else {
+        999
+    };
+    print_val(b"[linux] dynamic-net", dyn_net, dyn_net_exit);
+    let dyn_net_ok = dyn_net != u64::MAX && dyn_net_exit == 0;
+
+    dyn_hello_ok && dyn_signal_ok && dyn_threads_ok && dyn_net_ok
 }
 
 fn audit_persistence() -> bool {

@@ -1,0 +1,42 @@
+{
+  "gate": "C",
+  "abi_version": 0,
+  "image": "target/vanta-gpt.img",
+  "artifact_manifest": "target/vanta-gpt.manifest",
+  "personality": "LinuxX86_64Static",
+  "targets": [
+    { "path": "/compat/linux/hello", "expected": "pass", "failure_classification": "none" },
+    { "path": "/compat/linux/cat", "expected": "pass", "failure_classification": "none" },
+    { "path": "/compat/linux/ls", "expected": "pass", "failure_classification": "none" },
+    { "path": "/compat/linux/server", "expected": "pass", "failure_classification": "none" },
+    { "path": "/compat/linux/musl-hello", "expected": "pass", "failure_classification": "none" },
+    { "path": "/compat/linux/musl-alloc", "expected": "pass", "failure_classification": "none" },
+    { "path": "/compat/linux/musl-io", "expected": "pass", "failure_classification": "none" },
+    { "path": "/compat/linux/musl-dir", "expected": "pass", "failure_classification": "none" },
+    { "path": "/compat/linux/musl-pipe", "expected": "pass", "failure_classification": "none" },
+    { "path": "/compat/linux/musl-proc", "expected": "pass", "failure_classification": "none" },
+    { "path": "/compat/linux/musl-script", "expected": "pass", "failure_classification": "none" },
+    { "path": "/compat/linux/musl-server", "expected": "pass", "failure_classification": "none" },
+    { "path": "/compat/linux/unsupported", "expected": "unsupported", "failure_classification": "unsupported-syscall" },
+    { "path": "/compat/linux/dynamic", "expected": "unsupported", "failure_classification": "dynamic-interpreter" }
+  ],
+  "verification": {
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File rust/test-gpt-qemu.ps1 -TimeoutSeconds 60",
+    "required_markers": [
+      "[linux] hello",
+      "[linux-musl] hello",
+      "[linux-musl] memory allocation passed",
+      "[linux-musl] file io passed",
+      "[linux-musl] directory iteration passed",
+      "[linux-musl] pipes and descriptors passed",
+      "[linux-musl] posix system info passed",
+      "[linux-musl] script sequencing passed",
+      "[linux-musl] socket execution passed",
+      "[linuxd] unsupported syscall number=9999",
+      "[linux] dynamic interpreter rejected",
+      "[linux] Gate C personality acceptance passed"
+    ],
+    "reproducible_image": true,
+    "gate_a_b_regressions": true
+  }
+}

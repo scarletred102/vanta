@@ -140,6 +140,11 @@ pub fn spawn(path: &[u8]) -> u64 {
     spawn_with_stdio(path, u64::MAX, u64::MAX, u64::MAX)
 }
 
+/// Launch an ELF through the Linux x86_64 static personality.
+pub fn spawn_linux(path: &[u8]) -> u64 {
+    spawn_with_stdio(path, u64::MAX, u64::MAX, u64::MAX)
+}
+
 pub fn spawn_with_stdio(path: &[u8], stdin: u64, stdout: u64, stderr: u64) -> u64 {
     let stdio = [
         stdin.to_ne_bytes(),
@@ -212,12 +217,16 @@ pub fn close(fd: u64) -> u64 {
 }
 
 pub fn wait(pid: u64) -> u64 {
+    wait_blocking(pid)
+}
+
+pub fn wait_nonblocking(pid: u64) -> u64 {
     syscall(SYS_WAITPID, pid, 0, 0)
 }
 
 pub fn wait_blocking(pid: u64) -> u64 {
     loop {
-        let result = wait(pid);
+        let result = wait_nonblocking(pid);
         if result != WAIT_WOULD_BLOCK {
             return result;
         }
