@@ -1,5 +1,7 @@
 //! Legacy VirtIO-net driver with polling RX/TX queues for QEMU user networking.
 
+#![allow(dead_code)]
+
 use alloc::vec::Vec;
 use core::sync::atomic::{fence, Ordering};
 
@@ -24,7 +26,7 @@ const DESC_WRITE: u16 = 2;
 const DMA_MIN_PHYSICAL: u64 = 0x10_0000;
 const VIRTIO_NET_HEADER_SIZE: usize = 10;
 const FRAME_BUFFER_SIZE: usize = PAGE_SIZE as usize;
-const RX_BUFFER_COUNT: usize = 8;
+const RX_BUFFER_COUNT: usize = 32;
 const POLL_ATTEMPTS: usize = 1_000_000;
 const FEATURE_MAC: u32 = 1 << 5;
 
@@ -198,6 +200,13 @@ impl VirtioNet {
         publish_descriptor(&mut self.rx, queue, descriptor as u16);
         port_write16(self.io_base, QUEUE_NOTIFY, 0);
         Ok(Some(frame))
+    }
+
+    pub fn rx_has_pending(&self) -> bool {
+        let Ok(queue) = queue_virtual(&self.rx) else {
+            return false;
+        };
+        used_available(&self.rx, queue)
     }
 
     fn prime_receive_queue(&mut self) {
