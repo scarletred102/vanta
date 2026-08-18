@@ -1,11 +1,14 @@
-//! desktop: Native GUI desktop acceptance application.
+//! desktop: Native GUI Control Center and Desktop widget suite.
 
 #![no_std]
 #![no_main]
 
 use vanta_abi::{DisplayInfo, InputEvent};
+use vanta_userland::graphics::{Canvas, Color};
 
-static mut BUTTON_SURFACE: [u8; 64 * 32 * 4] = [0u8; 64 * 32 * 4];
+const WIDGET_W: usize = 280;
+const WIDGET_H: usize = 260;
+static mut WIDGET_BUFFER: [u8; WIDGET_W * WIDGET_H * 4] = [0u8; WIDGET_W * WIDGET_H * 4];
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
@@ -14,28 +17,38 @@ pub extern "C" fn _start() -> ! {
         vanta_userland::exit(1);
     }
 
-    // Render interactive GUI button: 64x32 with blue accent (0x3b, 0x82, 0xf6)
-    let bw = 64;
-    let bh = 32;
+    let win_x = 680;
+    let win_y = 440;
+
     unsafe {
-        for y in 0..bh {
-            for x in 0..bw {
-                let off = (y * bw + x) * 4;
-                if x == 0 || x == bw - 1 || y == 0 || y == bh - 1 {
-                    BUTTON_SURFACE[off] = 0x60;
-                    BUTTON_SURFACE[off + 1] = 0xa5;
-                    BUTTON_SURFACE[off + 2] = 0xfa;
-                    BUTTON_SURFACE[off + 3] = 0xff;
-                } else {
-                    BUTTON_SURFACE[off] = 0x3b;
-                    BUTTON_SURFACE[off + 1] = 0x82;
-                    BUTTON_SURFACE[off + 2] = 0xf6;
-                    BUTTON_SURFACE[off + 3] = 0xff;
-                }
-            }
-        }
-        let slice = core::slice::from_raw_parts(BUTTON_SURFACE.as_ptr(), bw * bh * 4);
-        if vanta_userland::display_blit(200, 200, bw as u32, bh as u32, slice) == u64::MAX - 1 {
+        let slice = core::slice::from_raw_parts_mut(WIDGET_BUFFER.as_mut_ptr(), WIDGET_W * WIDGET_H * 4);
+        let mut canvas = Canvas::new(slice, WIDGET_W, WIDGET_H);
+
+        // Render Control Center Window
+        canvas.draw_window(0, 0, WIDGET_W, WIDGET_H, "Control Center & Settings", true);
+
+        // Audio Volume
+        canvas.draw_text(16, 36, "Output Volume: 80%", Color::TEXT_PRIMARY, 1);
+        canvas.draw_progress_bar(16, 50, WIDGET_W - 32, 12, 80, Color::BLUE_ACCENT);
+
+        // Display Brightness
+        canvas.draw_text(16, 72, "Display Brightness: 100%", Color::TEXT_PRIMARY, 1);
+        canvas.draw_progress_bar(16, 86, WIDGET_W - 32, 12, 100, Color::YELLOW_ACCENT);
+
+        // Quick Toggles
+        canvas.draw_button(16, 110, 115, 24, "Networking: ON", true);
+        canvas.draw_button(140, 110, 120, 24, "Compositor: ON", true);
+        canvas.draw_button(16, 142, 115, 24, "Dark Theme", true);
+        canvas.draw_button(140, 142, 120, 24, "Audio Stream", true);
+
+        // System Action Buttons
+        canvas.draw_button(16, 184, 115, 28, "Lock Desktop", false);
+        canvas.draw_button(140, 184, 120, 28, "Power Off", false);
+
+        canvas.draw_text(16, 226, "Vanta Desktop Suite v1.0", Color::TEXT_MUTED, 1);
+
+        let blit_slice = core::slice::from_raw_parts(WIDGET_BUFFER.as_ptr(), WIDGET_W * WIDGET_H * 4);
+        if vanta_userland::display_blit(win_x, win_y, WIDGET_W as u32, WIDGET_H as u32, blit_slice) == u64::MAX - 1 {
             vanta_userland::exit(2);
         }
     }

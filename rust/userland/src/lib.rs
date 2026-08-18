@@ -1,5 +1,8 @@
 #![no_std]
 
+pub mod font;
+pub mod graphics;
+
 use core::arch::asm;
 use vanta_abi::{AbiInfo, Syscall};
 
