@@ -98,6 +98,11 @@ fn syscall_numbers_are_frozen() {
         (Syscall::IpcSend, 0x0031),
         (Syscall::IpcRecv, 0x0032),
         (Syscall::IpcRevoke, 0x0033),
+        (Syscall::DisplayInfo, 0x0040),
+        (Syscall::DisplayBlit, 0x0041),
+        (Syscall::DisplayFlush, 0x0042),
+        (Syscall::InputPoll, 0x0043),
+        (Syscall::AudioPlay, 0x0044),
     ];
 
     for (syscall, number) in vectors {

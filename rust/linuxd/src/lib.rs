@@ -85,8 +85,35 @@ pub enum LinuxOp {
     GetRandom,
     SchedGetAffinity,
     SchedYield,
+    Poll,
+    PPoll,
+    Select,
+    PSelect6,
+    EPollCreate,
+    EPollCreate1,
+    EPollCtl,
+    EPollWait,
+    EPollPWait,
+    EventFd,
+    EventFd2,
     Unsupported(u64),
 }
+
+pub const EPOLL_CTL_ADD: u32 = 1;
+pub const EPOLL_CTL_DEL: u32 = 2;
+pub const EPOLL_CTL_MOD: u32 = 3;
+
+pub const EPOLLIN: u32 = 0x00000001;
+pub const EPOLLPRI: u32 = 0x00000002;
+pub const EPOLLOUT: u32 = 0x00000004;
+pub const EPOLLERR: u32 = 0x00000008;
+pub const EPOLLHUP: u32 = 0x00000010;
+pub const EPOLLRDHUP: u32 = 0x00002000;
+pub const EPOLLET: u32 = 0x80000000;
+
+pub const EFD_SEMAPHORE: u32 = 1;
+pub const EFD_CLOEXEC: u32 = 0x00080000;
+pub const EFD_NONBLOCK: u32 = 0x00000800;
 
 pub const CLONE_VM: u64 = 0x00000100;
 pub const CLONE_FS: u64 = 0x00000200;
@@ -207,6 +234,21 @@ pub struct SigAltStack {
     pub ss_flags: i32,
     pub _pad: i32,
     pub ss_size: u64,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct epoll_event {
+    pub events: u32,
+    pub data: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct pollfd {
+    pub fd: i32,
+    pub events: i16,
+    pub revents: i16,
 }
 
 #[repr(C)]
@@ -339,6 +381,7 @@ pub fn translate(number: u64) -> Result<Translation, UnsupportedSyscall> {
         4 => (LinuxOp::Stat, Some(Syscall::FStat)),
         5 => (LinuxOp::FStat, Some(Syscall::FStat)),
         6 => (LinuxOp::LStat, Some(Syscall::FStat)),
+        7 => (LinuxOp::Poll, None),
         262 => (LinuxOp::FStat, Some(Syscall::FStat)),
         8 => (LinuxOp::LSeek, Some(Syscall::LSeek)),
         9 => (LinuxOp::MMap, Some(Syscall::MMap)),
@@ -353,6 +396,7 @@ pub fn translate(number: u64) -> Result<Translation, UnsupportedSyscall> {
         20 => (LinuxOp::Writev, None),
         21 | 269 | 439 => (LinuxOp::Access, None),
         22 => (LinuxOp::Pipe, Some(Syscall::Pipe2)),
+        23 => (LinuxOp::Select, None),
         24 => (LinuxOp::SchedYield, Some(Syscall::Yield)),
         293 => (LinuxOp::Pipe2, Some(Syscall::Pipe2)),
         32 => (LinuxOp::Dup, Some(Syscall::Dup3)),
@@ -381,6 +425,7 @@ pub fn translate(number: u64) -> Result<Translation, UnsupportedSyscall> {
         63 => (LinuxOp::Uname, None),
         72 => (LinuxOp::Fcntl, None),
         78 => (LinuxOp::GetDents, Some(Syscall::GetDents)),
+        213 => (LinuxOp::EPollCreate, None),
         217 => (LinuxOp::GetDents64, Some(Syscall::GetDents)),
         79 => (LinuxOp::GetCwd, None),
         80 | 81 => (LinuxOp::ChDir, None),
@@ -400,8 +445,16 @@ pub fn translate(number: u64) -> Result<Translation, UnsupportedSyscall> {
         218 => (LinuxOp::SetTidAddress, None),
         228 => (LinuxOp::ClockGetTime, None),
         231 => (LinuxOp::ExitGroup, None),
+        232 => (LinuxOp::EPollWait, None),
+        233 => (LinuxOp::EPollCtl, None),
         234 => (LinuxOp::TgKill, None),
+        270 => (LinuxOp::PSelect6, None),
+        271 => (LinuxOp::PPoll, None),
         273 => (LinuxOp::SetRobustList, None),
+        281 => (LinuxOp::EPollPWait, None),
+        284 => (LinuxOp::EventFd, None),
+        290 => (LinuxOp::EventFd2, None),
+        291 => (LinuxOp::EPollCreate1, None),
         318 => (LinuxOp::GetRandom, None),
         334 => (LinuxOp::Rseq, None),
         435 => (LinuxOp::Clone3, None),

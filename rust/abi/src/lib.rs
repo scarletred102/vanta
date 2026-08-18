@@ -140,6 +140,30 @@ pub enum Syscall {
     IpcSend = 0x0031,
     IpcRecv = 0x0032,
     IpcRevoke = 0x0033,
+    DisplayInfo = 0x0040,
+    DisplayBlit = 0x0041,
+    DisplayFlush = 0x0042,
+    InputPoll = 0x0043,
+    AudioPlay = 0x0044,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DisplayInfo {
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub bpp: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct InputEvent {
+    pub event_type: u32,
+    pub code: u32,
+    pub value: i32,
+    pub x: i32,
+    pub y: i32,
 }
 
 impl Syscall {
