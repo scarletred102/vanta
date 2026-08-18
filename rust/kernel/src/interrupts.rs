@@ -85,11 +85,11 @@ vanta_timer_entry:
 1:
     mov rdi, rsp
     call vanta_timer_tick
+    mov rsp, rax
     test byte ptr [rsp + 128], 3
     jz 2f
     swapgs
 2:
-    mov rsp, rax
     pop r15
     pop r14
     pop r13

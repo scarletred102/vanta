@@ -7,7 +7,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
-use vanta_abi::{CapabilityId, Credentials, Rights, SignalAction};
+use vanta_abi::{CapabilityId, Credentials, Rights};
+use vanta_linuxd::{self, LinuxSigAction};
 
 use crate::paging::{self, AddressSpace};
 use crate::process::Process;
@@ -42,6 +43,52 @@ pub struct InterruptContext {
 }
 
 impl InterruptContext {
+    pub fn new(
+        r15: u64,
+        r14: u64,
+        r13: u64,
+        r12: u64,
+        r11: u64,
+        r10: u64,
+        r9: u64,
+        r8: u64,
+        rdi: u64,
+        rsi: u64,
+        rbp: u64,
+        rdx: u64,
+        rcx: u64,
+        rbx: u64,
+        rax: u64,
+        instruction_pointer: u64,
+        code_segment: u64,
+        flags: u64,
+        stack_pointer: u64,
+        stack_segment: u64,
+    ) -> Self {
+        Self {
+            r15,
+            r14,
+            r13,
+            r12,
+            r11,
+            r10,
+            r9,
+            r8,
+            rdi,
+            rsi,
+            rbp,
+            rdx,
+            rcx,
+            rbx,
+            rax,
+            instruction_pointer,
+            code_segment,
+            flags,
+            stack_pointer,
+            stack_segment,
+        }
+    }
+
     fn initial(entry: u64, stack_pointer: u64) -> Self {
         let (code_segment, stack_segment) = crate::gdt::user_interrupt_selectors();
         Self {
@@ -74,22 +121,28 @@ impl InterruptContext {
 }
 
 struct Task {
-    pid: u64,
+    tid: u64,
+    tgid: u64,
     parent_pid: Option<u64>,
     state: TaskState,
-    process: Option<Box<Process>>,
+    process: Option<Arc<Mutex<Process>>>,
     context: UserContext,
     interrupt_context: InterruptContext,
-    descriptors: Vec<Option<FileDescriptor>>,
+    descriptors: Arc<Mutex<Vec<Option<FileDescriptor>>>>,
     credentials: Credentials,
-    signal_actions: [SignalAction; 32],
+    signal_actions: Arc<Mutex<[LinuxSigAction; 65]>>,
+    fs_base: u64,
+    blocked_mask: u64,
+    pending_signals: u64,
+    clear_child_tid: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TaskState {
     Runnable,
-    Waiting { child_pid: u64 },
+    Waiting { child_pid: u64, status_ptr: u64 },
     PipeWaiting { pipe_id: u64 },
+    FutexWait { uaddr: u64, bitset: u32 },
     Zombie { exit_code: u64 },
     Reaped,
 }
@@ -223,6 +276,41 @@ fn wake_pipe_waiters(pipe_id: u64) {
     }
 }
 
+fn futex_wake_unlocked(scheduler: &mut Scheduler, uaddr: u64, count: u32, bitset: u32) -> u64 {
+    let mut woken = 0u64;
+    for task in &mut scheduler.tasks {
+        if woken >= count as u64 {
+            break;
+        }
+        if let TaskState::FutexWait {
+            uaddr: w_uaddr,
+            bitset: w_bitset,
+        } = task.state
+        {
+            if w_uaddr == uaddr && (w_bitset & bitset) != 0 {
+                task.state = TaskState::Runnable;
+                woken += 1;
+            }
+        }
+    }
+    crate::serial_println!(
+        "[futex] wake uaddr={:#x} count={} bitset={:#x} woken={}",
+        uaddr,
+        count,
+        bitset,
+        woken
+    );
+    woken
+}
+
+pub fn futex_wake(uaddr: u64, count: u32, bitset: u32) -> u64 {
+    let mut scheduler = current_scheduler().lock();
+    let Some(scheduler) = scheduler.as_mut() else {
+        return 0;
+    };
+    futex_wake_unlocked(scheduler, uaddr, count, bitset)
+}
+
 struct Scheduler {
     tasks: Vec<Task>,
     current: usize,
@@ -308,7 +396,6 @@ pub unsafe fn start_ap(processes: Vec<Box<Process>>) -> ! {
 }
 
 unsafe fn start_on_current_cpu(processes: Vec<Box<Process>>, label: &str, native_tty: bool) -> ! {
-    crate::syscall::set_native_abi(native_tty);
     let kernel_space = paging::current_address_space();
     if processes.is_empty() {
         crate::shell::run();
@@ -316,8 +403,10 @@ unsafe fn start_on_current_cpu(processes: Vec<Box<Process>>, label: &str, native
     let tasks = processes
         .into_iter()
         .map(|process| {
+            let pid = allocate_pid();
             new_task(
-                allocate_pid(),
+                pid,
+                pid,
                 None,
                 Credentials::root(),
                 process,
@@ -370,13 +459,14 @@ pub fn yield_current(context: UserContext) -> *const UserContext {
             .process
             .as_mut()
             .expect("scheduler selected an exited task");
-        (task.context, process.address_space(), previous, next)
+        let space = process.lock().address_space();
+        (task.context, space, previous, next)
     };
     if previous != next {
         crate::serial_println!(
-            "[sched] yield pid={} -> {}",
-            scheduler_pid(previous),
-            scheduler_pid(next)
+            "[sched] yield tid={} -> {}",
+            scheduler_tid(previous),
+            scheduler_tid(next)
         );
     }
     crate::syscall::prepare_user_return(next_context, next_space)
@@ -414,6 +504,12 @@ pub fn timer_tick(context: *mut InterruptContext) -> *const InterruptContext {
             r13: scheduler.tasks[previous].interrupt_context.r13,
             r14: scheduler.tasks[previous].interrupt_context.r14,
             r15: scheduler.tasks[previous].interrupt_context.r15,
+            rdi: scheduler.tasks[previous].interrupt_context.rdi,
+            rsi: scheduler.tasks[previous].interrupt_context.rsi,
+            rdx: scheduler.tasks[previous].interrupt_context.rdx,
+            r8: scheduler.tasks[previous].interrupt_context.r8,
+            r9: scheduler.tasks[previous].interrupt_context.r9,
+            r10: scheduler.tasks[previous].interrupt_context.r10,
             instruction_pointer: scheduler.tasks[previous]
                 .interrupt_context
                 .instruction_pointer,
@@ -421,24 +517,39 @@ pub fn timer_tick(context: *mut InterruptContext) -> *const InterruptContext {
             stack_pointer: scheduler.tasks[previous].interrupt_context.stack_pointer,
         };
         scheduler.current = next;
-        let previous_pid = scheduler.tasks[previous].pid;
+        let previous_tid = scheduler.tasks[previous].tid;
         let task = &mut scheduler.tasks[next];
         let process = task
             .process
             .as_mut()
             .expect("scheduler selected an exited task");
+        let space = process.lock().address_space();
+        let target_rip = task.interrupt_context.instruction_pointer;
+        let target_cs = task.interrupt_context.code_segment;
+        let target_rsp = task.interrupt_context.stack_pointer;
         (
             &task.interrupt_context as *const InterruptContext,
-            process.address_space(),
-            previous_pid,
-            task.pid,
+            space,
+            previous_tid,
+            task.tid,
+            target_rip,
+            target_cs,
+            target_rsp,
         )
     };
 
     unsafe {
         paging::activate(next.1);
     }
-    crate::serial_println!("[sched] preempt pid={} -> {}", next.2, next.3);
+    crate::syscall::set_user_fs_base(current_fs_base());
+    crate::serial_println!(
+        "[sched] preempt tid={} -> {} rip={:#x} cs={:#x} rsp={:#x}",
+        next.2,
+        next.3,
+        next.4,
+        next.5,
+        next.6
+    );
     next.0
 }
 
@@ -448,26 +559,61 @@ pub fn exit_current(code: u64) -> *const UserContext {
         let scheduler = scheduler.as_mut().expect("process exit without scheduler");
         let current = scheduler.current;
         let parent_pid = scheduler.tasks[current].parent_pid;
+        let exited_tid = scheduler.tasks[current].tid;
+        let exited_tgid = scheduler.tasks[current].tgid;
+
+        // 1. Thread termination: clear_child_tid handling
+        if scheduler.tasks[current].clear_child_tid != 0 {
+            let clear_addr = scheduler.tasks[current].clear_child_tid;
+            scheduler.tasks[current].clear_child_tid = 0;
+            if let Some(ref proc_arc) = scheduler.tasks[current].process {
+                let space = proc_arc.lock().address_space();
+                let _ = crate::process::write_user_u32_in(space, clear_addr, 0);
+            }
+            futex_wake_unlocked(scheduler, clear_addr, 1, vanta_linuxd::FUTEX_BITSET_MATCH_ANY);
+        }
+
         let process = scheduler.tasks[current]
             .process
             .take()
             .expect("current task already exited");
         scheduler.tasks[current].state = TaskState::Zombie { exit_code: code };
-        let exited_pid = scheduler.tasks[current].pid;
-        if FOREGROUND_PID.load(AtomicOrdering::Relaxed) == exited_pid {
+
+        if FOREGROUND_PID.load(AtomicOrdering::Relaxed) == exited_tgid
+            || FOREGROUND_PID.load(AtomicOrdering::Relaxed) == exited_tid
+        {
             FOREGROUND_PID.store(0, AtomicOrdering::Relaxed);
         }
-        if let Some(parent) = scheduler.tasks.iter_mut().find(|task| {
-            task.pid == parent_pid.unwrap_or(0)
-                && task.state
-                    == TaskState::Waiting {
-                        child_pid: exited_pid,
+
+        // Check if other threads in the same TGID are still alive
+        let other_threads_alive = scheduler
+            .tasks
+            .iter()
+            .any(|t| t.tgid == exited_tgid && t.process.is_some());
+
+        if !other_threads_alive {
+            // Last thread in thread group exited: wake parent waiting for this TGID
+            if let Some(parent) = scheduler.tasks.iter_mut().find(|task| {
+                task.tgid == parent_pid.unwrap_or(0)
+                    && (matches!(task.state, TaskState::Waiting { child_pid, .. } if child_pid == exited_tgid || child_pid == u64::MAX || child_pid == 0))
+            }) {
+                let is_linux = parent.process.as_ref().map(|p| p.lock().personality() != crate::process::ProcessPersonality::NativeVanta).unwrap_or(false);
+                if let TaskState::Waiting { status_ptr, .. } = parent.state {
+                    if status_ptr != 0 {
+                        if let Some(ref parent_proc) = parent.process {
+                            let parent_space = parent_proc.lock().address_space();
+                            let status: i32 = ((code as i32) & 0xff) << 8;
+                            let _ = crate::process::write_user_u32_in(parent_space, status_ptr, status as u32);
+                        }
                     }
-        }) {
-            parent.state = TaskState::Runnable;
-            parent.context.return_value = code;
-            parent.interrupt_context.rax = code;
+                }
+                let return_val = if is_linux { exited_tgid } else { code };
+                parent.state = TaskState::Runnable;
+                parent.context.return_value = return_val;
+                parent.interrupt_context.rax = return_val;
+            }
         }
+
         let kernel_space = scheduler.kernel_space;
         unsafe {
             paging::activate(kernel_space);
@@ -484,7 +630,8 @@ pub fn exit_current(code: u64) -> *const UserContext {
                 .process
                 .as_mut()
                 .expect("scheduler selected an exited task");
-            (task.context, process.address_space(), index)
+            let space = process.lock().address_space();
+            (task.context, space, index)
         });
         (next, remaining, parent_pid, process)
     };
@@ -506,8 +653,39 @@ pub fn exit_current(code: u64) -> *const UserContext {
         x86_64::instructions::interrupts::enable();
         crate::shell::run()
     };
-    crate::serial_println!("[sched] continue pid={}", scheduler_pid(next));
+    crate::serial_println!("[sched] continue tid={}", scheduler_tid(next));
     crate::syscall::prepare_user_return(context, space)
+}
+
+pub fn exit_group_current(code: u64) -> *const UserContext {
+    {
+        let mut scheduler = current_scheduler().lock();
+        if let Some(ref mut sched) = *scheduler {
+            let current_tgid = sched.tasks[sched.current].tgid;
+            let current_tid = sched.tasks[sched.current].tid;
+            let mut clear_addrs = Vec::new();
+            for task in &mut sched.tasks {
+                if task.tgid == current_tgid && task.process.is_some() && task.tid != current_tid {
+                    if task.clear_child_tid != 0 {
+                        let clear_addr = task.clear_child_tid;
+                        task.clear_child_tid = 0;
+                        if let Some(ref proc_arc) = task.process {
+                            let space = proc_arc.lock().address_space();
+                            let _ = crate::process::write_user_u32_in(space, clear_addr, 0);
+                        }
+                        clear_addrs.push(clear_addr);
+                    }
+                    let proc = task.process.take();
+                    task.state = TaskState::Zombie { exit_code: code };
+                    drop(proc);
+                }
+            }
+            for clear_addr in clear_addrs {
+                futex_wake_unlocked(sched, clear_addr, 1, vanta_linuxd::FUTEX_BITSET_MATCH_ANY);
+            }
+        }
+    }
+    exit_current(code)
 }
 
 fn current_target() -> (UserContext, AddressSpace) {
@@ -519,7 +697,8 @@ fn current_target() -> (UserContext, AddressSpace) {
         .process
         .as_mut()
         .expect("scheduler current task is empty");
-    (task.context, process.address_space())
+    let space = process.lock().address_space();
+    (task.context, space)
 }
 
 fn next_alive(scheduler: &Scheduler, current: usize) -> Option<usize> {
@@ -536,7 +715,24 @@ pub fn current_pid() -> u64 {
     let scheduler = current_scheduler().lock();
     scheduler
         .as_ref()
-        .map(|scheduler| scheduler.tasks[scheduler.current].pid)
+        .map(|scheduler| scheduler.tasks[scheduler.current].tgid)
+        .unwrap_or(0)
+}
+
+pub fn current_tid() -> u64 {
+    let scheduler = current_scheduler().lock();
+    scheduler
+        .as_ref()
+        .map(|scheduler| scheduler.tasks[scheduler.current].tid)
+        .unwrap_or(0)
+}
+
+#[allow(dead_code)]
+pub fn current_tgid() -> u64 {
+    let scheduler = current_scheduler().lock();
+    scheduler
+        .as_ref()
+        .map(|scheduler| scheduler.tasks[scheduler.current].tgid)
         .unwrap_or(0)
 }
 
@@ -556,113 +752,286 @@ pub fn current_credentials() -> Credentials {
         .unwrap_or_else(Credentials::root)
 }
 
-pub fn signal_action(signal: u64) -> Option<SignalAction> {
-    let scheduler = current_scheduler().lock();
-    let scheduler = scheduler.as_ref()?;
-    if signal == 0 || signal > 31 {
-        return None;
-    }
-    Some(scheduler.tasks[scheduler.current].signal_actions[signal as usize])
+pub const UNBLOCKABLE_SIGNALS_MASK: u64 = (1 << (9 - 1)) | (1 << (19 - 1));
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SignalDefaultAction {
+    Terminate,
+    CoreDump,
+    Ignore,
+    Stop,
+    Continue,
 }
 
-pub fn set_signal_action(signal: u64, action: SignalAction) -> Result<SignalAction, ()> {
+pub fn default_signal_action(signo: u64) -> SignalDefaultAction {
+    match signo {
+        17 /* SIGCHLD */ | 23 /* SIGURG */ | 28 /* SIGWINCH */ => SignalDefaultAction::Ignore,
+        19 /* SIGSTOP */ | 20 /* SIGTSTP */ | 21 /* SIGTTIN */ | 22 /* SIGTTOU */ => SignalDefaultAction::Stop,
+        18 /* SIGCONT */ => SignalDefaultAction::Continue,
+        3 /* SIGQUIT */ | 4 /* SIGILL */ | 5 /* SIGTRAP */ | 6 /* SIGABRT */ | 7 /* SIGBUS */ | 8 /* SIGFPE */ | 11 /* SIGSEGV */ | 31 /* SIGSYS */ => SignalDefaultAction::CoreDump,
+        _ => SignalDefaultAction::Terminate,
+    }
+}
+
+pub fn current_blocked_mask() -> u64 {
+    let scheduler = current_scheduler().lock();
+    let Some(scheduler) = scheduler.as_ref() else {
+        return 0;
+    };
+    scheduler.tasks[scheduler.current].blocked_mask
+}
+
+pub fn set_current_blocked_mask(mask: u64) {
+    let mut scheduler = current_scheduler().lock();
+    let Some(scheduler) = scheduler.as_mut() else {
+        return;
+    };
+    scheduler.tasks[scheduler.current].blocked_mask = mask & !UNBLOCKABLE_SIGNALS_MASK;
+}
+
+#[allow(dead_code)]
+pub fn current_pending_signals() -> u64 {
+    let scheduler = current_scheduler().lock();
+    let Some(scheduler) = scheduler.as_ref() else {
+        return 0;
+    };
+    scheduler.tasks[scheduler.current].pending_signals
+}
+
+pub fn signal_action(signal: u64) -> Option<LinuxSigAction> {
+    let scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_ref()?;
+    if signal == 0 || signal > 64 {
+        return None;
+    }
+    let act = scheduler.tasks[scheduler.current].signal_actions.lock()[signal as usize];
+    Some(act)
+}
+
+pub fn set_signal_action(signal: u64, action: LinuxSigAction) -> Result<LinuxSigAction, ()> {
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
-    if signal == 0 || signal > 31 {
+    if signal == 0 || signal > 64 {
         return Err(());
     }
-    let slot = &mut scheduler.tasks[scheduler.current].signal_actions[signal as usize];
-    let old = *slot;
-    *slot = action;
+    if signal == 9 || signal == 19 {
+        return Err(());
+    }
+    let mut slot = scheduler.tasks[scheduler.current].signal_actions.lock();
+    let old = slot[signal as usize];
+    slot[signal as usize] = action;
     Ok(old)
 }
 
-pub fn kill_process(pid: u64, signal: u64) -> Result<(), ()> {
+pub fn reset_signal_action(signal: u64) {
     let mut scheduler = current_scheduler().lock();
-    let scheduler = scheduler.as_mut().ok_or(())?;
-    let current_pid = scheduler.tasks[scheduler.current].pid;
-    if pid == current_pid {
+    let Some(scheduler) = scheduler.as_mut() else {
+        return;
+    };
+    if signal >= 1 && signal <= 64 {
+        scheduler.tasks[scheduler.current].signal_actions.lock()[signal as usize] = LinuxSigAction::default();
+    }
+}
+
+pub fn check_pending_signal_to_deliver() -> Option<(u64, LinuxSigAction)> {
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut()?;
+    let task = &mut scheduler.tasks[scheduler.current];
+    if task.process.is_none() {
+        return None;
+    }
+    let deliverable = task.pending_signals & !task.blocked_mask;
+    if deliverable == 0 {
+        return None;
+    }
+    let bit = deliverable.trailing_zeros();
+    let signo = (bit + 1) as u64;
+    task.pending_signals &= !(1 << bit);
+    let action = task.signal_actions.lock()[signo as usize];
+    Some((signo, action))
+}
+
+pub fn kill_process(pid: u64, signal: u64) -> Result<(), ()> {
+    if signal > 64 {
         return Err(());
     }
-    let (process, parent_pid) = {
-        let target = scheduler
-            .tasks
-            .iter_mut()
-            .find(|task| task.pid == pid && task.process.is_some())
-            .ok_or(())?;
-        if target.signal_actions[signal as usize].handler == 1 {
-            return Ok(());
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let current_tgid = scheduler.tasks[scheduler.current].tgid;
+    let target_tgid = if pid == 0 { current_tgid } else { pid };
+
+    let matching_indices: Vec<usize> = scheduler
+        .tasks
+        .iter()
+        .enumerate()
+        .filter(|(_, task)| task.tgid == target_tgid && task.process.is_some())
+        .map(|(idx, _)| idx)
+        .collect();
+
+    if matching_indices.is_empty() {
+        return Err(());
+    }
+
+    if signal == 0 {
+        return Ok(());
+    }
+
+    let default_act = default_signal_action(signal);
+    let first_idx = matching_indices[0];
+    let action = scheduler.tasks[first_idx].signal_actions.lock()[signal as usize];
+
+    if signal == 9 || (action.sa_handler == 0 && (default_act == SignalDefaultAction::Terminate || default_act == SignalDefaultAction::CoreDump)) {
+        let parent_pid = scheduler.tasks[first_idx].parent_pid;
+        let mut clear_addrs = Vec::new();
+        for &idx in &matching_indices {
+            let task = &mut scheduler.tasks[idx];
+            if task.clear_child_tid != 0 {
+                let clear_addr = task.clear_child_tid;
+                task.clear_child_tid = 0;
+                if let Some(ref proc_arc) = task.process {
+                    let space = proc_arc.lock().address_space();
+                    let _ = crate::process::write_user_u32_in(space, clear_addr, 0);
+                }
+                clear_addrs.push(clear_addr);
+            }
+            let proc = task.process.take();
+            task.state = TaskState::Zombie {
+                exit_code: 128 + signal,
+            };
+            drop(proc);
         }
+        for clear_addr in clear_addrs {
+            futex_wake_unlocked(scheduler, clear_addr, 1, vanta_linuxd::FUTEX_BITSET_MATCH_ANY);
+        }
+
+        if FOREGROUND_PID.load(AtomicOrdering::Relaxed) == target_tgid {
+            FOREGROUND_PID.store(0, AtomicOrdering::Relaxed);
+        }
+
+        if let Some(parent_pid) = parent_pid {
+            if let Some(parent) = scheduler.tasks.iter_mut().find(|task| {
+                task.tgid == parent_pid && (matches!(task.state, TaskState::Waiting { child_pid, .. } if child_pid == target_tgid || child_pid == u64::MAX || child_pid == 0))
+            }) {
+                let is_linux = parent.process.as_ref().map(|p| p.lock().personality() != crate::process::ProcessPersonality::NativeVanta).unwrap_or(false);
+                if let TaskState::Waiting { status_ptr, .. } = parent.state {
+                    if status_ptr != 0 {
+                        if let Some(ref parent_proc) = parent.process {
+                            let parent_space = parent_proc.lock().address_space();
+                            let status: i32 = ((128 + signal) as i32) & 0x7f;
+                            let _ = crate::process::write_user_u32_in(parent_space, status_ptr, status as u32);
+                        }
+                    }
+                }
+                let return_val = if is_linux { target_tgid } else { 128 + signal };
+                parent.state = TaskState::Runnable;
+                parent.context.return_value = return_val;
+                parent.interrupt_context.rax = return_val;
+            }
+        }
+        return Ok(());
+    }
+
+    if action.sa_handler == 1 || (action.sa_handler == 0 && default_act == SignalDefaultAction::Ignore) {
+        return Ok(());
+    }
+
+    let target = &mut scheduler.tasks[first_idx];
+    target.pending_signals |= 1 << (signal - 1);
+    if matches!(target.state, TaskState::PipeWaiting { .. } | TaskState::FutexWait { .. }) {
+        target.state = TaskState::Runnable;
+    }
+    Ok(())
+}
+
+pub fn kill_thread(tid: u64, signal: u64) -> Result<(), ()> {
+    if signal > 64 {
+        return Err(());
+    }
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let target_idx = scheduler
+        .tasks
+        .iter()
+        .position(|task| task.tid == tid && task.process.is_some())
+        .ok_or(())?;
+
+    if signal == 0 {
+        return Ok(());
+    }
+
+    let action = scheduler.tasks[target_idx].signal_actions.lock()[signal as usize];
+    let default_act = default_signal_action(signal);
+    let target = &mut scheduler.tasks[target_idx];
+    if signal == 9 {
+        let clear_addr = if target.clear_child_tid != 0 {
+            let addr = target.clear_child_tid;
+            target.clear_child_tid = 0;
+            if let Some(ref proc_arc) = target.process {
+                let space = proc_arc.lock().address_space();
+                let _ = crate::process::write_user_u32_in(space, addr, 0);
+            }
+            Some(addr)
+        } else {
+            None
+        };
         let process = target.process.take();
-        let parent_pid = target.parent_pid;
         target.state = TaskState::Zombie {
             exit_code: 128 + signal,
         };
-        if FOREGROUND_PID.load(AtomicOrdering::Relaxed) == pid {
-            FOREGROUND_PID.store(0, AtomicOrdering::Relaxed);
+        drop(process);
+        if let Some(addr) = clear_addr {
+            futex_wake_unlocked(scheduler, addr, 1, vanta_linuxd::FUTEX_BITSET_MATCH_ANY);
         }
-        (process, parent_pid)
-    };
-    if let Some(parent_pid) = parent_pid {
-        if let Some(parent) = scheduler.tasks.iter_mut().find(|task| {
-            task.pid == parent_pid && task.state == TaskState::Waiting { child_pid: pid }
-        }) {
-            parent.state = TaskState::Runnable;
-            parent.context.return_value = 128 + signal;
-            parent.interrupt_context.rax = 128 + signal;
-        }
+        return Ok(());
     }
-    drop(process);
+
+    if action.sa_handler == 1 || (action.sa_handler == 0 && default_act == SignalDefaultAction::Ignore) {
+        return Ok(());
+    }
+    if action.sa_handler == 0 && (default_act == SignalDefaultAction::Terminate || default_act == SignalDefaultAction::CoreDump) {
+        let clear_addr = if target.clear_child_tid != 0 {
+            let addr = target.clear_child_tid;
+            target.clear_child_tid = 0;
+            if let Some(ref proc_arc) = target.process {
+                let space = proc_arc.lock().address_space();
+                let _ = crate::process::write_user_u32_in(space, addr, 0);
+            }
+            Some(addr)
+        } else {
+            None
+        };
+        let process = target.process.take();
+        target.state = TaskState::Zombie {
+            exit_code: 128 + signal,
+        };
+        drop(process);
+        if let Some(addr) = clear_addr {
+            futex_wake_unlocked(scheduler, addr, 1, vanta_linuxd::FUTEX_BITSET_MATCH_ANY);
+        }
+        return Ok(());
+    }
+
+    target.pending_signals |= 1 << (signal - 1);
+    if matches!(target.state, TaskState::PipeWaiting { .. } | TaskState::FutexWait { .. }) {
+        target.state = TaskState::Runnable;
+    }
     Ok(())
 }
 
 pub fn interrupt_current(signal: u64) {
-    let process = {
-        let mut scheduler = current_scheduler().lock();
-        let Some(scheduler) = scheduler.as_mut() else {
-            return;
-        };
-        let target_pid = {
-            let foreground = FOREGROUND_PID.load(AtomicOrdering::Relaxed);
-            if foreground == 0 {
-                scheduler.tasks[scheduler.current].pid
-            } else {
-                foreground
-            }
-        };
-        let Some(target) = scheduler
-            .tasks
-            .iter_mut()
-            .find(|task| task.pid == target_pid && task.process.is_some())
-        else {
-            return;
-        };
-        if signal > 31 || target.signal_actions[signal as usize].handler == 1 {
-            return;
+    if signal == 0 || signal > 64 {
+        return;
+    }
+    let target_pid = {
+        let foreground = FOREGROUND_PID.load(AtomicOrdering::Relaxed);
+        if foreground == 0 {
+            current_pid()
+        } else {
+            foreground
         }
-        let process = target.process.take();
-        if process.is_none() {
-            return;
-        }
-        let pid = target.pid;
-        target.state = TaskState::Zombie {
-            exit_code: 128 + signal,
-        };
-        let parent_pid = target.parent_pid;
-        FOREGROUND_PID.store(0, AtomicOrdering::Relaxed);
-        if let Some(parent_pid) = parent_pid {
-            if let Some(parent) = scheduler.tasks.iter_mut().find(|task| {
-                task.pid == parent_pid && task.state == TaskState::Waiting { child_pid: pid }
-            }) {
-                parent.state = TaskState::Runnable;
-                parent.context.return_value = 128 + signal;
-                parent.interrupt_context.rax = 128 + signal;
-            }
-        }
-        process
     };
-    drop(process);
-    crate::serial_println!("[signal] pid={} signal={}", current_pid(), signal);
+    let _ = kill_process(target_pid, signal);
+    crate::serial_println!("[signal] pid={} signal={}", target_pid, signal);
 }
 
 pub fn can_mutate_path(path: &str) -> bool {
@@ -679,28 +1048,37 @@ pub fn can_mutate_path(path: &str) -> bool {
 }
 
 pub fn spawn_current(process: Box<Process>) -> Result<u64, ()> {
-    const MAX_TASKS: usize = 16;
+    const MAX_TASKS: usize = 256;
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
-    if scheduler.tasks.len() == MAX_TASKS {
-        return Err(());
-    }
-    let parent_pid = scheduler.tasks[scheduler.current].pid;
+    let parent_tgid = scheduler.tasks[scheduler.current].tgid;
     let parent_credentials = scheduler.tasks[scheduler.current].credentials;
     let credentials = if parent_credentials.is_root() {
         Credentials::vanta()
     } else {
         parent_credentials
     };
-    let descriptors = scheduler.tasks[scheduler.current].descriptors.clone();
+    let descriptors = scheduler.tasks[scheduler.current].descriptors.lock().clone();
     let pid = allocate_pid();
-    scheduler.tasks.push(new_task(
+    let task = new_task(
         pid,
-        Some(parent_pid),
+        pid,
+        Some(parent_tgid),
         credentials,
         process,
         descriptors,
-    ));
+    );
+    if let Some(index) = scheduler
+        .tasks
+        .iter()
+        .position(|t| t.state == TaskState::Reaped)
+    {
+        scheduler.tasks[index] = task;
+    } else if scheduler.tasks.len() < MAX_TASKS {
+        scheduler.tasks.push(task);
+    } else {
+        return Err(());
+    }
     FOREGROUND_PID.store(pid, AtomicOrdering::Relaxed);
     Ok(pid)
 }
@@ -711,20 +1089,17 @@ pub fn spawn_with_stdio_current(
     stdout: u64,
     stderr: u64,
 ) -> Result<u64, ()> {
-    const MAX_TASKS: usize = 16;
+    const MAX_TASKS: usize = 256;
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
-    if scheduler.tasks.len() == MAX_TASKS {
-        return Err(());
-    }
-    let parent_pid = scheduler.tasks[scheduler.current].pid;
+    let parent_tgid = scheduler.tasks[scheduler.current].tgid;
     let parent_credentials = scheduler.tasks[scheduler.current].credentials;
     let credentials = if parent_credentials.is_root() {
         Credentials::vanta()
     } else {
         parent_credentials
     };
-    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.clone();
+    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock().clone();
     for (target, source) in [(0usize, stdin), (1usize, stdout), (2usize, stderr)] {
         if source == u64::MAX {
             continue;
@@ -741,15 +1116,153 @@ pub fn spawn_with_stdio_current(
         descriptors[target] = Some(descriptor);
     }
     let pid = allocate_pid();
-    scheduler.tasks.push(new_task(
+    let task = new_task(
         pid,
-        Some(parent_pid),
+        pid,
+        Some(parent_tgid),
         credentials,
         process,
         descriptors,
-    ));
+    );
+    if let Some(index) = scheduler
+        .tasks
+        .iter()
+        .position(|t| t.state == TaskState::Reaped)
+    {
+        scheduler.tasks[index] = task;
+    } else if scheduler.tasks.len() < MAX_TASKS {
+        scheduler.tasks.push(task);
+    } else {
+        return Err(());
+    }
     FOREGROUND_PID.store(pid, AtomicOrdering::Relaxed);
     Ok(pid)
+}
+
+pub fn clone_task_current(
+    flags: u64,
+    child_stack: u64,
+    parent_tidptr: u64,
+    child_tidptr: u64,
+    tls: u64,
+    context: UserContext,
+    interrupt_context: InterruptContext,
+) -> Result<u64, ()> {
+    const MAX_TASKS: usize = 256;
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let current = scheduler.current;
+    let parent_task = &scheduler.tasks[current];
+    let parent_process_arc = parent_task.process.as_ref().ok_or(())?;
+
+    let child_tid = allocate_pid();
+    let parent_tid = parent_task.tid;
+    let (child_tgid, child_parent_pid) = if flags & vanta_linuxd::CLONE_THREAD != 0 {
+        (parent_task.tgid, parent_task.parent_pid)
+    } else {
+        (child_tid, Some(parent_task.tgid))
+    };
+
+    let child_process = Arc::clone(parent_process_arc);
+
+    let child_descriptors = if flags & vanta_linuxd::CLONE_FILES != 0 {
+        Arc::clone(&parent_task.descriptors)
+    } else {
+        Arc::new(Mutex::new(parent_task.descriptors.lock().clone()))
+    };
+
+    let child_signal_actions = if flags & (vanta_linuxd::CLONE_SIGHAND | vanta_linuxd::CLONE_THREAD) != 0 {
+        Arc::clone(&parent_task.signal_actions)
+    } else {
+        Arc::new(Mutex::new(*parent_task.signal_actions.lock()))
+    };
+
+    let child_fs_base = if flags & vanta_linuxd::CLONE_SETTLS != 0 {
+        tls
+    } else {
+        parent_task.fs_base
+    };
+
+    let child_sp = if child_stack != 0 {
+        child_stack
+    } else {
+        context.stack_pointer
+    };
+
+    let child_clear_child_tid = if flags & vanta_linuxd::CLONE_CHILD_CLEARTID != 0 {
+        if parent_tidptr != 0 && parent_tidptr >= 0x1000_0000 {
+            parent_tidptr
+        } else if child_tidptr != 0 {
+            child_tidptr
+        } else {
+            parent_tidptr
+        }
+    } else {
+        0
+    };
+
+    let child_rip = interrupt_context.instruction_pointer;
+    let mut child_context = context;
+    child_context.return_value = 0; // Child returns 0
+    child_context.instruction_pointer = child_rip;
+    child_context.flags = context.flags | 0x202;
+    child_context.stack_pointer = child_sp;
+
+    let mut child_interrupt_context = interrupt_context;
+    child_interrupt_context.rax = 0;
+    child_interrupt_context.instruction_pointer = child_rip;
+    child_interrupt_context.flags = context.flags | 0x202;
+    child_interrupt_context.stack_pointer = child_sp;
+
+    let child_credentials = parent_task.credentials;
+    let blocked_mask = parent_task.blocked_mask;
+
+    let child_task = Task {
+        tid: child_tid,
+        tgid: child_tgid,
+        parent_pid: child_parent_pid,
+        state: TaskState::Runnable,
+        context: child_context,
+        interrupt_context: child_interrupt_context,
+        process: Some(child_process),
+        descriptors: child_descriptors,
+        credentials: child_credentials,
+        signal_actions: child_signal_actions,
+        fs_base: child_fs_base,
+        blocked_mask,
+        pending_signals: 0,
+        clear_child_tid: child_clear_child_tid,
+    };
+
+    let space = parent_process_arc.lock().address_space();
+
+    if flags & vanta_linuxd::CLONE_PARENT_SETTID != 0 && parent_tidptr != 0 {
+        let _ = crate::process::write_user_u32_in(space, parent_tidptr, child_tid as u32);
+    }
+    if flags & vanta_linuxd::CLONE_CHILD_SETTID != 0 && child_tidptr != 0 {
+        let _ = crate::process::write_user_u32_in(space, child_tidptr, child_tid as u32);
+    }
+
+    if let Some(index) = scheduler.tasks.iter().position(|t| t.state == TaskState::Reaped) {
+        scheduler.tasks[index] = child_task;
+    } else if scheduler.tasks.len() < MAX_TASKS {
+        scheduler.tasks.push(child_task);
+    } else {
+        return Err(());
+    }
+
+    crate::serial_println!(
+        "[sched] clone parent_tid={} child_tid={} tgid={} flags={:#x} tls={:#x} rip={:#x} sp={:#x}",
+        parent_tid,
+        child_tid,
+        child_tgid,
+        flags,
+        tls,
+        context.instruction_pointer,
+        child_sp
+    );
+
+    Ok(child_tid)
 }
 
 pub fn exec_current(process: Box<Process>) -> *const UserContext {
@@ -765,21 +1278,31 @@ pub fn exec_current(process: Box<Process>) -> *const UserContext {
             r13: 0,
             r14: 0,
             r15: 0,
+            rdi: 0,
+            rsi: 0,
+            rdx: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
             instruction_pointer: process.entry(),
             flags: 0x202,
             stack_pointer: process.user_stack_top(),
         };
         let interrupt_context =
             InterruptContext::initial(process.entry(), process.user_stack_top());
+        let descriptors = Arc::new(Mutex::new(standard_descriptors(false)));
+        let space = process.address_space();
+        let new_proc = Arc::new(Mutex::new(*process));
         let task = &mut scheduler.tasks[current];
-        let old = core::mem::replace(&mut task.process, Some(process));
+        let old = core::mem::replace(&mut task.process, Some(new_proc));
         task.context = context;
         task.interrupt_context = interrupt_context;
-        let space = task
-            .process
-            .as_mut()
-            .expect("exec lost process")
-            .address_space();
+        task.descriptors = descriptors;
+        task.signal_actions = Arc::new(Mutex::new([LinuxSigAction::default(); 65]));
+        task.blocked_mask = 0;
+        task.pending_signals = 0;
+        task.fs_base = 0;
+        task.clear_child_tid = 0;
         (context, space, old)
     };
     drop(previous);
@@ -787,20 +1310,36 @@ pub fn exec_current(process: Box<Process>) -> *const UserContext {
     crate::syscall::prepare_user_return(context, space)
 }
 
-pub fn wait_child_current(pid: u64) -> Result<Option<u64>, ()> {
+pub fn wait_child_current(child_target: u64) -> Result<Option<(u64, u64)>, ()> {
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
-    let parent_pid = scheduler.tasks[scheduler.current].pid;
-    let child = scheduler
-        .tasks
-        .iter_mut()
-        .find(|task| task.pid == pid && task.parent_pid == Some(parent_pid))
-        .ok_or(())?;
-    let TaskState::Zombie { exit_code } = child.state else {
-        return Ok(None);
-    };
-    child.state = TaskState::Reaped;
-    Ok(Some(exit_code))
+    let parent_tgid = scheduler.tasks[scheduler.current].tgid;
+
+    // Check if any matching child exists
+    let has_children = scheduler.tasks.iter().any(|t| {
+        t.parent_pid == Some(parent_tgid)
+            && (child_target == u64::MAX || child_target == 0 || t.tgid == child_target)
+    });
+    if !has_children {
+        return Err(());
+    }
+
+    // Check for reaped/zombie children
+    if let Some(index) = scheduler.tasks.iter().position(|t| {
+        t.parent_pid == Some(parent_tgid)
+            && (child_target == u64::MAX || child_target == 0 || t.tgid == child_target)
+            && matches!(t.state, TaskState::Zombie { .. })
+    }) {
+        let child_tgid = scheduler.tasks[index].tgid;
+        let exit_code = match scheduler.tasks[index].state {
+            TaskState::Zombie { exit_code } => exit_code,
+            _ => 0,
+        };
+        scheduler.tasks[index].state = TaskState::Reaped;
+        return Ok(Some((child_tgid, exit_code)));
+    }
+
+    Ok(None)
 }
 
 pub fn pipe_wait_key(descriptor: u64) -> Option<u64> {
@@ -812,13 +1351,82 @@ pub fn pipe_wait_key(descriptor: u64) -> Option<u64> {
     }
 }
 
+pub fn current_personality() -> crate::process::ProcessPersonality {
+    let scheduler = current_scheduler().lock();
+    scheduler
+        .as_ref()
+        .and_then(|scheduler| scheduler.tasks[scheduler.current].process.as_ref())
+        .map(|process| process.lock().personality())
+        .unwrap_or(crate::process::ProcessPersonality::NativeVanta)
+}
+
+pub fn current_fs_base() -> u64 {
+    let scheduler = current_scheduler().lock();
+    scheduler
+        .as_ref()
+        .map(|scheduler| scheduler.tasks[scheduler.current].fs_base)
+        .unwrap_or(0)
+}
+
+pub fn set_current_fs_base(fs_base: u64) -> Result<(), ()> {
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    scheduler.tasks[scheduler.current].fs_base = fs_base;
+    Ok(())
+}
+
+pub fn set_current_clear_child_tid(addr: u64) -> u64 {
+    let mut scheduler = current_scheduler().lock();
+    let Some(scheduler) = scheduler.as_mut() else {
+        return 0;
+    };
+    let task = &mut scheduler.tasks[scheduler.current];
+    task.clear_child_tid = addr;
+    task.tid
+}
+
+pub fn brk_current(new_brk: u64) -> u64 {
+    let proc_arc = {
+        let scheduler = current_scheduler().lock();
+        let Some(scheduler) = scheduler.as_ref() else {
+            return 0;
+        };
+        let Some(process) = scheduler.tasks[scheduler.current].process.as_ref() else {
+            return 0;
+        };
+        Arc::clone(process)
+    };
+    let res = proc_arc.lock().brk(new_brk);
+    res
+}
+
+pub fn mmap_current(addr: u64, length: u64, prot: u64, flags: u64) -> Result<u64, ()> {
+    let proc_arc = {
+        let scheduler = current_scheduler().lock();
+        let scheduler = scheduler.as_ref().ok_or(())?;
+        let process = scheduler.tasks[scheduler.current].process.as_ref().ok_or(())?;
+        Arc::clone(process)
+    };
+    let res = proc_arc.lock().mmap_anonymous(addr, length, prot, flags);
+    res
+}
+
+pub fn munmap_current(addr: u64, length: u64) -> Result<(), ()> {
+    let proc_arc = {
+        let scheduler = current_scheduler().lock();
+        let scheduler = scheduler.as_ref().ok_or(())?;
+        let process = scheduler.tasks[scheduler.current].process.as_ref().ok_or(())?;
+        Arc::clone(process)
+    };
+    let res = proc_arc.lock().munmap(addr, length);
+    res
+}
+
 pub fn block_pipe_current(descriptor: u64, context: UserContext) -> *const UserContext {
     let Some(pipe_id) = pipe_wait_key(descriptor) else {
         return crate::syscall::prepare_user_return(context, current_target().1);
     };
     let mut context = context;
-    // Resume the userland blocking wrapper with the same would-block result;
-    // it will retry the read after the pipe wakeup.
     context.return_value = crate::syscall::SYSCALL_WOULD_BLOCK;
     let (next_context, next_space, previous, next) = {
         let mut scheduler = current_scheduler().lock();
@@ -832,11 +1440,12 @@ pub fn block_pipe_current(descriptor: u64, context: UserContext) -> *const UserC
         scheduler.tasks[previous].interrupt_context.r14 = context.r14;
         scheduler.tasks[previous].interrupt_context.r15 = context.r15;
         scheduler.tasks[previous].interrupt_context.rax = context.return_value;
-        scheduler.tasks[previous]
-            .interrupt_context
-            .instruction_pointer = context.instruction_pointer;
-        scheduler.tasks[previous].interrupt_context.flags = context.flags;
+        let (code_segment, stack_segment) = crate::gdt::user_interrupt_selectors();
+        scheduler.tasks[previous].interrupt_context.instruction_pointer = context.instruction_pointer;
+        scheduler.tasks[previous].interrupt_context.flags = context.flags | 0x202;
         scheduler.tasks[previous].interrupt_context.stack_pointer = context.stack_pointer;
+        scheduler.tasks[previous].interrupt_context.code_segment = code_segment;
+        scheduler.tasks[previous].interrupt_context.stack_segment = stack_segment;
         scheduler.tasks[previous].state = TaskState::PipeWaiting { pipe_id };
 
         let Some(next) = next_alive(scheduler, previous) else {
@@ -845,7 +1454,8 @@ pub fn block_pipe_current(descriptor: u64, context: UserContext) -> *const UserC
                 .process
                 .as_mut()
                 .expect("blocked task lost process");
-            return crate::syscall::prepare_user_return(context, process.address_space());
+            let space = process.lock().address_space();
+            return crate::syscall::prepare_user_return(context, space);
         };
         scheduler.current = next;
         scheduler.slice_ticks = 0;
@@ -854,33 +1464,67 @@ pub fn block_pipe_current(descriptor: u64, context: UserContext) -> *const UserC
             .process
             .as_mut()
             .expect("scheduler selected an exited task");
-        (task.context, process.address_space(), previous, next)
+        let space = process.lock().address_space();
+        (task.context, space, previous, next)
     };
     crate::serial_println!(
-        "[sched] pipe block pid={} pipe={} -> {}",
-        scheduler_pid(previous),
+        "[sched] pipe block tid={} pipe={} -> {}",
+        scheduler_tid(previous),
         pipe_id,
-        scheduler_pid(next)
+        scheduler_tid(next)
     );
     crate::syscall::prepare_user_return(next_context, next_space)
 }
 
-pub fn wait_current(pid: u64, context: UserContext) -> *const UserContext {
+pub fn futex_wait_current(uaddr: u64, bitset: u32, context: UserContext) -> *const UserContext {
+    let mut context = context;
+    context.return_value = 0; // return 0 on successful wake
+    let (next_context, next_space, previous, next) = {
+        let mut scheduler = current_scheduler().lock();
+        let scheduler = scheduler.as_mut().expect("futex_wait without scheduler");
+        let previous = scheduler.current;
+        scheduler.tasks[previous].context = context;
+        scheduler.tasks[previous].interrupt_context.rbx = context.rbx;
+        scheduler.tasks[previous].interrupt_context.rbp = context.rbp;
+        scheduler.tasks[previous].interrupt_context.r12 = context.r12;
+        scheduler.tasks[previous].interrupt_context.r13 = context.r13;
+        scheduler.tasks[previous].interrupt_context.r14 = context.r14;
+        scheduler.tasks[previous].interrupt_context.r15 = context.r15;
+        scheduler.tasks[previous].interrupt_context.rax = 0;
+        let (code_segment, stack_segment) = crate::gdt::user_interrupt_selectors();
+        scheduler.tasks[previous].interrupt_context.instruction_pointer = context.instruction_pointer;
+        scheduler.tasks[previous].interrupt_context.flags = context.flags | 0x202;
+        scheduler.tasks[previous].interrupt_context.stack_pointer = context.stack_pointer;
+        scheduler.tasks[previous].interrupt_context.code_segment = code_segment;
+        scheduler.tasks[previous].interrupt_context.stack_segment = stack_segment;
+        scheduler.tasks[previous].state = TaskState::FutexWait { uaddr, bitset };
+
+        let next = next_alive(scheduler, previous).unwrap_or(previous);
+        scheduler.current = next;
+        scheduler.slice_ticks = 0;
+        let task = &mut scheduler.tasks[next];
+        let process = task
+            .process
+            .as_mut()
+            .expect("scheduler selected an exited task");
+        let space = process.lock().address_space();
+        (task.context, space, previous, next)
+    };
+    crate::serial_println!(
+        "[futex] wait tid={} uaddr={:#x} bitset={:#x} -> switch to tid={}",
+        scheduler_tid(previous),
+        uaddr,
+        bitset,
+        scheduler_tid(next)
+    );
+    crate::syscall::prepare_user_return(next_context, next_space)
+}
+
+pub fn wait_current(pid: u64, status_ptr: u64, context: UserContext) -> *const UserContext {
     let (next_context, next_space, previous, next) = {
         let mut scheduler = current_scheduler().lock();
         let scheduler = scheduler.as_mut().expect("wait without scheduler");
         let previous = scheduler.current;
-        let parent_pid = scheduler.tasks[previous].pid;
-        let child = scheduler
-            .tasks
-            .iter()
-            .find(|task| task.pid == pid && task.parent_pid == Some(parent_pid))
-            .expect("wait selected an invalid child");
-        assert_eq!(
-            child.state,
-            TaskState::Runnable,
-            "wait selected a dead child"
-        );
 
         scheduler.tasks[previous].context = context;
         scheduler.tasks[previous].interrupt_context.rbx = context.rbx;
@@ -890,12 +1534,13 @@ pub fn wait_current(pid: u64, context: UserContext) -> *const UserContext {
         scheduler.tasks[previous].interrupt_context.r14 = context.r14;
         scheduler.tasks[previous].interrupt_context.r15 = context.r15;
         scheduler.tasks[previous].interrupt_context.rax = context.return_value;
-        scheduler.tasks[previous]
-            .interrupt_context
-            .instruction_pointer = context.instruction_pointer;
-        scheduler.tasks[previous].interrupt_context.flags = context.flags;
+        let (code_segment, stack_segment) = crate::gdt::user_interrupt_selectors();
+        scheduler.tasks[previous].interrupt_context.instruction_pointer = context.instruction_pointer;
+        scheduler.tasks[previous].interrupt_context.flags = context.flags | 0x202;
         scheduler.tasks[previous].interrupt_context.stack_pointer = context.stack_pointer;
-        scheduler.tasks[previous].state = TaskState::Waiting { child_pid: pid };
+        scheduler.tasks[previous].interrupt_context.code_segment = code_segment;
+        scheduler.tasks[previous].interrupt_context.stack_segment = stack_segment;
+        scheduler.tasks[previous].state = TaskState::Waiting { child_pid: pid, status_ptr };
 
         let next = next_alive(scheduler, previous).expect("wait left no runnable task");
         scheduler.current = next;
@@ -905,45 +1550,60 @@ pub fn wait_current(pid: u64, context: UserContext) -> *const UserContext {
             .process
             .as_mut()
             .expect("scheduler selected an exited task");
-        (task.context, process.address_space(), previous, next)
+        let space = process.lock().address_space();
+        (task.context, space, previous, next)
     };
     crate::serial_println!(
-        "[sched] wait pid={} child={} -> {}",
-        scheduler_pid(previous),
+        "[sched] wait tid={} target={} -> {}",
+        scheduler_tid(previous),
         pid,
-        scheduler_pid(next)
+        scheduler_tid(next)
     );
     crate::syscall::prepare_user_return(next_context, next_space)
 }
 
 fn new_task(
-    pid: u64,
+    tid: u64,
+    tgid: u64,
     parent_pid: Option<u64>,
     credentials: Credentials,
     process: Box<Process>,
     descriptors: Vec<Option<FileDescriptor>>,
 ) -> Task {
+    let entry = process.entry();
+    let stack_top = process.user_stack_top();
     Task {
-        pid,
+        tid,
+        tgid,
         parent_pid,
         state: TaskState::Runnable,
         context: UserContext {
             return_value: 0,
             rbx: 0,
             rbp: 0,
-            r12: process.user_stack_top(),
+            r12: stack_top,
             r13: 0,
             r14: 0,
             r15: 0,
-            instruction_pointer: process.entry(),
+            rdi: 0,
+            rsi: 0,
+            rdx: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            instruction_pointer: entry,
             flags: 0x202,
-            stack_pointer: process.user_stack_top(),
+            stack_pointer: stack_top,
         },
-        interrupt_context: InterruptContext::initial(process.entry(), process.user_stack_top()),
-        process: Some(process),
-        descriptors,
+        interrupt_context: InterruptContext::initial(entry, stack_top),
+        process: Some(Arc::new(Mutex::new(*process))),
+        descriptors: Arc::new(Mutex::new(descriptors)),
         credentials,
-        signal_actions: [SignalAction::default(); 32],
+        signal_actions: Arc::new(Mutex::new([LinuxSigAction::default(); 65])),
+        fs_base: 0,
+        blocked_mask: 0,
+        pending_signals: 0,
+        clear_child_tid: 0,
     }
 }
 
@@ -984,14 +1644,14 @@ pub fn open_native_current(
 ) -> Result<u64, ()> {
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
-    let descriptors = &mut scheduler.tasks[scheduler.current].descriptors;
+    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
     let initial_offset = if append { contents.len() } else { 0 };
     let mut rights = Rights::READ | Rights::TRANSFER;
     if writable {
         rights |= Rights::WRITE;
     }
     install_descriptor(
-        descriptors,
+        &mut descriptors,
         FileDescriptor {
             capability: allocate_capability(),
             rights,
@@ -1008,9 +1668,9 @@ pub fn open_native_current(
 pub fn open_directory_current(entries: Vec<String>) -> Result<u64, ()> {
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
-    let descriptors = &mut scheduler.tasks[scheduler.current].descriptors;
+    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
     install_descriptor(
-        descriptors,
+        &mut descriptors,
         FileDescriptor {
             capability: allocate_capability(),
             rights: Rights::READ | Rights::TRANSFER,
@@ -1025,9 +1685,9 @@ pub fn open_directory_current(entries: Vec<String>) -> Result<u64, ()> {
 pub fn open_socket_current() -> Result<u64, ()> {
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
-    let descriptors = &mut scheduler.tasks[scheduler.current].descriptors;
+    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
     install_descriptor(
-        descriptors,
+        &mut descriptors,
         FileDescriptor {
             capability: allocate_capability(),
             rights: Rights::READ | Rights::WRITE | Rights::TRANSFER | Rights::CONNECT,
@@ -1062,7 +1722,7 @@ pub fn duplicate_current(descriptor: u64) -> Result<u64, ()> {
     let index: usize = descriptor.try_into().map_err(|_| ())?;
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
-    let descriptors = &mut scheduler.tasks[scheduler.current].descriptors;
+    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
     let duplicate = descriptors
         .get(index)
         .and_then(Option::as_ref)
@@ -1071,16 +1731,112 @@ pub fn duplicate_current(descriptor: u64) -> Result<u64, ()> {
     if duplicate.capability.is_invalid() || !duplicate.rights.contains(Rights::TRANSFER) {
         return Err(());
     }
-    install_descriptor(descriptors, duplicate)
+    install_descriptor(&mut descriptors, duplicate)
+}
+
+pub fn duplicate_to_current(old_fd: u64, new_fd: u64) -> Result<u64, ()> {
+    let old_index: usize = old_fd.try_into().map_err(|_| ())?;
+    let new_index: usize = new_fd.try_into().map_err(|_| ())?;
+    if new_index >= 256 {
+        return Err(());
+    }
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
+    let duplicate = descriptors
+        .get(old_index)
+        .and_then(Option::as_ref)
+        .cloned()
+        .ok_or(())?;
+    if old_index == new_index {
+        return Ok(new_fd);
+    }
+    if new_index >= descriptors.len() {
+        descriptors.resize_with(new_index + 1, || None);
+    }
+    descriptors[new_index] = Some(duplicate);
+    Ok(new_fd)
+}
+
+pub fn stat_linux_current(descriptor: u64) -> Result<[u8; 144], ()> {
+    let descriptor = current_descriptor(descriptor)?;
+    let mut stat = [0u8; 144];
+    let (mode, size, is_char) = match descriptor.resource {
+        DescriptorResource::File(file) => (0o100644u32, file.lock().contents.len() as i64, false),
+        DescriptorResource::Directory(_) => (0o040755u32, 4096i64, false),
+        DescriptorResource::Tty | DescriptorResource::Serial => (0o020666u32, 0i64, true),
+        DescriptorResource::PipeRead(_) | DescriptorResource::PipeWrite(_) => {
+            (0o010600u32, 0i64, false)
+        }
+        DescriptorResource::Socket(_) => (0o140666u32, 0i64, false),
+        DescriptorResource::Ipc(_) => (0o010600u32, 0i64, false),
+    };
+    let dev = 1u64;
+    let ino = 1u64;
+    let nlink = 1u64;
+    let uid = 1000u32;
+    let gid = 1000u32;
+    let rdev = if is_char { 5u64 } else { 0u64 };
+    let blksize = 4096i64;
+    let blocks = (size + 511) / 512;
+    stat[0..8].copy_from_slice(&dev.to_ne_bytes());
+    stat[8..16].copy_from_slice(&ino.to_ne_bytes());
+    stat[16..24].copy_from_slice(&nlink.to_ne_bytes());
+    stat[24..28].copy_from_slice(&mode.to_ne_bytes());
+    stat[28..32].copy_from_slice(&uid.to_ne_bytes());
+    stat[32..36].copy_from_slice(&gid.to_ne_bytes());
+    stat[40..48].copy_from_slice(&rdev.to_ne_bytes());
+    stat[48..56].copy_from_slice(&size.to_ne_bytes());
+    stat[56..64].copy_from_slice(&blksize.to_ne_bytes());
+    stat[64..72].copy_from_slice(&blocks.to_ne_bytes());
+    Ok(stat)
+}
+
+pub fn read_dir_linux_current(descriptor: u64, max_length: usize) -> Result<Vec<u8>, ()> {
+    let descriptor = current_descriptor(descriptor)?;
+    let DescriptorResource::Directory(directory) = descriptor.resource else {
+        return Err(());
+    };
+    let mut directory = directory.lock();
+    let mut bytes = Vec::new();
+    while directory.offset < directory.entries.len() {
+        let entry_name = directory.entries[directory.offset].as_bytes();
+        let name_len = entry_name.len();
+        let raw_len = 19 + name_len + 1;
+        let reclen = (raw_len + 7) & !7;
+        if bytes.len() + reclen > max_length && !bytes.is_empty() {
+            break;
+        }
+        let ino = (directory.offset + 1) as u64;
+        let off = (directory.offset + 1) as i64;
+        let file_type: u8 = if directory.entries[directory.offset].ends_with('/') {
+            4
+        } else {
+            8
+        };
+        let mut record = Vec::with_capacity(reclen);
+        record.extend_from_slice(&ino.to_ne_bytes());
+        record.extend_from_slice(&off.to_ne_bytes());
+        record.extend_from_slice(&(reclen as u16).to_ne_bytes());
+        record.push(file_type);
+        record.extend_from_slice(entry_name);
+        record.push(0);
+        while record.len() < reclen {
+            record.push(0);
+        }
+        bytes.extend_from_slice(&record);
+        directory.offset += 1;
+    }
+    Ok(bytes)
 }
 
 pub fn open_pipe_current() -> Result<(u64, u64), ()> {
     let (reader, writer) = Pipe::new();
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
-    let descriptors = &mut scheduler.tasks[scheduler.current].descriptors;
+    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
     let reader = install_descriptor(
-        descriptors,
+        &mut descriptors,
         FileDescriptor {
             capability: allocate_capability(),
             rights: Rights::READ | Rights::TRANSFER,
@@ -1088,7 +1844,7 @@ pub fn open_pipe_current() -> Result<(u64, u64), ()> {
         },
     )?;
     let writer = install_descriptor(
-        descriptors,
+        &mut descriptors,
         FileDescriptor {
             capability: allocate_capability(),
             rights: Rights::WRITE | Rights::TRANSFER,
@@ -1106,9 +1862,9 @@ pub fn open_ipc_pair_current() -> Result<(u64, u64), ()> {
     }));
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
-    let descriptors = &mut scheduler.tasks[scheduler.current].descriptors;
+    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
     let sender = install_descriptor(
-        descriptors,
+        &mut descriptors,
         FileDescriptor {
             capability: allocate_capability(),
             rights: Rights::WRITE | Rights::TRANSFER,
@@ -1119,7 +1875,7 @@ pub fn open_ipc_pair_current() -> Result<(u64, u64), ()> {
         },
     )?;
     let receiver = install_descriptor(
-        descriptors,
+        &mut descriptors,
         FileDescriptor {
             capability: allocate_capability(),
             rights: Rights::READ | Rights::TRANSFER,
@@ -1338,8 +2094,8 @@ pub fn close_current(descriptor: u64) -> Result<(), ()> {
     let descriptor = {
         let mut scheduler = current_scheduler().lock();
         let scheduler = scheduler.as_mut().ok_or(())?;
-        scheduler.tasks[scheduler.current]
-            .descriptors
+        let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
+        descriptors
             .get_mut(index)
             .ok_or(())?
             .take()
@@ -1455,19 +2211,29 @@ fn read_tty(length: usize) -> Vec<u8> {
 fn current_descriptor(descriptor: u64) -> Result<FileDescriptor, ()> {
     let index: usize = descriptor.try_into().map_err(|_| ())?;
     let scheduler = current_scheduler().lock();
-    scheduler
-        .as_ref()
-        .and_then(|scheduler| scheduler.tasks[scheduler.current].descriptors.get(index))
+    let scheduler = scheduler.as_ref().ok_or(())?;
+    let descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
+    descriptors
+        .get(index)
         .and_then(Option::as_ref)
         .cloned()
         .ok_or(())
 }
 
+#[allow(dead_code)]
 fn scheduler_pid(index: usize) -> u64 {
     current_scheduler()
         .lock()
         .as_ref()
-        .map(|scheduler| scheduler.tasks[index].pid)
+        .map(|scheduler| scheduler.tasks[index].tgid)
+        .unwrap_or(0)
+}
+
+fn scheduler_tid(index: usize) -> u64 {
+    current_scheduler()
+        .lock()
+        .as_ref()
+        .map(|scheduler| scheduler.tasks[index].tid)
         .unwrap_or(0)
 }
 
