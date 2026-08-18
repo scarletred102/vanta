@@ -26,9 +26,41 @@ const SYS_IPC_PAIR: u64 = Syscall::IpcPair.number() as u64;
 const SYS_IPC_SEND: u64 = Syscall::IpcSend.number() as u64;
 const SYS_IPC_RECV: u64 = Syscall::IpcRecv.number() as u64;
 const SYS_IPC_REVOKE: u64 = Syscall::IpcRevoke.number() as u64;
+const SYS_DISPLAY_INFO: u64 = Syscall::DisplayInfo.number() as u64;
+const SYS_DISPLAY_BLIT: u64 = Syscall::DisplayBlit.number() as u64;
+const SYS_DISPLAY_FLUSH: u64 = Syscall::DisplayFlush.number() as u64;
+const SYS_INPUT_POLL: u64 = Syscall::InputPoll.number() as u64;
+const SYS_AUDIO_PLAY: u64 = Syscall::AudioPlay.number() as u64;
 pub const READ_WOULD_BLOCK: u64 = u64::MAX - 5;
 pub const WAIT_WOULD_BLOCK: u64 = u64::MAX - 3;
 const IPC_WOULD_BLOCK: u64 = READ_WOULD_BLOCK;
+
+pub fn display_info(info: &mut vanta_abi::DisplayInfo) -> u64 {
+    syscall(SYS_DISPLAY_INFO, info as *mut _ as u64, 0, 0)
+}
+
+pub fn display_blit(x: u32, y: u32, w: u32, h: u32, buf: &[u8]) -> u64 {
+    syscall5(
+        SYS_DISPLAY_BLIT,
+        x as u64,
+        y as u64,
+        w as u64,
+        h as u64,
+        buf.as_ptr() as u64,
+    )
+}
+
+pub fn display_flush() -> u64 {
+    syscall(SYS_DISPLAY_FLUSH, 0, 0, 0)
+}
+
+pub fn input_poll(event: &mut vanta_abi::InputEvent) -> u64 {
+    syscall(SYS_INPUT_POLL, event as *mut _ as u64, 0, 0)
+}
+
+pub fn audio_play(buf: &[u8]) -> u64 {
+    syscall(SYS_AUDIO_PLAY, buf.as_ptr() as u64, buf.len() as u64, 0)
+}
 
 pub fn write(fd: u64, bytes: &[u8]) -> u64 {
     syscall(SYS_WRITE, fd, bytes.as_ptr() as u64, bytes.len() as u64)
@@ -276,6 +308,10 @@ fn syscall(number: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
 }
 
 fn syscall4(number: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
+    syscall5(number, arg1, arg2, arg3, arg4, 0)
+}
+
+fn syscall5(number: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64 {
     let result: u64;
     unsafe {
         asm!(
@@ -285,9 +321,9 @@ fn syscall4(number: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
             in("rsi") arg2,
             in("rdx") arg3,
             in("r10") arg4,
+            in("r8") arg5,
             lateout("rcx") _,
             lateout("r11") _,
-            lateout("r8") _,
             lateout("r9") _,
         );
     }

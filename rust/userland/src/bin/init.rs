@@ -276,7 +276,70 @@ fn gate_d_acceptance() -> bool {
     print_val(b"[linux] dynamic-net", dyn_net, dyn_net_exit);
     let dyn_net_ok = dyn_net != u64::MAX && dyn_net_exit == 0;
 
-    dyn_hello_ok && dyn_signal_ok && dyn_threads_ok && dyn_net_ok
+    let dyn_fork = vanta_userland::spawn_linux(b"/compat/linux/dynamic-fork");
+    let dyn_fork_exit = if dyn_fork != u64::MAX {
+        vanta_userland::wait(dyn_fork)
+    } else {
+        999
+    };
+    print_val(b"[linux] dynamic-fork", dyn_fork, dyn_fork_exit);
+    let dyn_fork_ok = dyn_fork != u64::MAX && dyn_fork_exit == 0;
+
+    let dyn_epoll = vanta_userland::spawn_linux(b"/compat/linux/dynamic-epoll");
+    let dyn_epoll_exit = if dyn_epoll != u64::MAX {
+        vanta_userland::wait(dyn_epoll)
+    } else {
+        999
+    };
+    print_val(b"[linux] dynamic-epoll", dyn_epoll, dyn_epoll_exit);
+    let dyn_epoll_ok = dyn_epoll != u64::MAX && dyn_epoll_exit == 0;
+
+    let dyn_proc = vanta_userland::spawn_linux(b"/compat/linux/dynamic-proc");
+    let dyn_proc_exit = if dyn_proc != u64::MAX {
+        vanta_userland::wait(dyn_proc)
+    } else {
+        999
+    };
+    print_val(b"[linux] dynamic-proc", dyn_proc, dyn_proc_exit);
+    let dyn_proc_ok = dyn_proc != u64::MAX && dyn_proc_exit == 0;
+
+    let displayd_pid = vanta_userland::spawn(b"/bin/displayd");
+    let displayd_exit = if displayd_pid != u64::MAX {
+        vanta_userland::wait(displayd_pid)
+    } else {
+        999
+    };
+    print_val(b"[desktop] displayd", displayd_pid, displayd_exit);
+    let displayd_ok = displayd_pid != u64::MAX && displayd_exit == 0;
+
+    let desktop_pid = vanta_userland::spawn(b"/bin/desktop");
+    let desktop_exit = if desktop_pid != u64::MAX {
+        vanta_userland::wait(desktop_pid)
+    } else {
+        999
+    };
+    print_val(b"[desktop] desktop", desktop_pid, desktop_exit);
+    let desktop_ok = desktop_pid != u64::MAX && desktop_exit == 0;
+
+    let audiod_pid = vanta_userland::spawn(b"/bin/audiod");
+    let audiod_exit = if audiod_pid != u64::MAX {
+        vanta_userland::wait(audiod_pid)
+    } else {
+        999
+    };
+    print_val(b"[desktop] audiod", audiod_pid, audiod_exit);
+    let audiod_ok = audiod_pid != u64::MAX && audiod_exit == 0;
+
+    dyn_hello_ok
+        && dyn_signal_ok
+        && dyn_threads_ok
+        && dyn_net_ok
+        && dyn_fork_ok
+        && dyn_epoll_ok
+        && dyn_proc_ok
+        && displayd_ok
+        && desktop_ok
+        && audiod_ok
 }
 
 fn audit_persistence() -> bool {

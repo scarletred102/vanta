@@ -54,3 +54,15 @@ path = "src/bin/vfsd.rs"
 [[bin]]
 name = "auditd"
 path = "src/bin/auditd.rs"
+
+[[bin]]
+name = "displayd"
+path = "src/bin/displayd.rs"
+
+[[bin]]
+name = "desktop"
+path = "src/bin/desktop.rs"
+
+[[bin]]
+name = "audiod"
+path = "src/bin/audiod.rs"
