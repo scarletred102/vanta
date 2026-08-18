@@ -173,6 +173,59 @@ pub fn init(fb: &'static Framebuffer) {
     *WRITER.lock() = Some(Writer::new(fb));
 }
 
+pub fn display_info() -> vanta_abi::DisplayInfo {
+    if let Some(ref writer) = *WRITER.lock() {
+        vanta_abi::DisplayInfo {
+            width: writer.width as u32,
+            height: writer.height as u32,
+            pitch: writer.pitch as u32,
+            bpp: (writer.bpp * 8) as u32,
+        }
+    } else {
+        vanta_abi::DisplayInfo {
+            width: 1024,
+            height: 768,
+            pitch: 4096,
+            bpp: 32,
+        }
+    }
+}
+
+pub fn display_blit(x: usize, y: usize, w: usize, h: usize, buf: &[u8]) -> bool {
+    let mut writer = WRITER.lock();
+    let Some(ref mut writer) = *writer else {
+        return false;
+    };
+    let bpp = writer.bpp;
+    let pitch = writer.pitch;
+    let width = writer.width;
+    let height = writer.height;
+    if x >= width || y >= height {
+        return false;
+    }
+    let actual_w = w.min(width - x);
+    let actual_h = h.min(height - y);
+    let row_bytes = actual_w * bpp;
+    for row in 0..actual_h {
+        let src_off = row * w * bpp;
+        let dst_off = (y + row) * pitch + x * bpp;
+        if src_off + row_bytes <= buf.len() {
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    buf.as_ptr().add(src_off),
+                    writer.addr.add(dst_off),
+                    row_bytes,
+                );
+            }
+        }
+    }
+    true
+}
+
+pub fn display_flush() -> bool {
+    true
+}
+
 pub fn with_writer<F: FnOnce(&mut Writer)>(f: F) {
     x86_64::instructions::interrupts::without_interrupts(|| {
         if let Some(w) = WRITER.lock().as_mut() {

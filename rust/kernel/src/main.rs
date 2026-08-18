@@ -20,6 +20,7 @@ mod framebuffer;
 mod fs;
 mod gdt;
 mod heap;
+mod input;
 mod interrupts;
 mod ioapic;
 mod keyboard;

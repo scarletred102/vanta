@@ -196,6 +196,62 @@ pub fn create_address_space() -> Result<AddressSpace, MapError> {
     Ok(AddressSpace { pml4_phys: pml4 })
 }
 
+/// Deep clone all user-half mappings from src_space into a newly allocated address space.
+pub fn clone_user_address_space(src_space: AddressSpace) -> Result<AddressSpace, MapError> {
+    let new_space = create_address_space()?;
+    for pml4_idx in 0..256 {
+        let pml4_entry = read_entry(src_space.pml4_phys, pml4_idx).ok_or(MapError::NoHhdm)?;
+        if pml4_entry & PRESENT == 0 {
+            continue;
+        }
+        let pdpt_phys = pml4_entry & ADDRESS_MASK;
+        for pdpt_idx in 0..512 {
+            let pdpt_entry = read_entry(pdpt_phys, pdpt_idx).ok_or(MapError::NoHhdm)?;
+            if pdpt_entry & PRESENT == 0 || pdpt_entry & HUGE_PAGE != 0 {
+                continue;
+            }
+            let pd_phys = pdpt_entry & ADDRESS_MASK;
+            for pd_idx in 0..512 {
+                let pd_entry = read_entry(pd_phys, pd_idx).ok_or(MapError::NoHhdm)?;
+                if pd_entry & PRESENT == 0 || pd_entry & HUGE_PAGE != 0 {
+                    continue;
+                }
+                let pt_phys = pd_entry & ADDRESS_MASK;
+                for pt_idx in 0..512 {
+                    let pt_entry = read_entry(pt_phys, pt_idx).ok_or(MapError::NoHhdm)?;
+                    if pt_entry & PRESENT == 0 {
+                        continue;
+                    }
+                    let src_phys = pt_entry & ADDRESS_MASK;
+                    let flags = pt_entry & !ADDRESS_MASK;
+                    let vaddr = ((pml4_idx as u64) << 39)
+                        | ((pdpt_idx as u64) << 30)
+                        | ((pd_idx as u64) << 21)
+                        | ((pt_idx as u64) << 12);
+                    let vaddr = if vaddr & (1 << 47) != 0 {
+                        vaddr | 0xffff_0000_0000_0000
+                    } else {
+                        vaddr
+                    };
+
+                    let new_frame = memory::alloc_frame().ok_or(MapError::OutOfMemory)?;
+                    let src_virt = phys_to_virt(src_phys).ok_or(MapError::NoHhdm)?;
+                    let dst_virt = phys_to_virt(new_frame.0).ok_or(MapError::NoHhdm)?;
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            src_virt as *const u8,
+                            dst_virt as *mut u8,
+                            PAGE_SIZE as usize,
+                        );
+                    }
+                    map(new_space, vaddr, new_frame.0, flags)?;
+                }
+            }
+        }
+    }
+    Ok(new_space)
+}
+
 /// Map one 4 KiB page into an address space.
 pub fn map(
     space: AddressSpace,

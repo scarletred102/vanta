@@ -43,6 +43,11 @@ pub const SYS_IPC_REVOKE: u64 = Syscall::IpcRevoke.number() as u64;
 pub const SYS_BRK: u64 = Syscall::Brk.number() as u64;
 pub const SYS_MMAP: u64 = Syscall::MMap.number() as u64;
 pub const SYS_MUNMAP: u64 = Syscall::MUnmap.number() as u64;
+pub const SYS_DISPLAY_INFO: u64 = Syscall::DisplayInfo.number() as u64;
+pub const SYS_DISPLAY_BLIT: u64 = Syscall::DisplayBlit.number() as u64;
+pub const SYS_DISPLAY_FLUSH: u64 = Syscall::DisplayFlush.number() as u64;
+pub const SYS_INPUT_POLL: u64 = Syscall::InputPoll.number() as u64;
+pub const SYS_AUDIO_PLAY: u64 = Syscall::AudioPlay.number() as u64;
 const SYSCALL_RETURN_EXIT: u64 = u64::MAX;
 const SYSCALL_RETURN_YIELD: u64 = u64::MAX - 2;
 const SYSCALL_RETURN_WAIT: u64 = u64::MAX - 3;
@@ -595,8 +600,25 @@ fn dispatch_linux(
             | vanta_linuxd::LinuxOp::GetPeerName
             | vanta_linuxd::LinuxOp::SetSockOpt
             | vanta_linuxd::LinuxOp::GetSockOpt => 0,
-            vanta_linuxd::LinuxOp::Fork
-            | vanta_linuxd::LinuxOp::VFork => 0,
+            vanta_linuxd::LinuxOp::Fork | vanta_linuxd::LinuxOp::VFork => {
+                linux_clone_user(0, 0, 0, 0, 0)
+            }
+            vanta_linuxd::LinuxOp::EPollCreate | vanta_linuxd::LinuxOp::EPollCreate1 => {
+                crate::scheduler::epoll_create1_current(arg1 as u32).unwrap_or(SYSCALL_ERROR)
+            }
+            vanta_linuxd::LinuxOp::EPollCtl => {
+                linux_epoll_ctl_user(arg1, arg2 as u32, arg3, arg4)
+            }
+            vanta_linuxd::LinuxOp::EPollWait | vanta_linuxd::LinuxOp::EPollPWait => {
+                linux_epoll_wait_user(arg1, arg2, arg3 as usize, arg4)
+            }
+            vanta_linuxd::LinuxOp::EventFd | vanta_linuxd::LinuxOp::EventFd2 => {
+                crate::scheduler::eventfd_current(arg1, arg2 as u32).unwrap_or(SYSCALL_ERROR)
+            }
+            vanta_linuxd::LinuxOp::Poll | vanta_linuxd::LinuxOp::PPoll => {
+                linux_poll_user(arg1, arg2 as usize, arg3)
+            }
+            vanta_linuxd::LinuxOp::Select | vanta_linuxd::LinuxOp::PSelect6 => 0,
             _ => SYSCALL_ERROR,
         },
         vanta_linuxd::BrokerDecision::Unsupported { number } => {
@@ -689,6 +711,40 @@ fn linux_mmap_user(
     base_vaddr
 }
 
+fn generate_procfs_content(path: &str) -> Option<alloc::vec::Vec<u8>> {
+    use alloc::format;
+    if path == "/proc/cpuinfo" {
+        Some(alloc::vec::Vec::from(
+            "processor\t: 0\nvendor_id\t: GenuineIntel\nmodel name\t: Vanta Virtual CPU\ncpu MHz\t\t: 3000.000\n\n"
+        ))
+    } else if path == "/proc/meminfo" {
+        Some(alloc::vec::Vec::from(
+            "MemTotal:       2097152 kB\nMemFree:        1843200 kB\nMemAvailable:   1843200 kB\nBuffers:           1024 kB\nCached:           16384 kB\n"
+        ))
+    } else if path == "/proc/version" {
+        Some(alloc::vec::Vec::from(
+            "Linux version 6.1.0-vanta (vanta@build) (gcc 12.2.0) #1 SMP PREEMPT\n"
+        ))
+    } else if path == "/proc/uptime" {
+        Some(alloc::vec::Vec::from("10.00 10.00\n"))
+    } else if path.ends_with("/status") {
+        let pid = crate::scheduler::current_pid();
+        let ppid = crate::scheduler::current_parent_pid();
+        let s = format!("Name:\tvanta-app\nState:\tR (running)\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nThreads:\t1\n", pid, pid, ppid);
+        Some(s.into_bytes())
+    } else if path.ends_with("/cmdline") {
+        Some(alloc::vec::Vec::from("vanta-app\0"))
+    } else if path.ends_with("/maps") {
+        Some(alloc::vec::Vec::from(
+            "00400000-00450000 r-xp 00000000 00:00 0 [text]\n700000000000-700000020000 rw-p 00000000 00:00 0 [heap]\n7fffffff0000-800000000000 rw-p 00000000 00:00 0 [stack]\n"
+        ))
+    } else if path.starts_with("/sys/class/net/") {
+        Some(alloc::vec::Vec::from("up\n"))
+    } else {
+        None
+    }
+}
+
 fn linux_openat_user(_directory_fd: u64, path_pointer: u64, flags: u64) -> u64 {
     let Ok(path) = copy_cstring(path_pointer, 256) else {
         return SYSCALL_ERROR;
@@ -696,6 +752,17 @@ fn linux_openat_user(_directory_fd: u64, path_pointer: u64, flags: u64) -> u64 {
     let Ok(path) = core::str::from_utf8(&path) else {
         return SYSCALL_ERROR;
     };
+    if path.starts_with("/proc/") || path.starts_with("/sys/") {
+        if let Some(contents) = generate_procfs_content(path) {
+            return crate::scheduler::open_native_current(
+                alloc::string::String::from(path),
+                contents,
+                false,
+                false,
+            )
+            .unwrap_or(SYSCALL_ERROR);
+        }
+    }
     if let Ok(entries) = crate::vfs::list_dir_root(path) {
         return crate::scheduler::open_directory_current(entries).unwrap_or(SYSCALL_ERROR);
     }
@@ -729,6 +796,31 @@ fn linux_stat_user(path_pointer: u64, pointer: u64) -> u64 {
     let Ok(path) = core::str::from_utf8(&path) else {
         return SYSCALL_ERROR;
     };
+    if path.starts_with("/proc/") || path.starts_with("/sys/") {
+        let size = generate_procfs_content(path).map(|c| c.len() as i64).unwrap_or(64);
+        let mut stat = [0u8; 144];
+        let mode = 0o100444u32;
+        let dev = 1u64;
+        let ino = 1u64;
+        let nlink = 1u64;
+        let uid = 0u32;
+        let gid = 0u32;
+        let blksize = 4096i64;
+        let blocks = (size + 511) / 512;
+        stat[0..8].copy_from_slice(&dev.to_ne_bytes());
+        stat[8..16].copy_from_slice(&ino.to_ne_bytes());
+        stat[16..24].copy_from_slice(&nlink.to_ne_bytes());
+        stat[24..28].copy_from_slice(&mode.to_ne_bytes());
+        stat[28..32].copy_from_slice(&uid.to_ne_bytes());
+        stat[32..36].copy_from_slice(&gid.to_ne_bytes());
+        stat[48..56].copy_from_slice(&size.to_ne_bytes());
+        stat[56..64].copy_from_slice(&blksize.to_ne_bytes());
+        stat[64..72].copy_from_slice(&blocks.to_ne_bytes());
+        if copy_to_user(pointer, &stat).is_err() {
+            return SYSCALL_ERROR;
+        }
+        return 0;
+    }
     let credentials = crate::scheduler::current_credentials();
     let Ok(info) = crate::vfs::file_info_root_as(path, &credentials) else {
         return SYSCALL_ERROR;
@@ -1404,6 +1496,11 @@ fn dispatch_native(
         SYS_YIELD => SYSCALL_RETURN_YIELD,
         SYS_GETPID => crate::scheduler::current_pid(),
         SYS_GETPPID => crate::scheduler::current_parent_pid(),
+        SYS_DISPLAY_INFO => display_info_user(arg1),
+        SYS_DISPLAY_BLIT => display_blit_user(arg1, arg2, arg3, _arg4, _arg5),
+        SYS_DISPLAY_FLUSH => display_flush_user(),
+        SYS_INPUT_POLL => input_poll_user(arg1),
+        SYS_AUDIO_PLAY => audio_play_user(arg1, arg2),
         SYS_EXIT => {
             current_cpu_local().exit_code = arg1;
             SYSCALL_RETURN_EXIT
@@ -1517,10 +1614,8 @@ fn open_native_user(pointer: u64, length: u64, flags: u64) -> u64 {
 }
 
 fn read_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
-    if length > 256 {
-        return SYSCALL_ERROR;
-    }
-    let Ok(bytes) = crate::scheduler::read_current(descriptor, length as usize) else {
+    let to_read = length.min(65536) as usize;
+    let Ok(bytes) = crate::scheduler::read_current(descriptor, to_read) else {
         return SYSCALL_ERROR;
     };
     if copy_to_user(pointer, &bytes).is_err() {
@@ -1956,4 +2051,130 @@ extern "C" fn vanta_syscall_exit(code: u64) -> *const UserContext {
 #[no_mangle]
 extern "C" fn vanta_syscall_thread_exit(code: u64) -> *const UserContext {
     crate::scheduler::exit_current(code)
+}
+
+fn linux_epoll_ctl_user(epfd: u64, op: u32, fd: u64, event_ptr: u64) -> u64 {
+    let (events, data) = if op != vanta_linuxd::EPOLL_CTL_DEL {
+        let Ok(ev_bytes) = copy_from_user(event_ptr, core::mem::size_of::<vanta_linuxd::epoll_event>() as u64, false) else {
+            return SYSCALL_ERROR;
+        };
+        let ev = unsafe { *(ev_bytes.as_ptr() as *const vanta_linuxd::epoll_event) };
+        (ev.events, ev.data)
+    } else {
+        (0, 0)
+    };
+    if crate::scheduler::epoll_ctl_current(epfd, op, fd, events, data).is_ok() {
+        0
+    } else {
+        SYSCALL_ERROR
+    }
+}
+
+fn linux_epoll_wait_user(epfd: u64, events_ptr: u64, maxevents: usize, _timeout: u64) -> u64 {
+    let Ok(ready) = crate::scheduler::epoll_wait_current(epfd, maxevents) else {
+        return SYSCALL_ERROR;
+    };
+    let mut out_events = alloc::vec::Vec::new();
+    for (events, data) in &ready {
+        out_events.push(vanta_linuxd::epoll_event {
+            events: *events,
+            data: *data,
+        });
+    }
+    let byte_len = out_events.len() * core::mem::size_of::<vanta_linuxd::epoll_event>();
+    if byte_len > 0 {
+        let slice = unsafe {
+            core::slice::from_raw_parts(out_events.as_ptr() as *const u8, byte_len)
+        };
+        if copy_to_user(events_ptr, slice).is_err() {
+            return SYSCALL_ERROR;
+        }
+    }
+    ready.len() as u64
+}
+
+fn linux_poll_user(fds_ptr: u64, nfds: usize, _timeout: u64) -> u64 {
+    let elem_size = core::mem::size_of::<vanta_linuxd::pollfd>();
+    let total_bytes = nfds * elem_size;
+    let Ok(bytes) = copy_from_user(fds_ptr, total_bytes as u64, false) else {
+        return SYSCALL_ERROR;
+    };
+    let mut fds: alloc::vec::Vec<vanta_linuxd::pollfd> = alloc::vec::Vec::with_capacity(nfds);
+    for i in 0..nfds {
+        let pfd = unsafe { *(bytes.as_ptr().add(i * elem_size) as *const vanta_linuxd::pollfd) };
+        fds.push(pfd);
+    }
+    let mut ready_count = 0u64;
+    for pfd in &mut fds {
+        pfd.revents = 0;
+        if pfd.fd >= 0 {
+            let mut rev = 0i16;
+            if pfd.events & (vanta_linuxd::EPOLLIN as i16) != 0 {
+                rev |= vanta_linuxd::EPOLLIN as i16;
+            }
+            if pfd.events & (vanta_linuxd::EPOLLOUT as i16) != 0 {
+                rev |= vanta_linuxd::EPOLLOUT as i16;
+            }
+            pfd.revents = rev;
+            if rev != 0 {
+                ready_count += 1;
+            }
+        }
+    }
+    let slice = unsafe {
+        core::slice::from_raw_parts(fds.as_ptr() as *const u8, total_bytes)
+    };
+    let _ = copy_to_user(fds_ptr, slice);
+    ready_count
+}
+
+fn display_info_user(info_ptr: u64) -> u64 {
+    let info = crate::framebuffer::display_info();
+    let slice = unsafe {
+        core::slice::from_raw_parts(&info as *const _ as *const u8, core::mem::size_of::<vanta_abi::DisplayInfo>())
+    };
+    if copy_to_user(info_ptr, slice).is_ok() {
+        0
+    } else {
+        SYSCALL_ERROR
+    }
+}
+
+fn display_blit_user(x: u64, y: u64, w: u64, h: u64, buf_ptr: u64) -> u64 {
+    let byte_len = w.saturating_mul(h).saturating_mul(4);
+    let Ok(buf) = copy_from_user(buf_ptr, byte_len, false) else {
+        return SYSCALL_ERROR;
+    };
+    if crate::framebuffer::display_blit(x as usize, y as usize, w as usize, h as usize, &buf) {
+        0
+    } else {
+        SYSCALL_ERROR
+    }
+}
+
+fn display_flush_user() -> u64 {
+    if crate::framebuffer::display_flush() {
+        0
+    } else {
+        SYSCALL_ERROR
+    }
+}
+
+fn input_poll_user(event_ptr: u64) -> u64 {
+    if let Some(ev) = crate::input::poll_event() {
+        let slice = unsafe {
+            core::slice::from_raw_parts(&ev as *const _ as *const u8, core::mem::size_of::<vanta_abi::InputEvent>())
+        };
+        if copy_to_user(event_ptr, slice).is_ok() {
+            1
+        } else {
+            SYSCALL_ERROR
+        }
+    } else {
+        0
+    }
+}
+
+fn audio_play_user(_buf_ptr: u64, len: u64) -> u64 {
+    len
 }

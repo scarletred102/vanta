@@ -86,6 +86,21 @@ impl Process {
         self.user_stack_top
     }
 
+    pub fn clone_process(&self, new_space: AddressSpace) -> Self {
+        Self {
+            space: new_space,
+            entry: self.entry,
+            personality: self.personality,
+            fs_base: self.fs_base,
+            user_stack_top: self.user_stack_top,
+            brk_start: self.brk_start,
+            brk_current: self.brk_current,
+            mmap_next: self.mmap_next,
+            mappings: self.mappings.clone(),
+            destroyed: false,
+        }
+    }
+
     pub fn brk(&mut self, new_brk: u64) -> u64 {
         if new_brk == 0 || new_brk < self.brk_start {
             return self.brk_current;

@@ -164,6 +164,33 @@ enum DescriptorResource {
     PipeWrite(Arc<Mutex<PipeWriter>>),
     Socket(Arc<Mutex<OpenSocket>>),
     Ipc(Arc<Mutex<IpcEndpoint>>),
+    Epoll(Arc<Mutex<EpollInstance>>),
+    EventFd(Arc<Mutex<EventFdInstance>>),
+    PtyMaster(Arc<Mutex<PtyState>>),
+    PtySlave(Arc<Mutex<PtyState>>),
+}
+
+pub struct EpollItem {
+    pub fd: u64,
+    pub events: u32,
+    pub data: u64,
+}
+
+pub struct EpollInstance {
+    pub items: Vec<EpollItem>,
+}
+
+pub struct EventFdInstance {
+    pub counter: u64,
+    pub flags: u32,
+}
+
+pub struct PtyState {
+    pub master_to_slave: Vec<u8>,
+    pub slave_to_master: Vec<u8>,
+    pub rows: u16,
+    pub cols: u16,
+    pub raw: bool,
 }
 
 struct OpenFile {
@@ -1163,7 +1190,15 @@ pub fn clone_task_current(
         (child_tid, Some(parent_task.tgid))
     };
 
-    let child_process = Arc::clone(parent_process_arc);
+    let child_process = if flags & vanta_linuxd::CLONE_VM != 0 {
+        Arc::clone(parent_process_arc)
+    } else {
+        let parent_proc = parent_process_arc.lock();
+        let cloned_space = crate::paging::clone_user_address_space(parent_proc.address_space())
+            .map_err(|_| ())?;
+        let new_proc = parent_proc.clone_process(cloned_space);
+        Arc::new(Mutex::new(new_proc))
+    };
 
     let child_descriptors = if flags & vanta_linuxd::CLONE_FILES != 0 {
         Arc::clone(&parent_task.descriptors)
@@ -1769,7 +1804,10 @@ pub fn stat_linux_current(descriptor: u64) -> Result<[u8; 144], ()> {
             (0o010600u32, 0i64, false)
         }
         DescriptorResource::Socket(_) => (0o140666u32, 0i64, false),
-        DescriptorResource::Ipc(_) => (0o010600u32, 0i64, false),
+        DescriptorResource::Ipc(_) | DescriptorResource::Epoll(_) | DescriptorResource::EventFd(_) => {
+            (0o010600u32, 0i64, false)
+        }
+        DescriptorResource::PtyMaster(_) | DescriptorResource::PtySlave(_) => (0o020666u32, 0i64, true),
     };
     let dev = 1u64;
     let ino = 1u64;
@@ -2064,6 +2102,34 @@ pub fn read_current(descriptor: u64, length: usize) -> Result<Vec<u8>, ()> {
         DescriptorResource::PipeRead(reader) => Ok(reader.lock().read(length)),
         DescriptorResource::PipeWrite(_) => Err(()),
         DescriptorResource::Ipc(_) => Err(()),
+        DescriptorResource::EventFd(efd) => {
+            let mut efd = efd.lock();
+            if efd.counter == 0 {
+                return Err(());
+            }
+            let val = if efd.flags & vanta_linuxd::EFD_SEMAPHORE != 0 {
+                efd.counter = efd.counter.saturating_sub(1);
+                1u64
+            } else {
+                let v = efd.counter;
+                efd.counter = 0;
+                v
+            };
+            Ok(val.to_ne_bytes().to_vec())
+        }
+        DescriptorResource::PtyMaster(pty) => {
+            let mut pty = pty.lock();
+            let count = pty.slave_to_master.len().min(length);
+            let bytes = pty.slave_to_master.drain(..count).collect();
+            Ok(bytes)
+        }
+        DescriptorResource::PtySlave(pty) => {
+            let mut pty = pty.lock();
+            let count = pty.master_to_slave.len().min(length);
+            let bytes = pty.master_to_slave.drain(..count).collect();
+            Ok(bytes)
+        }
+        DescriptorResource::Epoll(_) => Err(()),
     }
 }
 
@@ -2115,7 +2181,11 @@ pub fn close_current(descriptor: u64) -> Result<(), ()> {
         | DescriptorResource::Serial
         | DescriptorResource::Tty
         | DescriptorResource::PipeRead(_)
-        | DescriptorResource::Ipc(_) => {}
+        | DescriptorResource::Ipc(_)
+        | DescriptorResource::Epoll(_)
+        | DescriptorResource::EventFd(_)
+        | DescriptorResource::PtyMaster(_)
+        | DescriptorResource::PtySlave(_) => {}
     }
     Ok(())
 }
@@ -2157,9 +2227,139 @@ pub fn write_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
             let credentials = current_credentials();
             crate::vfs::write_root_as(&file.path, &file.contents, &credentials).map_err(|_| ())
         }
-        DescriptorResource::Directory(_) | DescriptorResource::PipeRead(_) => Err(()),
+        DescriptorResource::EventFd(efd) => {
+            if bytes.len() < 8 {
+                return Err(());
+            }
+            let mut val_bytes = [0u8; 8];
+            val_bytes.copy_from_slice(&bytes[..8]);
+            let val = u64::from_ne_bytes(val_bytes);
+            let mut efd = efd.lock();
+            efd.counter = efd.counter.saturating_add(val);
+            Ok(())
+        }
+        DescriptorResource::PtyMaster(pty) => {
+            let mut pty = pty.lock();
+            pty.master_to_slave.extend_from_slice(bytes);
+            Ok(())
+        }
+        DescriptorResource::PtySlave(pty) => {
+            let mut pty = pty.lock();
+            pty.slave_to_master.extend_from_slice(bytes);
+            Ok(())
+        }
+        DescriptorResource::Directory(_) | DescriptorResource::PipeRead(_) | DescriptorResource::Epoll(_) => Err(()),
         DescriptorResource::Ipc(_) => Err(()),
     }
+}
+
+pub fn epoll_create1_current(_flags: u32) -> Result<u64, ()> {
+    let epoll = Arc::new(Mutex::new(EpollInstance { items: Vec::new() }));
+    let descriptor = FileDescriptor {
+        capability: allocate_capability(),
+        rights: Rights::READ | Rights::WRITE,
+        resource: DescriptorResource::Epoll(epoll),
+    };
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
+    install_descriptor(&mut descriptors, descriptor)
+}
+
+pub fn epoll_ctl_current(epfd: u64, op: u32, fd: u64, events: u32, data: u64) -> Result<(), ()> {
+    let descriptor = current_descriptor(epfd)?;
+    let DescriptorResource::Epoll(epoll) = descriptor.resource else {
+        return Err(());
+    };
+    let mut epoll = epoll.lock();
+    match op {
+        vanta_linuxd::EPOLL_CTL_ADD => {
+            if epoll.items.iter().any(|item| item.fd == fd) {
+                return Err(());
+            }
+            epoll.items.push(EpollItem { fd, events, data });
+            Ok(())
+        }
+        vanta_linuxd::EPOLL_CTL_MOD => {
+            let item = epoll.items.iter_mut().find(|item| item.fd == fd).ok_or(())?;
+            item.events = events;
+            item.data = data;
+            Ok(())
+        }
+        vanta_linuxd::EPOLL_CTL_DEL => {
+            let pos = epoll.items.iter().position(|item| item.fd == fd).ok_or(())?;
+            epoll.items.remove(pos);
+            Ok(())
+        }
+        _ => Err(()),
+    }
+}
+
+pub fn epoll_wait_current(epfd: u64, maxevents: usize) -> Result<Vec<(u32, u64)>, ()> {
+    let descriptor = current_descriptor(epfd)?;
+    let DescriptorResource::Epoll(epoll) = descriptor.resource else {
+        return Err(());
+    };
+    let epoll = epoll.lock();
+    let mut ready = Vec::new();
+    for item in &epoll.items {
+        if ready.len() >= maxevents {
+            break;
+        }
+        let Ok(desc) = current_descriptor(item.fd) else {
+            continue;
+        };
+        let mut revents = 0;
+        match desc.resource {
+            DescriptorResource::PipeRead(ref reader) => {
+                let state = reader.lock();
+                if !state.state.lock().bytes.is_empty() {
+                    revents |= vanta_linuxd::EPOLLIN;
+                }
+                if !state.state.lock().writer_open {
+                    revents |= vanta_linuxd::EPOLLHUP;
+                }
+            }
+            DescriptorResource::PipeWrite(ref writer) => {
+                let state = writer.lock();
+                if state.state.lock().bytes.len() < 4096 {
+                    revents |= vanta_linuxd::EPOLLOUT;
+                }
+            }
+            DescriptorResource::Socket(ref sock) => {
+                if sock.lock().connection.is_some() {
+                    revents |= vanta_linuxd::EPOLLIN | vanta_linuxd::EPOLLOUT;
+                }
+            }
+            DescriptorResource::EventFd(ref efd) => {
+                if efd.lock().counter > 0 {
+                    revents |= vanta_linuxd::EPOLLIN;
+                }
+                revents |= vanta_linuxd::EPOLLOUT;
+            }
+            DescriptorResource::File(_) | DescriptorResource::Serial | DescriptorResource::Tty => {
+                revents |= vanta_linuxd::EPOLLIN | vanta_linuxd::EPOLLOUT;
+            }
+            _ => {}
+        }
+        if revents & item.events != 0 {
+            ready.push((revents & item.events, item.data));
+        }
+    }
+    Ok(ready)
+}
+
+pub fn eventfd_current(initval: u64, flags: u32) -> Result<u64, ()> {
+    let efd = Arc::new(Mutex::new(EventFdInstance { counter: initval, flags }));
+    let descriptor = FileDescriptor {
+        capability: allocate_capability(),
+        rights: Rights::READ | Rights::WRITE,
+        resource: DescriptorResource::EventFd(efd),
+    };
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
+    install_descriptor(&mut descriptors, descriptor)
 }
 
 fn decode_tty_scancode(scancode: u8) -> Option<u8> {
