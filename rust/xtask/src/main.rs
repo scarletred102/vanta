@@ -213,6 +213,9 @@ fn build_default_image() -> Result<(), String> {
     let service_test = read_file(root.join("target/x86_64-unknown-none/release/service-test"))?;
     let vfsd = read_file(root.join("target/x86_64-unknown-none/release/vfsd"))?;
     let auditd = read_file(root.join("target/x86_64-unknown-none/release/auditd"))?;
+    let displayd = read_file(root.join("target/x86_64-unknown-none/release/displayd"))?;
+    let desktop = read_file(root.join("target/x86_64-unknown-none/release/desktop"))?;
+    let audiod = read_file(root.join("target/x86_64-unknown-none/release/audiod"))?;
     let ls = read_file(root.join("target/x86_64-unknown-none/release/ls"))?;
     let mkdir = read_file(root.join("target/x86_64-unknown-none/release/mkdir"))?;
     let rm = read_file(root.join("target/x86_64-unknown-none/release/rm"))?;
@@ -245,6 +248,9 @@ fn build_default_image() -> Result<(), String> {
     let linux_dynamic_signal = read_file(root.join("target/compat/linux/dynamic-signal"))?;
     let linux_dynamic_threads = read_file(root.join("target/compat/linux/dynamic-threads"))?;
     let linux_dynamic_net = read_file(root.join("target/compat/linux/dynamic-net"))?;
+    let linux_dynamic_fork = read_file(root.join("target/compat/linux/dynamic-fork"))?;
+    let linux_dynamic_epoll = read_file(root.join("target/compat/linux/dynamic-epoll"))?;
+    let linux_dynamic_proc = read_file(root.join("target/compat/linux/dynamic-proc"))?;
     let vanta_release = b"Vanta OS 0.1.0 (musl-compat)\n".to_vec();
     let root_files = [
         RootFile {
@@ -542,6 +548,27 @@ fn build_default_image() -> Result<(), String> {
             gid: 0,
         },
         RootFile {
+            path: "/bin/displayd",
+            contents: &displayd,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/desktop",
+            contents: &desktop,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/audiod",
+            contents: &audiod,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
             path: "/compat/linux/dynamic-threads",
             contents: &linux_dynamic_threads,
             mode: 0o755,
@@ -551,6 +578,27 @@ fn build_default_image() -> Result<(), String> {
         RootFile {
             path: "/compat/linux/dynamic-net",
             contents: &linux_dynamic_net,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/dynamic-fork",
+            contents: &linux_dynamic_fork,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/dynamic-epoll",
+            contents: &linux_dynamic_epoll,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/dynamic-proc",
+            contents: &linux_dynamic_proc,
             mode: 0o755,
             uid: 0,
             gid: 0,
@@ -783,6 +831,9 @@ fn build_linux_samples(root: &Path) -> Result<(), String> {
         ("dynamic-signal.c", "dynamic-signal"),
         ("dynamic-threads.c", "dynamic-threads"),
         ("dynamic-net.c", "dynamic-net"),
+        ("dynamic-fork.c", "dynamic-fork"),
+        ("dynamic-epoll.c", "dynamic-epoll"),
+        ("dynamic-proc.c", "dynamic-proc"),
     ] {
         let sample_output = output.join(executable);
         let status = Command::new("zig")

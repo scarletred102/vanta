@@ -115,6 +115,11 @@ $common = @(
     "[linux-dynamic] thread spawned",
     "[net] virtio-net adapter initialized",
     "[linux-dynamic] network acceptance passed",
+    "[linux-fork] COW fork and waitpid verified",
+    "[linux-epoll] epoll and eventfd multiplexing verified",
+    "[linux-proc] /proc virtual filesystem verified",
+    "desktop: GUI window surface composition verified",
+    "audiod: PCM audio stream playback verified",
     "[linux] Gate D dynamic & networking acceptance passed"
 )
 
