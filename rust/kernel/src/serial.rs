@@ -15,6 +15,15 @@ pub fn init() {
     let _ = SERIAL1.lock();
 }
 
+pub fn try_receive() -> Option<u8> {
+    let line_status = unsafe { x86_64::instructions::port::PortReadOnly::<u8>::new(0x3FD).read() };
+    if line_status & 1 != 0 {
+        Some(SERIAL1.lock().receive())
+    } else {
+        None
+    }
+}
+
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use x86_64::instructions::interrupts;

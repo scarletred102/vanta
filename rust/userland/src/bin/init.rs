@@ -303,7 +303,7 @@ fn gate_d_acceptance() -> bool {
     print_val(b"[linux] dynamic-proc", dyn_proc, dyn_proc_exit);
     let dyn_proc_ok = dyn_proc != u64::MAX && dyn_proc_exit == 0;
 
-    let displayd_pid = vanta_userland::spawn(b"/bin/displayd");
+    let displayd_pid = vanta_userland::spawn_with_args(b"/bin/displayd", &[b"displayd", b"--test"], 0, 1, 2);
     let displayd_exit = if displayd_pid != u64::MAX {
         vanta_userland::wait(displayd_pid)
     } else {

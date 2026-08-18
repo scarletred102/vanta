@@ -2386,6 +2386,10 @@ fn decode_tty_scancode(scancode: u8) -> Option<u8> {
 fn read_tty(length: usize) -> Vec<u8> {
     let mut bytes = Vec::new();
     while bytes.len() < length {
+        if let Some(byte) = crate::serial::try_receive() {
+            bytes.push(byte);
+            continue;
+        }
         let Some(scancode) = crate::keyboard::pop_scancode() else {
             break;
         };

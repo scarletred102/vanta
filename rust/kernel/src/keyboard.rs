@@ -17,6 +17,7 @@ pub fn push_scancode(sc: u8) {
     } else if sc == 0x2e && CTRL_HELD.load(Ordering::Relaxed) {
         crate::scheduler::interrupt_current(2);
     }
+    crate::input::inject_key(sc as u32, sc & 0x80 == 0);
     let _ = SCANCODE_QUEUE.enqueue(sc);
 }
 

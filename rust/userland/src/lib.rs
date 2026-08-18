@@ -220,6 +220,9 @@ pub fn spawn_with_args(path: &[u8], args: &[&[u8]], stdin: u64, stdout: u64, std
 pub fn arg(index: usize) -> Option<&'static [u8]> {
     let stack: u64;
     unsafe { core::arch::asm!("mov {}, r12", out(reg) stack, options(nostack, preserves_flags)) };
+    if stack == 0 {
+        return None;
+    }
     let argc = unsafe { *(stack as *const u64) as usize };
     if index >= argc || index >= 8 {
         return None;

@@ -25,6 +25,7 @@ mod interrupts;
 mod ioapic;
 mod keyboard;
 mod memory;
+mod mouse;
 mod net;
 mod network;
 mod paging;
@@ -454,9 +455,10 @@ extern "C" fn bootstrap_main() -> ! {
         if matches!(ioapic, Some(Ok(_))) {
             pics.write_masks(0xff, 0xff);
         } else {
-            pics.write_masks(0b1111_1100, 0b1111_1111);
+            pics.write_masks(0b1111_1000, 0b1110_1111);
         }
     }
+    mouse::init();
     if matches!(ioapic, Some(Ok(_))) {
         interrupts::use_ioapic();
     }

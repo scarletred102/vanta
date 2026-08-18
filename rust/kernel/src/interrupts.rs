@@ -16,6 +16,7 @@ pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 pub enum HwIrq {
     Timer = PIC_1_OFFSET,
     Keyboard,
+    Mouse = PIC_1_OFFSET + 12,
 }
 
 impl HwIrq {
@@ -51,6 +52,7 @@ lazy_static! {
             ));
         }
         idt[HwIrq::Keyboard.as_u8()].set_handler_fn(keyboard_handler);
+        idt[HwIrq::Mouse.as_u8()].set_handler_fn(mouse_handler);
         idt
     };
 }
@@ -177,5 +179,17 @@ extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
         crate::apic::end_of_interrupt();
     } else {
         unsafe { PICS.lock().notify_end_of_interrupt(HwIrq::Keyboard.as_u8()) };
+    }
+}
+
+extern "x86-interrupt" fn mouse_handler(_frame: InterruptStackFrame) {
+    use x86_64::instructions::port::Port;
+    let mut data: Port<u8> = Port::new(0x60);
+    let byte: u8 = unsafe { data.read() };
+    crate::mouse::process_byte(byte);
+    if IOAPIC_ACTIVE.load(Ordering::Acquire) {
+        crate::apic::end_of_interrupt();
+    } else {
+        unsafe { PICS.lock().notify_end_of_interrupt(HwIrq::Mouse.as_u8()) };
     }
 }
