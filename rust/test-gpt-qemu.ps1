@@ -93,7 +93,29 @@ $common = @(
     "[procd] service authority revoked",
     "[native] acceptance: procd-gate ok",
     "[native] acceptance: audit-persistence ok",
-    "[native] Gate B IPC acceptance passed"
+    "[native] Gate B IPC acceptance passed",
+    "[linux] hello",
+    "[linux-musl] hello",
+    "[linux-musl] memory allocation passed",
+    "[linux-musl] file io passed",
+    "[linux-musl] directory iteration passed",
+    "[linux-musl] pipes and descriptors passed",
+    "[linux-musl] posix system info passed",
+    "[linux-musl] script sequencing passed",
+    "[linux-musl] socket execution passed",
+    "[linuxd] unsupported syscall number=9999",
+    "[linux] dynamic interpreter rejected",
+    "[linux] Gate C personality acceptance passed",
+    "[linux-dynamic] dynamic interpreter loaded",
+    "[linux-dynamic] hello from dynamic musl/glibc",
+    "[linux-dynamic] signal handler registered",
+    "[linux-dynamic] signal delivered and handled",
+    "[linux-dynamic] rt_sigreturn restored context",
+    "[linux-dynamic] thread TLS verified",
+    "[linux-dynamic] thread spawned",
+    "[net] virtio-net adapter initialized",
+    "[linux-dynamic] network acceptance passed",
+    "[linux] Gate D dynamic & networking acceptance passed"
 )
 
 $first = Invoke-GptBoot -DiskImage $image -Label "first boot" -Required ($common + "[storage] RedoxFS reboot persistence marker: false")
@@ -114,4 +136,4 @@ Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required 
 ) | Out-Null
 Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
 
-Write-Host "[test] GPT Gate A and Gate B native acceptance passed"
+Write-Host "[test] GPT Gate A, Gate B, Gate C, and Gate D native acceptance passed"

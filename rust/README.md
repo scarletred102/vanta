@@ -130,7 +130,7 @@ rust/
 - HHDM translation and page-table inspection of Limine's active mappings
 - Mapped reclaiming Rust kernel heap with `Vec`/`Box` allocation self-checks
 - ELF64 PT_LOAD loading into an isolated address space with user/NX flags
-- Reclaimable process mappings and a four-page user stack
+- Reclaimable process mappings and a sixteen-page bootstrap user stack
 - Ring-3 entry through `iretq`, with a TSS privilege stack and syscall test
 - Per-CPU `syscall`/`sysretq` ABI with `open`, `read`, `write`, `close`,
   `lseek`, `dup`, `getpid`, `yield`, `exit`, `socket`, and `connect` calls
@@ -200,8 +200,10 @@ rust/
   revocation
 - Reproducible GPT image builds with source/toolchain revisions, image hashes,
   and deterministic per-root-artifact metadata in `target/vanta-gpt.manifest`
-- Linux syscall translation and static-ELF metadata contracts as the foundation
-  for the later executable Linux personality
+- Linux `LinuxX86_64Static` process personality with foreign syscall trap
+  routing through `vanta-linuxd`; static hello/cat/ls/server QEMU samples,
+  deterministic unsupported-syscall reporting, and dynamic `PT_INTERP`
+  rejection are part of the Gate C acceptance
 
 ## TCP user ABI
 

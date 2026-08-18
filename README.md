@@ -41,12 +41,13 @@ reference helper is run from `rust/` as `..\scripts\fetch-linux.ps1`.
 
 ## Current limitations
 
-The active sprint is closing the native platform before compatibility expansion:
-Gate A is verified, `libvanta` now constructs argv/envp-aware processes,
+The active sprint has verified Gate A and Gate B and landed the Gate C
+execution foundation: `libvanta` constructs argv/envp-aware processes,
 `vanta-services` provides bounded IPC with restart, revocation, and audit
-behavior, and `vanta-linuxd` provides static-ELF and syscall-broker
-foundations. Kernel service transport and executable Linux personality samples
-are the next integration targets.
+behavior, and `vanta-linuxd` routes static Linux ELF traps through an explicit
+foreign-ABI broker. QEMU runs Linux hello/cat/ls/server samples and checks
+deterministic unsupported and dynamic-interpreter failures. Broader musl/POSIX
+coverage remains in progress.
 
 - Development and verification currently target QEMU; Vanta makes no
   hardware-compatibility promise.

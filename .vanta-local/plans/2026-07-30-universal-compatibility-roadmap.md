@@ -1,7 +1,7 @@
 # Vanta Universal Compatibility Roadmap
 
-Status: active sprint; Gate A and Gate B complete; Linux personality and
-post-Gate-B platform expansion in progress
+Status: active sprint; Gate A and Gate B complete; Gate C execution foundation
+verified; broader Linux compatibility expansion in progress
 Date: 2026-07-30  
 Scope: make Vanta a credible alternative platform for desktop, server, developer, and mobile workloads while preserving a Rust-first security boundary.
 
@@ -21,9 +21,9 @@ sprint now has executable Gate A and Gate B evidence rather than architecture
 only:
 `libvanta` now has real argv/envp process setup, `vanta-services` has bounded
 IPC and lifecycle behavior, a booted `/bin/procd`/`/bin/vfsd`/`/bin/auditd`
-service flow, and `linuxd` has static ELF metadata and an explicit broker
-decision path. Linux QEMU binaries and the later GUI/Windows/Android/VM tracks
-remain the next integration layers.
+service flow, and `linuxd` now drives a Linux-personality process context and
+static ELF QEMU samples. Broader musl/POSIX workloads and the later
+GUI/Windows/Android/VM tracks remain the next integration layers.
 
 ### ABI v0 contract update — 2026-08-01
 
@@ -432,10 +432,16 @@ Implement a separate `linuxd` harness that loads a static x86_64 ELF and transla
 
 Acceptance: static musl hello, cat, and ls run in QEMU; native ABI tests remain unchanged.
 
-Status: static x86_64 ELF metadata parsing, `PT_INTERP` rejection, syscall
-translation, and an explicit broker decision contract are implemented and
-host-tested in `vanta-linuxd`. Kernel trap integration and QEMU Linux samples
-remain.
+Status: Gate C execution foundation is complete on 2026-08-17. The kernel
+tracks `NativeVanta` versus `LinuxX86_64Static` process personality, routes
+foreign traps through `vanta-linuxd`, translates Linux `read`, `write`,
+`openat`, `close`, `lseek`, `getdents`, `getpid`, and `exit`, and emits a stable
+unsupported-syscall diagnostic/error. The GPT image runs static Linux hello,
+cat, directory ls, and server-response samples in QEMU; dynamic `PT_INTERP`
+images are rejected deterministically. The Gate C acceptance also requires
+reproducible image output and all Gate A/B persistence/recovery markers.
+Broader musl startup, shell scripts, memory, pipes, signals, wait/exec,
+networking, and package corpus coverage remain the next Track C work.
 
 ### 5. Compatibility scorecard and corpus
 
@@ -443,7 +449,9 @@ Create `tests/compat/` with per-target manifests, expected results, ABI version,
 
 Acceptance: every compatibility run emits machine-readable pass/fail/unsupported results and a reproducible artifact manifest.
 
-Status: not started.
+Status: initialized on 2026-08-17 in `tests/compat/gate-c.json`. The manifest
+records target paths, ABI version, expected result, failure classification,
+and the reproducible GPT artifact manifest used by the QEMU gate.
 
 ### 6. VM feasibility prototype
 

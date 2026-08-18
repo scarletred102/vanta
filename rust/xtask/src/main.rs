@@ -197,6 +197,7 @@ fn build_default_image() -> Result<(), String> {
     build_kernel(&root)?;
     build_userland(&root)?;
     build_sdk(&root)?;
+    build_linux_samples(&root)?;
 
     let boot_efi = read_file(root.join("esp/EFI/BOOT/BOOTX64.EFI"))?;
     let kernel = read_file(root.join("target/x86_64-unknown-none/release/vanta-kernel"))?;
@@ -225,7 +226,34 @@ fn build_default_image() -> Result<(), String> {
     let c_env_smoke = read_file(root.join("target/sdk/env-smoke-vanta.elf"))?;
     let c_process_smoke = read_file(root.join("target/sdk/process-smoke-vanta.elf"))?;
     let c_exec_smoke = read_file(root.join("target/sdk/exec-smoke-vanta.elf"))?;
+    let linux_hello = read_file(root.join("target/compat/linux/hello"))?;
+    let linux_cat = read_file(root.join("target/compat/linux/cat"))?;
+    let linux_unsupported = read_file(root.join("target/compat/linux/unsupported"))?;
+    let linux_ls = read_file(root.join("target/compat/linux/ls"))?;
+    let linux_server = read_file(root.join("target/compat/linux/server"))?;
+    let linux_dynamic = read_file(root.join("target/compat/linux/dynamic"))?;
+    let linux_musl_hello = read_file(root.join("target/compat/linux/musl-hello"))?;
+    let linux_musl_alloc = read_file(root.join("target/compat/linux/musl-alloc"))?;
+    let linux_musl_io = read_file(root.join("target/compat/linux/musl-io"))?;
+    let linux_musl_dir = read_file(root.join("target/compat/linux/musl-dir"))?;
+    let linux_musl_pipe = read_file(root.join("target/compat/linux/musl-pipe"))?;
+    let linux_musl_proc = read_file(root.join("target/compat/linux/musl-proc"))?;
+    let linux_musl_script = read_file(root.join("target/compat/linux/musl-script"))?;
+    let linux_musl_server = read_file(root.join("target/compat/linux/musl-server"))?;
+    let linux_ld_musl = read_file(root.join("target/compat/linux/ld-musl-x86_64.so.1"))?;
+    let linux_dynamic_hello = read_file(root.join("target/compat/linux/dynamic-hello"))?;
+    let linux_dynamic_signal = read_file(root.join("target/compat/linux/dynamic-signal"))?;
+    let linux_dynamic_threads = read_file(root.join("target/compat/linux/dynamic-threads"))?;
+    let linux_dynamic_net = read_file(root.join("target/compat/linux/dynamic-net"))?;
+    let vanta_release = b"Vanta OS 0.1.0 (musl-compat)\n".to_vec();
     let root_files = [
+        RootFile {
+            path: "/etc/vanta-release",
+            contents: &vanta_release,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+        },
         RootFile {
             path: "/sbin/init",
             contents: &init,
@@ -394,6 +422,139 @@ fn build_default_image() -> Result<(), String> {
             uid: 0,
             gid: 0,
         },
+        RootFile {
+            path: "/compat/linux/hello",
+            contents: &linux_hello,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/cat",
+            contents: &linux_cat,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/unsupported",
+            contents: &linux_unsupported,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/ls",
+            contents: &linux_ls,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/server",
+            contents: &linux_server,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/dynamic",
+            contents: &linux_dynamic,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/musl-hello",
+            contents: &linux_musl_hello,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/musl-alloc",
+            contents: &linux_musl_alloc,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/musl-io",
+            contents: &linux_musl_io,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/musl-dir",
+            contents: &linux_musl_dir,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/musl-pipe",
+            contents: &linux_musl_pipe,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/musl-proc",
+            contents: &linux_musl_proc,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/musl-script",
+            contents: &linux_musl_script,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/musl-server",
+            contents: &linux_musl_server,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/lib/ld-musl-x86_64.so.1",
+            contents: &linux_ld_musl,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/dynamic-hello",
+            contents: &linux_dynamic_hello,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/dynamic-signal",
+            contents: &linux_dynamic_signal,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/dynamic-threads",
+            contents: &linux_dynamic_threads,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/dynamic-net",
+            contents: &linux_dynamic_net,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
     ];
     let image = build_image(
         ImageOptions {
@@ -507,6 +668,146 @@ fn build_userland(root: &Path) -> Result<(), String> {
         .success()
         .then_some(())
         .ok_or_else(|| format!("userland build exited with {status}"))
+}
+
+fn build_linux_samples(root: &Path) -> Result<(), String> {
+    let output = root.join("target/compat/linux");
+    fs::create_dir_all(&output).map_err(|error| format!("{}: {error}", output.display()))?;
+    for (source, executable) in [
+        ("hello.S", "hello"),
+        ("cat.S", "cat"),
+        ("unsupported.S", "unsupported"),
+        ("ls.S", "ls"),
+        ("server.S", "server"),
+    ] {
+        let status = Command::new("zig")
+            .current_dir(root)
+            .args([
+                "cc",
+                "-target",
+                "x86_64-linux-musl",
+                "-nostdlib",
+                "-static",
+                "-Wl,-e,_start",
+                "-Wl,--build-id=none",
+                &format!("../compat/linux/{source}"),
+                "-o",
+                &output.join(executable).to_string_lossy(),
+            ])
+            .status()
+            .map_err(|error| {
+                format!("failed to start Linux sample compiler for {source}: {error}")
+            })?;
+        if !status.success() {
+            return Err(format!(
+                "Linux sample compilation for {source} exited with {status}"
+            ));
+        }
+    }
+    let dynamic_output = output.join("dynamic");
+    let status = Command::new("zig")
+        .current_dir(root)
+        .args([
+            "cc",
+            "-target",
+            "x86_64-linux-gnu",
+            "-nostdlib",
+            "-Wl,-e,_start",
+            "-Wl,--build-id=none",
+            "../compat/linux/dynamic.S",
+            "-o",
+            &dynamic_output.to_string_lossy(),
+        ])
+        .status()
+        .map_err(|error| format!("failed to start dynamic Linux sample compiler: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "dynamic Linux sample compilation exited with {status}"
+        ));
+    }
+    for (source, executable) in [
+        ("musl-hello.c", "musl-hello"),
+        ("musl-alloc.c", "musl-alloc"),
+        ("musl-io.c", "musl-io"),
+        ("musl-dir.c", "musl-dir"),
+        ("musl-pipe.c", "musl-pipe"),
+        ("musl-proc.c", "musl-proc"),
+        ("musl-script.c", "musl-script"),
+        ("musl-server.c", "musl-server"),
+    ] {
+        let sample_output = output.join(executable);
+        let status = Command::new("zig")
+            .current_dir(root)
+            .args([
+                "cc",
+                "-target",
+                "x86_64-linux-musl",
+                "-static",
+                "-O2",
+                &format!("../compat/linux/{source}"),
+                "-o",
+                &sample_output.to_string_lossy(),
+            ])
+            .status()
+            .map_err(|error| {
+                format!("failed to start musl Linux sample compiler for {source}: {error}")
+            })?;
+        if !status.success() {
+            return Err(format!(
+                "musl Linux sample compilation for {source} exited with {status}"
+            ));
+        }
+    }
+    let ld_output = output.join("ld-musl-x86_64.so.1");
+    let status = Command::new("zig")
+        .current_dir(root)
+        .args([
+            "cc",
+            "-target",
+            "x86_64-linux-musl",
+            "-shared",
+            "-fPIC",
+            "-nostdlib",
+            "-Wl,-e,_start",
+            "../compat/linux/ld-musl.c",
+            "-o",
+            &ld_output.to_string_lossy(),
+        ])
+        .status()
+        .map_err(|error| format!("failed to start ld-musl compiler: {error}"))?;
+    if !status.success() {
+        return Err(format!("ld-musl compilation exited with {status}"));
+    }
+    for (source, executable) in [
+        ("dynamic-hello.c", "dynamic-hello"),
+        ("dynamic-signal.c", "dynamic-signal"),
+        ("dynamic-threads.c", "dynamic-threads"),
+        ("dynamic-net.c", "dynamic-net"),
+    ] {
+        let sample_output = output.join(executable);
+        let status = Command::new("zig")
+            .current_dir(root)
+            .args([
+                "cc",
+                "-target",
+                "x86_64-linux-musl",
+                "-static",
+                "-O2",
+                &format!("../compat/linux/{source}"),
+                "-o",
+                &sample_output.to_string_lossy(),
+            ])
+            .status()
+            .map_err(|error| {
+                format!("failed to start dynamic Linux sample compiler for {source}: {error}")
+            })?;
+        if !status.success() {
+            return Err(format!(
+                "dynamic Linux sample compilation for {source} exited with {status}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn rustup_path() -> std::ffi::OsString {

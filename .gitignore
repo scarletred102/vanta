@@ -35,3 +35,6 @@ __pycache__/
 actions-runner/
 .worktrees/
 /starling/
+/rust/target/
+/target/
+.agents/

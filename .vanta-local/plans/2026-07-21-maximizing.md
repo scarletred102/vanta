@@ -89,8 +89,10 @@ The implementation worktree now includes the first `libvanta` static-library
 bootstrap, a reproducible `cargo xtask sdk` artifact, the initial `linuxd`
 static syscall translation contract, and capability-bearing service request
 headers. The generated GPT image now executes the linked `/bin/c-hello`
-program during native acceptance. These are foundation deliverables, not
-completion of the full C runtime or Linux personality. The broader status and remaining gates are in
+program during native acceptance. Gate C now has a booted Linux personality
+vertical slice: static ELF hello/cat/ls/server samples run through the foreign
+syscall broker, unsupported syscalls are observable, and dynamic interpreters
+are rejected deterministically. The broader status and remaining gates are in
 [2026-07-30-universal-compatibility-roadmap.md](2026-07-30-universal-compatibility-roadmap.md).
 
 **Current state:** the real Gate A native developer OS milestone is verified on
