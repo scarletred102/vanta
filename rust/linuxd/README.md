@@ -1,19 +1,13 @@
-# linuxd static Linux personality
+# linuxd Linux personality translation broker
 
-This crate is the translation contract for the first Linux x86_64 static-ELF
-personality. It parses static x86_64 `ET_EXEC`/`ET_DYN` images, rejects
-`PT_INTERP`, maps supported Linux syscall families to Vanta-owned syscall
-numbers, and reports all other numbers as unsupported.
+`vanta-linuxd` is the system call and ABI translation contract for the Linux x86_64 personality. It translates foreign Linux system calls into native Vanta microkernel operations at the kernel boundary while preserving the integrity of the native Vanta capability ABI.
 
-`StaticElf` is the loader metadata contract and `broker` is the explicit trap
-decision contract. The kernel now carries `LinuxX86_64Static` process
-personality metadata, routes those traps through this broker, and translates
-the supported file/process subset at the foreign-ABI boundary. The native
-Vanta syscall table is unchanged.
+## Capabilities
 
-This is not a complete Linux process runtime. The current QEMU acceptance
-bundles static ELF hello, cat, ls, and server samples, plus an unsupported
-syscall probe and a dynamic-interpreter rejection case. The next Linux work is
-broader memory, pipes, signals, wait/exec, networking, and a larger musl
-corpus. The current statically linked musl hello exercises FS-base/TLS setup
-and the process-startup subset in QEMU.
+- **Static & Dynamic ELF**: Supports both static musl binaries and dynamic ELF binaries using `ld-musl-x86_64.so.1` / `ld-linux-x86-64.so.2` with complete auxiliary vector (`auxv`) initialization.
+- **Memory Management**: Translates Linux `mmap`, `munmap`, `mprotect`, and `brk` calls with standard memory protection flags.
+- **Signals**: Supports POSIX realtime signal delivery, signal masking (`rt_sigprocmask`), signal action installation (`rt_sigaction`), directed thread signals (`tkill`/`tgkill`), and context restore (`rt_sigreturn`).
+- **Concurrency & Futexes**: Supports `clone`/`clone3` with thread-group tracking (`TGID`/`TID`), thread-local storage (`FS_BASE`), and `futex` (`FUTEX_WAIT`/`FUTEX_WAKE`).
+- **Pipes & I/O Multiplexing**: Implements non-blocking and blocking pipes, `dup`/`dup2`/`dup3`, `epoll` (`epoll_create1`, `epoll_ctl`, `epoll_wait`), and `eventfd2`.
+- **Networking**: Maps BSD/Linux socket primitives (`socket`, `bind`, `listen`, `accept`, `connect`, `sendto`, `recvfrom`) to the native VirtIO-net network stack.
+- **POSIX Environment**: Full support for termios window size ioctls (`TIOCGWINSZ`), process groups (`setpgid`, `getpgrp`), and session IDs (`setsid`, `getsid`), powering standard shells like BusyBox `ash`.

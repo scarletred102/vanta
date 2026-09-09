@@ -1,12 +1,8 @@
-# Vanta — Rust kernel rewrite
+# Vanta — Rust Native Operating System
 
-This is the active Rust-native rewrite. For the project overview and the Zig
-capability kernel track, see the [repository README](../README.md).
+This is the official codebase for Vanta OS, a 100% Rust-native microkernel operating system. For the project overview and architectural status, see the [repository README](../README.md).
 
-Rust x86_64 kernel foundation. It boots via UEFI + Limine, draws an in-kernel
-terminal to the framebuffer, and echoes PS/2 keystrokes. The rewrite follows
-Linux-style subsystem boundaries while retaining Vanta's own microkernel and
-capability model; it is not a copy of Linux.
+The operating system boots via UEFI + Limine into a 64-bit Rust kernel foundation with SMP multi-core support, linear framebuffer graphics, interactive window composition (`orbital`), and a dual-personality runtime (native Vanta capability ABI + Linux x86_64 ELF personality).
 
 ## Linux reference source
 
