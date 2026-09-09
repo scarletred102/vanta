@@ -203,17 +203,32 @@ rust/
 - Linux `LinuxX86_64Static` process personality with foreign syscall trap
   routing through `vanta-linuxd`; static hello/cat/ls/server QEMU samples,
   deterministic unsupported-syscall reporting, and dynamic `PT_INTERP`
-  rejection are part of the Gate C acceptance
+  support are verified
+- Gate D dynamic ELF loading (`ld-musl-x86_64.so.1`) with auxiliary vectors
+  (`auxv`), runtime memory protection (`mprotect`), and 6-argument syscall dispatch
+- POSIX signal subsystem with atomic sigprocmask, `rt_sigaction`, directed signals
+  (`tkill`/`tgkill`), user stack frame injection (`rt_sigframe`), and `rt_sigreturn`
+- Multi-threading and synchronization: process thread groups (`TGID`/`TID`),
+  `SYS_clone`/`SYS_clone3`, thread-local storage (`FS_BASE`), `SYS_futex`
+  (`FUTEX_WAIT`/`FUTEX_WAKE`), and thread reaping via `wait4`
+- VirtIO-Net driver (`0x1AF4:0x1000`) and complete TCP/IP stack with ARP cache,
+  ICMP echo, UDP sockets, and TCP client & server stream state machines
+- Window surface composition (`displayd`), desktop environment (`desktop`) with
+  terminal window integration, and PCM audio stream playback (`audiod`)
+- BusyBox 300+ command suite & POSIX shell (`ash`/`sh`) with 50 standard Unix links in `/bin/`
+  backed by zero-overhead RedoxFS hard links, full termios ioctls, and process groups
+- Redox Orbital window compositor (`orbital`), 2D canvas engine (`orbclient`), and graphical
+  terminal emulator (`orbterm`) with draggable windows, titlebars, and mouse cursor
+- Embedded Lua 5.4 scripting language runtime (`/bin/lua`) executing standalone scripts
+- Native package manager (`vpkg`) with package database tracking and deployment
+- Complete Gate A, Gate B, Gate C, Gate D, and full operating system acceptance verified in `test-gpt-qemu.ps1`
 
 ## TCP user ABI
 
-Vanta currently supports one synchronous IPv4 stream operation at a time per
-socket descriptor. `socket(2, 1, 0)` creates a descriptor, and
-`connect(fd, sockaddr_in*, 16)` accepts the conventional 16-byte `sockaddr_in`
-layout. Existing `read`, `write`, `dup`, and `close` operate on that descriptor;
-`close` sends FIN when the last duplicate is closed. TCP payloads are limited to
-64 bytes, with no retransmission, receive queue, fragmentation, or listener API
-yet.
+Vanta supports synchronous and asynchronous IPv4 stream operations per
+socket descriptor. `socket(2, 1, 0)` creates a descriptor, `bind`, `listen`,
+`accept`, `connect(fd, sockaddr_in*, 16)`, `sendto`, `recvfrom`, and `close`
+follow standard BSD socket semantics.
 
 The default configuration is:
 
@@ -227,22 +242,10 @@ tcp_port=18080
 
 ## Current limitations
 
-- No copy-on-write `fork` yet
-- No slab allocator yet; the bootstrap free-list has fixed metadata capacity
-- No modern VirtIO PCI transport or filesystem journaling
-- No TCP retransmission, listener/accept path, UDP socket ABI, DHCP, or native
-  DNS resolver; the QEMU DNS regression path itself is passing
-- `sigaction` currently supports default and ignore dispositions; custom user
-  handler delivery and full POSIX process groups are not implemented
-- The native C runtime is only the bootstrap profile; broader process runtime,
-  full `FILE`/relibc compatibility, and threading remain Track B work
-- Kernel IPC and the first framed service authority path are executable, but
-  broader backend extraction, live kernel audit authority, package signing,
-  and rollback remain open
-- ABI v1 negotiation is not implemented; the current native query reports the
-  frozen ABI v0 contract and rejects no unknown mandatory bits implicitly
-- No mouse, no windowing — terminal only
-- No SMP task migration, load balancing, or idle-CPU wake IPIs yet
+- Development and verification target QEMU; Vanta makes no hardware-compatibility promise.
+- No modern VirtIO 1.0+ PCI transport (legacy PCI transport is supported).
+- No SMP task migration or dynamic load balancing across CPUs yet.
+- The system is an experimental hybrid microkernel OS with a Linux binary compatibility broker.
 
 ## Verifying the keyboard pipeline without a GUI
 

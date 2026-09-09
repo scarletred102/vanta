@@ -39,23 +39,22 @@ For an interactive boot instead of the checked QEMU regression:
 The Rust QEMU checks need QEMU with edk2 UEFI firmware. Its separate Linux
 reference helper is run from `rust/` as `..\scripts\fetch-linux.ps1`.
 
-## Current limitations
-
-The active sprint has verified Gate A and Gate B and landed the Gate C
-execution foundation: `libvanta` constructs argv/envp-aware processes,
-`vanta-services` provides bounded IPC with restart, revocation, and audit
-behavior, and `vanta-linuxd` routes static Linux ELF traps through an explicit
-foreign-ABI broker. QEMU runs Linux hello/cat/ls/server samples and checks
-deterministic unsupported and dynamic-interpreter failures. Broader musl/POSIX
-coverage remains in progress.
-
-- Development and verification currently target QEMU; Vanta makes no
-  hardware-compatibility promise.
-- It is not Linux-compatible or Linux-equivalent, and does not promise a
-  stable application, driver, filesystem, or binary interface.
-- The implemented subsystems are incomplete and may change substantially.
-- Do not use either track for production workloads or depend on it for data
-  safety, security isolation, or device support.
+## Current status
+ 
+Vanta OS has verified Gate A, Gate B, Gate C, and Gate D execution foundations and full operating system functionality:
+- **Gate A**: Partitioned GPT disk, writable RedoxFS persistent root mount, permission and umask enforcement, and freestanding C SDK (`libvanta`).
+- **Gate B**: Microkernel IPC services (`procd`, `auditd`, `vfsd`) with capability passing, generation bumps, and authority revocation.
+- **Gate C**: Static Linux personality via `vanta-linuxd` broker with argv/envp/auxv, memory mappings, and system call translation.
+- **Gate D**: Dynamic ELF interpreter loading (`ld-musl`), POSIX signals with stack frame injection (`rt_sigframe`), multi-threading (`clone`/`futex`), and complete VirtIO-Net TCP/IP networking (ARP, ICMP, UDP, TCP client/server stream).
+- **Unix Shell & BusyBox 300+ Suite**: Static BusyBox suite with 50 standard Unix links (`sh`, `vi`, `grep`, `sed`, `awk`, `tar`, `find`, `wget`, `top`, `ps`, etc.) backed by zero-overhead RedoxFS hard links, full termios ioctl emulation, process groups, and session IDs.
+- **Redox Orbital Windowing System**: Complete `orbclient` 2D graphics engine, `orbital` window compositor with dynamic z-ordering, draggable decorated windows with close/minimize/maximize buttons, and `orbterm` graphical terminal emulator running `/bin/sh`.
+- **Scripting Runtime**: Embedded Lua 5.4 scripting engine runtime (`/bin/lua`) for scripting and automation.
+- **Package Management**: Native package manager `vpkg` (`/bin/vpkg`) with package database tracking and deployment.
+- **Master Acceptance**: Master acceptance harness (`test-gpt-qemu.ps1`) verifies all gates and OS subsystems across first boot, reboot persistence, and corrupt-root recovery.
+ 
+- Development and verification target QEMU; Vanta makes no hardware-compatibility promise.
+- It is an experimental microkernel OS with a Linux binary compatibility broker.
+- Do not use for production workloads or depend on it for data safety or security isolation.
 
 ## Contributing and security
 

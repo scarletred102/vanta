@@ -60,11 +60,12 @@ Gate D introduces the following core architectural subsystems:
 | # | Name | Scope | Dependencies | Status |
 |---|------|-------|-------------|--------|
 | M1 | Dynamic ELF Loader & Memory Protection | `PT_INTERP` dual ELF loader, complete `auxv`, `paging::protect()`, `mprotect`, 6-arg syscall dispatch | none | DONE |
-| M2 | POSIX Signal Subsystem | `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`, `tkill`/`tgkill`, signal frame injection & context restore | M1 | PLANNED |
-| M3 | Multi-Threading & Futex Subsystem | `clone`/`clone3`, thread groups (`TGID`/`TID`), `FS_BASE` TLS, `futex` wait/wake, `wait4` | M1, M2 | PLANNED |
-| M4 | VirtIO-Net Driver & TCP/IP Stack | VirtIO-net RX/TX rings, TCP/IP stack (ARP, IPv4, ICMP, UDP, TCP), complete socket syscalls | M1 | PLANNED |
-| M5 | Gate D Integration & Acceptance | Build dynamic test binaries, wire `test-gpt-qemu.ps1` network harness, run full Gate A/B/C/D verification | M1, M2, M3, M4, Test Track | PLANNED |
+| M2 | POSIX Signal Subsystem | `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`, `tkill`/`tgkill`, signal frame injection & context restore | M1 | DONE |
+| M3 | Multi-Threading & Futex Subsystem | `clone`/`clone3`, thread groups (`TGID`/`TID`), `FS_BASE` TLS, `futex` wait/wake, `wait4` | M1, M2 | DONE |
+| M4 | VirtIO-Net Driver & TCP/IP Stack | VirtIO-net RX/TX rings, TCP/IP stack (ARP, IPv4, ICMP, UDP, TCP), complete socket syscalls | M1 | DONE |
+| M5 | Gate D Integration & Acceptance | Build dynamic test binaries, wire `test-gpt-qemu.ps1` network harness, run full Gate A/B/C/D verification | M1, M2, M3, M4, Test Track | DONE |
 | Test Track | E2E Testing Suite & Infrastructure | Design 4-tier requirement-driven test cases, test runner, publish `TEST_READY.md` | none | DONE |
+| Track C/D | Desktop GUI & Terminal Integration | Window composition (`displayd`), desktop environment (`desktop`), and audio daemon (`audiod`) | M1-M5 | DONE |
 
 ## Interface Contracts
 

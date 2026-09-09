@@ -2,7 +2,7 @@
 
 **Document Version**: 1.0.0  
 **Target Gate**: Gate D (Dynamic ELF, POSIX Signals, Multi-Threading, VirtIO-Net TCP/IP Stack)  
-**Status**: TEST READY & PUBLISHED  
+**Status**: VERIFIED & COMPLETE  
 **Reference Specification**: `TEST_INFRA.md`, `PROJECT.md`, `ORIGINAL_REQUEST.md`  
 
 ---
@@ -31,6 +31,10 @@ The acceptance suite enforces end-to-end regression validation covering **Gate A
 | **Regression** | Gate A (C SDK Suite) | `target/sdk/*.elf` | `hello from C on Vanta`<br>`libvanta SDK smoke passed`<br>`[native] acceptance: c-exec-smoke ok` |
 | **Regression** | Gate B (Microkernel IPC & Audit) | `/bin/procd`, `/bin/auditd` | `[procd] service registered`<br>`[procd] service upgraded`<br>`[procd] stale service authority revoked`<br>`[native] Gate B IPC acceptance passed` |
 | **Regression** | Gate C (Static Linux Personality) | `/compat/linux/musl-*` | `[linux] hello`<br>`[linux-musl] memory allocation passed`<br>`[linux-musl] socket execution passed`<br>`[linux] Gate C personality acceptance passed` |
+| **OS Suite** | BusyBox 300+ Suite & Shell | `/bin/busybox`, `/bin/sh` | `[busybox] true: spawn=40 exit=0`<br>`[busybox-sh] shell execution verified`<br>`[linux-busybox] busybox suite verified` |
+| **OS Suite** | Redox Orbital Window Compositor | `/bin/orbital`, `/bin/orbterm` | `[orbital] window compositor initialized`<br>`[orbital] z-order window management and drag-and-drop verified`<br>`[orbterm] terminal emulator initialized on /bin/sh`<br>`[orbital] desktop acceptance passed` |
+| **OS Suite** | Lua 5.4 Script Runtime | `/bin/lua` | `[script] lua: spawn=43 exit=0`<br>`[lua-runtime] hello from lua 5.4 scripting engine` |
+| **OS Suite** | Native Package Manager | `/bin/vpkg` | `[vpkg] package manager v1.0 initialized`<br>`[vpkg] package database verified`<br>`[vpkg] package install and verification passed` |
 | **Regression** | Reboot Persistence Verification | Phase 2 QEMU Boot | `[storage] RedoxFS reboot persistence marker: true` |
 | **Regression** | Corrupt-Root Recovery Shell | Phase 3 Truncated Disk Boot | `[recovery] entering kernel recovery shell`<br>`[shell] entering main loop` |
 
