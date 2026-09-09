@@ -2,6 +2,7 @@
 
 pub mod font;
 pub mod graphics;
+pub mod orbclient;
 
 use core::arch::asm;
 use vanta_abi::{AbiInfo, Syscall};

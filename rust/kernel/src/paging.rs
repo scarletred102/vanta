@@ -197,8 +197,13 @@ pub fn create_address_space() -> Result<AddressSpace, MapError> {
 }
 
 /// Deep clone all user-half mappings from src_space into a newly allocated address space.
-pub fn clone_user_address_space(src_space: AddressSpace) -> Result<AddressSpace, MapError> {
+/// Returns the new AddressSpace and a list of (virtual_address, physical_address) pairs
+/// corresponding to each newly allocated user frame.
+pub fn clone_user_address_space(
+    src_space: AddressSpace,
+) -> Result<(AddressSpace, alloc::vec::Vec<(u64, u64)>), MapError> {
     let new_space = create_address_space()?;
+    let mut mapped_pages = alloc::vec::Vec::new();
     for pml4_idx in 0..256 {
         let pml4_entry = read_entry(src_space.pml4_phys, pml4_idx).ok_or(MapError::NoHhdm)?;
         if pml4_entry & PRESENT == 0 {
@@ -234,9 +239,35 @@ pub fn clone_user_address_space(src_space: AddressSpace) -> Result<AddressSpace,
                         vaddr
                     };
 
-                    let new_frame = memory::alloc_frame().ok_or(MapError::OutOfMemory)?;
-                    let src_virt = phys_to_virt(src_phys).ok_or(MapError::NoHhdm)?;
-                    let dst_virt = phys_to_virt(new_frame.0).ok_or(MapError::NoHhdm)?;
+                    let new_frame = match memory::alloc_frame() {
+                        Some(f) => f,
+                        None => {
+                            for &(va, pa) in &mapped_pages {
+                                let _ = unmap(new_space, va);
+                                memory::free_frame(memory::PhysFrame(pa));
+                            }
+                            let _ = destroy_address_space(new_space);
+                            return Err(MapError::OutOfMemory);
+                        }
+                    };
+                    let Some(src_virt) = phys_to_virt(src_phys) else {
+                        memory::free_frame(new_frame);
+                        for &(va, pa) in &mapped_pages {
+                            let _ = unmap(new_space, va);
+                            memory::free_frame(memory::PhysFrame(pa));
+                        }
+                        let _ = destroy_address_space(new_space);
+                        return Err(MapError::NoHhdm);
+                    };
+                    let Some(dst_virt) = phys_to_virt(new_frame.0) else {
+                        memory::free_frame(new_frame);
+                        for &(va, pa) in &mapped_pages {
+                            let _ = unmap(new_space, va);
+                            memory::free_frame(memory::PhysFrame(pa));
+                        }
+                        let _ = destroy_address_space(new_space);
+                        return Err(MapError::NoHhdm);
+                    };
                     unsafe {
                         core::ptr::copy_nonoverlapping(
                             src_virt as *const u8,
@@ -244,12 +275,21 @@ pub fn clone_user_address_space(src_space: AddressSpace) -> Result<AddressSpace,
                             PAGE_SIZE as usize,
                         );
                     }
-                    map(new_space, vaddr, new_frame.0, flags)?;
+                    if let Err(e) = map(new_space, vaddr, new_frame.0, flags) {
+                        memory::free_frame(new_frame);
+                        for &(va, pa) in &mapped_pages {
+                            let _ = unmap(new_space, va);
+                            memory::free_frame(memory::PhysFrame(pa));
+                        }
+                        let _ = destroy_address_space(new_space);
+                        return Err(e);
+                    }
+                    mapped_pages.push((vaddr, new_frame.0));
                 }
             }
         }
     }
-    Ok(new_space)
+    Ok((new_space, mapped_pages))
 }
 
 /// Map one 4 KiB page into an address space.

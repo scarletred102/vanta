@@ -364,10 +364,10 @@ const fn make_test_elf() -> [u8; 0x300] {
     image[0x13f] = 0xd2;
     image[0x140] = 0x0f;
     image[0x141] = 0x05;
-    image[0x142] = 0x48;
-    image[0x143] = 0xc7;
-    image[0x144] = 0xc0;
-    image[0x145] = Syscall::Dup3.number() as u8;
+    image[0x142] = 0x31;
+    image[0x143] = 0xf6;
+    image[0x144] = 0xb8;
+    put_u32(&mut image, 0x145, Syscall::Dup3.number() as u32);
     image[0x149] = 0x48;
     image[0x14a] = 0x89;
     image[0x14b] = 0xdf;
@@ -440,10 +440,10 @@ const fn make_test_elf() -> [u8; 0x300] {
     image[0x1ac] = 0x0b;
 
     // close(fd); run without syscalls; exit(0); ud2 if exit unexpectedly returns.
-    image[0x1ad] = 0x48;
-    image[0x1ae] = 0xc7;
-    image[0x1af] = 0xc0;
-    image[0x1b0] = Syscall::Close.number() as u8;
+    image[0x1ad] = 0x31;
+    image[0x1ae] = 0xd2;
+    image[0x1af] = 0xb8;
+    put_u32(&mut image, 0x1b0, Syscall::Close.number() as u32);
     image[0x1b4] = 0x48;
     image[0x1b5] = 0x89;
     image[0x1b6] = 0xdf;

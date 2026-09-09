@@ -8,6 +8,30 @@
 static int shared_val = 100;
 
 int main(void) {
+    // Phase 1: Rapid 50-iteration fork loop stress test
+    for (int i = 0; i < 50; i++) {
+        pid_t p = fork();
+        if (p < 0) {
+            printf("[linux-fork] fork failed at iteration %d\n", i);
+            return 10;
+        }
+        if (p == 0) {
+            // Child: touch memory, verify isolation, exit with distinct status
+            volatile char scratch[256];
+            scratch[0] = (char)(i + 7);
+            scratch[255] = (char)(i * 3);
+            _exit((i + 1) % 100);
+        }
+        int status = 0;
+        pid_t w = waitpid(p, &status, 0);
+        if (w != p || !WIFEXITED(status) || WEXITSTATUS(status) != ((i + 1) % 100)) {
+            printf("[linux-fork] waitpid failed at iter %d: w=%d status=%d\n", i, (int)w, WEXITSTATUS(status));
+            return 11;
+        }
+    }
+    printf("[linux-fork] 50-iteration fork loop verified\n");
+
+    // Phase 2: Single fork COW / memory isolation check
     pid_t pid = fork();
     if (pid < 0) {
         printf("[linux-fork] fork failed\n");

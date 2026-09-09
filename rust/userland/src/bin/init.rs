@@ -330,6 +330,64 @@ fn gate_d_acceptance() -> bool {
     print_val(b"[desktop] audiod", audiod_pid, audiod_exit);
     let audiod_ok = audiod_pid != u64::MAX && audiod_exit == 0;
 
+    let orbital_pid = vanta_userland::spawn_with_args(b"/bin/orbital", &[b"orbital\0", b"--test\0"], 0, 1, 2);
+    let orbital_exit = if orbital_pid != u64::MAX {
+        vanta_userland::wait(orbital_pid)
+    } else {
+        999
+    };
+    print_val(b"[desktop] orbital", orbital_pid, orbital_exit);
+    let orbital_ok = orbital_pid != u64::MAX && orbital_exit == 0;
+
+    let orbterm_pid = vanta_userland::spawn(b"/bin/orbterm");
+    let orbterm_exit = if orbterm_pid != u64::MAX {
+        vanta_userland::wait(orbterm_pid)
+    } else {
+        999
+    };
+    print_val(b"[desktop] orbterm", orbterm_pid, orbterm_exit);
+    let orbterm_ok = orbterm_pid != u64::MAX && orbterm_exit == 0;
+
+    let bb_true = vanta_userland::spawn_with_args(b"/bin/busybox", &[b"busybox\0", b"true\0"], 0, 1, 2);
+    let bb_true_exit = if bb_true != u64::MAX {
+        vanta_userland::wait(bb_true)
+    } else {
+        999
+    };
+    print_val(b"[busybox] true", bb_true, bb_true_exit);
+    let bb_true_ok = bb_true != u64::MAX && bb_true_exit == 0;
+
+    let bb_sh = vanta_userland::spawn_with_args(b"/bin/sh", &[b"sh\0", b"-c\0", b"echo '[busybox-sh] shell execution verified'\0"], 0, 1, 2);
+    let bb_sh_exit = if bb_sh != u64::MAX {
+        vanta_userland::wait(bb_sh)
+    } else {
+        999
+    };
+    print_val(b"[busybox] sh", bb_sh, bb_sh_exit);
+    let bb_sh_ok = bb_sh != u64::MAX && bb_sh_exit == 0;
+
+    let lua_pid = vanta_userland::spawn_with_args(b"/bin/lua", &[b"lua\0", b"-e\0", b"print('[lua-runtime] hello from lua 5.4 scripting engine')\0"], 0, 1, 2);
+    let lua_exit = if lua_pid != u64::MAX {
+        vanta_userland::wait(lua_pid)
+    } else {
+        999
+    };
+    print_val(b"[script] lua", lua_pid, lua_exit);
+    let lua_ok = lua_pid != u64::MAX && lua_exit == 0;
+
+    let vpkg_pid = vanta_userland::spawn_with_args(b"/bin/vpkg", &[b"vpkg\0", b"--test\0"], 0, 1, 2);
+    let vpkg_exit = if vpkg_pid != u64::MAX {
+        vanta_userland::wait(vpkg_pid)
+    } else {
+        999
+    };
+    print_val(b"[pkg] vpkg", vpkg_pid, vpkg_exit);
+    let vpkg_ok = vpkg_pid != u64::MAX && vpkg_exit == 0;
+
+    if bb_true_ok && bb_sh_ok {
+        vanta_userland::write(1, b"[linux-busybox] busybox suite verified\n");
+    }
+
     dyn_hello_ok
         && dyn_signal_ok
         && dyn_threads_ok
@@ -340,6 +398,13 @@ fn gate_d_acceptance() -> bool {
         && displayd_ok
         && desktop_ok
         && audiod_ok
+        && orbital_ok
+        && orbterm_ok
+        && bb_true_ok
+        && bb_sh_ok
+        && lua_ok
+        && vpkg_ok
+        && bb_sh_ok
 }
 
 fn audit_persistence() -> bool {

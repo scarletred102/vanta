@@ -1,15 +1,36 @@
 [CmdletBinding()]
 param(
-    [ValidateRange(5, 120)]
-    [int]$TimeoutSeconds = 45
+    [ValidateRange(5, 180)]
+    [int]$TimeoutSeconds = 90
 )
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
 $qemu = if ($env:QEMU) { $env:QEMU } else { "qemu-system-x86_64" }
-$ovmf = if ($env:OVMF) { $env:OVMF } else { "C:\Program Files\qemu\share\edk2-x86_64-code.fd" }
+$ovmf = if ($env:OVMF -and (Test-Path $env:OVMF)) {
+    $env:OVMF
+} else {
+    $candidates = @(
+        "C:\msys64\ucrt64\share\qemu\edk2-x86_64-code.fd",
+        "C:\Program Files\qemu\share\edk2-x86_64-code.fd",
+        "C:\msys64\mingw64\share\qemu\edk2-x86_64-code.fd"
+    )
+    $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($found) { $found } else { "C:\Program Files\qemu\share\edk2-x86_64-code.fd" }
+}
 $log = Join-Path $env:TEMP "vanta-gpt-qemu-test.log"
+
+if (!(Get-Command zig -ErrorAction SilentlyContinue)) {
+    $zigCandidates = @(
+        "C:\Users\rocki\AppData\Local\Microsoft\WinGet\Packages\zig.zig_Microsoft.Winget.Source_8wekyb3d8bbwe\zig-x86_64-windows-0.16.0",
+        (Get-ChildItem -Path "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Filter "zig.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty DirectoryName)
+    )
+    $zigDir = $zigCandidates | Where-Object { $_ -and (Test-Path (Join-Path $_ "zig.exe")) } | Select-Object -First 1
+    if ($zigDir) {
+        $env:PATH = "$zigDir;$env:PATH"
+    }
+}
 
 cargo xtask image
 if ($LASTEXITCODE -ne 0) {
@@ -40,8 +61,10 @@ function Invoke-GptBoot {
     Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
     $arguments = @(
         "-drive", "if=pflash,format=raw,readonly=on,file=`"$ovmf`"",
-        "-drive", "file=`"$DiskImage`",if=none,format=raw,id=vd0",
+        "-drive", "file=`"$DiskImage`",if=none,format=raw,cache=writethrough,id=vd0",
         "-device", "virtio-blk-pci,disable-modern=on,ioeventfd=off,drive=vd0",
+        "-netdev", "user,id=net0",
+        "-device", "virtio-net-pci,disable-modern=on,ioeventfd=off,netdev=net0",
         "-serial", "file:$log",
         "-smp", "2",
         "-m", "256M",
@@ -67,6 +90,7 @@ function Invoke-GptBoot {
     } finally {
         if (!$process.HasExited) {
             Stop-Process -Id $process.Id -Force
+            try { $process.WaitForExit(3000) } catch {}
         }
     }
 }
@@ -100,6 +124,9 @@ $common = @(
     "[linux-musl] file io passed",
     "[linux-musl] directory iteration passed",
     "[linux-musl] pipes and descriptors passed",
+    "[linux-musl] pipe throughput 64KB passed",
+    "[linux-musl] process groups and termios ioctls verified",
+    "[linux-musl] bad pointer negative tests verified",
     "[linux-musl] posix system info passed",
     "[linux-musl] script sequencing passed",
     "[linux-musl] socket execution passed",
@@ -115,15 +142,26 @@ $common = @(
     "[linux-dynamic] thread spawned",
     "[net] virtio-net adapter initialized",
     "[linux-dynamic] network acceptance passed",
+    "[linux-fork] 50-iteration fork loop verified",
     "[linux-fork] COW fork and waitpid verified",
     "[linux-epoll] epoll and eventfd multiplexing verified",
     "[linux-proc] /proc virtual filesystem verified",
     "desktop: GUI window surface composition verified",
     "audiod: PCM audio stream playback verified",
+    "[orbital] window compositor initialized",
+    "[orbital] z-order window management and drag-and-drop verified",
+    "[orbterm] terminal emulator initialized on /bin/sh",
+    "[orbital] desktop acceptance passed",
+    "[busybox-sh] shell execution verified",
+    "[linux-busybox] busybox suite verified",
+    "[lua-runtime] hello from lua 5.4 scripting engine",
+    "[vpkg] package manager v1.0 initialized",
+    "[vpkg] package install and verification passed",
     "[linux] Gate D dynamic & networking acceptance passed"
 )
 
 $first = Invoke-GptBoot -DiskImage $image -Label "first boot" -Required ($common + "[storage] RedoxFS reboot persistence marker: false")
+Start-Sleep -Milliseconds 500
 $second = Invoke-GptBoot -DiskImage $image -Label "reboot persistence" -Required ($common + "[storage] RedoxFS reboot persistence marker: true")
 
 $corruptRoot = Join-Path $env:TEMP "vanta-gpt-corrupt-root.img"

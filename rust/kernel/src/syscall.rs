@@ -22,6 +22,7 @@ pub const SYS_GETDENTS: u64 = Syscall::GetDents.number() as u64;
 pub const SYS_MKDIR: u64 = Syscall::MkDirAt.number() as u64;
 pub const SYS_UNLINK: u64 = Syscall::UnlinkAt.number() as u64;
 pub const SYS_RENAME: u64 = Syscall::RenameAt.number() as u64;
+pub const SYS_TTY_IOCTL: u64 = Syscall::TtyIoctl.number() as u64;
 pub const SYS_YIELD: u64 = Syscall::Yield.number() as u64;
 pub const SYS_DUP: u64 = Syscall::Dup3.number() as u64;
 pub const SYS_PIPE: u64 = Syscall::Pipe2.number() as u64;
@@ -186,9 +187,9 @@ vanta_syscall_entry:
     je vanta_syscall_wait_path
     cmp rax, -5
     je vanta_syscall_exec_path
-    cmp rax, -6
-    je vanta_syscall_block_path
     cmp rax, -7
+    je vanta_syscall_block_path
+    cmp rax, -8
     je vanta_syscall_futex_wait_path
     cmp rax, -9
     je vanta_syscall_thread_exit_path
@@ -504,7 +505,34 @@ fn dispatch_linux(
             vanta_linuxd::LinuxOp::GetGid | vanta_linuxd::LinuxOp::GetEGid => {
                 crate::scheduler::current_credentials().gid as u64
             }
-            vanta_linuxd::LinuxOp::SetPGid | vanta_linuxd::LinuxOp::GetPGrp => 0,
+            vanta_linuxd::LinuxOp::SetPGid => {
+                if crate::scheduler::setpgid_task(arg1, arg2).is_ok() {
+                    0
+                } else {
+                    SYSCALL_ERROR
+                }
+            }
+            vanta_linuxd::LinuxOp::GetPGrp => {
+                crate::scheduler::getpgid_task(arg1).unwrap_or(SYSCALL_ERROR)
+            }
+            vanta_linuxd::LinuxOp::SetUid | vanta_linuxd::LinuxOp::SetGid => 0,
+            vanta_linuxd::LinuxOp::SetGroups | vanta_linuxd::LinuxOp::GetGroups => 0,
+            vanta_linuxd::LinuxOp::Prctl | vanta_linuxd::LinuxOp::Personality => 0,
+            vanta_linuxd::LinuxOp::Prlimit64 => {
+                if arg4 != 0 {
+                    let limits = [u64::MAX, u64::MAX];
+                    let _ = copy_to_user(arg4, unsafe {
+                        core::slice::from_raw_parts(limits.as_ptr() as *const u8, 16)
+                    });
+                }
+                0
+            }
+            vanta_linuxd::LinuxOp::SetSid => {
+                crate::scheduler::setsid_current()
+            }
+            vanta_linuxd::LinuxOp::GetSid => {
+                crate::scheduler::getsid_task(arg1).unwrap_or(SYSCALL_ERROR)
+            }
             vanta_linuxd::LinuxOp::Clone => {
                 linux_clone_user(arg1, arg2, arg3, arg4, arg5)
             }
@@ -623,12 +651,7 @@ fn dispatch_linux(
         },
         vanta_linuxd::BrokerDecision::Unsupported { number } => {
             crate::serial_println!("[linuxd] unsupported syscall number={}", number);
-            if number == 9999 {
-                SYSCALL_ERROR
-            } else {
-                current_cpu_local().exit_code = 127;
-                SYSCALL_RETURN_EXIT
-            }
+            SYSCALL_ERROR
         }
     }
 }
@@ -1005,7 +1028,13 @@ fn linux_wait4_user(pid: u64, status_pointer: u64, _options: u64) -> u64 {
             }
             child_tgid
         }
-        Ok(None) => SYSCALL_RETURN_WAIT,
+        Ok(None) => {
+            if _options & 1 != 0 {
+                0
+            } else {
+                SYSCALL_RETURN_WAIT
+            }
+        }
         Err(()) => SYSCALL_ERROR,
     }
 }
@@ -1189,25 +1218,8 @@ fn linux_fcntl_user(descriptor: u64, cmd: u64, arg: u64) -> u64 {
     }
 }
 
-fn linux_ioctl_user(_descriptor: u64, request: u64, pointer: u64) -> u64 {
-    if request == 0x5413 && pointer != 0 {
-        let winsize: [u16; 4] = [24, 80, 0, 0];
-        let bytes = [
-            winsize[0].to_ne_bytes(),
-            winsize[1].to_ne_bytes(),
-            winsize[2].to_ne_bytes(),
-            winsize[3].to_ne_bytes(),
-        ]
-        .concat();
-        let _ = copy_to_user(pointer, &bytes);
-        return 0;
-    }
-    if request == 0x5401 && pointer != 0 {
-        let termios = [0u8; 60];
-        let _ = copy_to_user(pointer, &termios);
-        return 0;
-    }
-    0
+fn linux_ioctl_user(descriptor: u64, request: u64, pointer: u64) -> u64 {
+    tty_ioctl_user(descriptor, request, pointer)
 }
 
 fn linux_rt_sigaction_user(
@@ -1501,6 +1513,7 @@ fn dispatch_native(
         SYS_DISPLAY_FLUSH => display_flush_user(),
         SYS_INPUT_POLL => input_poll_user(arg1),
         SYS_AUDIO_PLAY => audio_play_user(arg1, arg2),
+        SYS_TTY_IOCTL => tty_ioctl_user(arg1, arg2, arg3),
         SYS_EXIT => {
             current_cpu_local().exit_code = arg1;
             SYSCALL_RETURN_EXIT
@@ -1614,16 +1627,19 @@ fn open_native_user(pointer: u64, length: u64, flags: u64) -> u64 {
 }
 
 fn read_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
+    if validate_user_buffer(pointer, length, true).is_err() {
+        return SYSCALL_ERROR;
+    }
     let to_read = length.min(65536) as usize;
     let Ok(bytes) = crate::scheduler::read_current(descriptor, to_read) else {
         return SYSCALL_ERROR;
     };
-    if copy_to_user(pointer, &bytes).is_err() {
-        return SYSCALL_ERROR;
-    }
     if bytes.is_empty() && crate::scheduler::read_would_block(descriptor) {
         current_cpu_local().block_descriptor = descriptor;
         return SYSCALL_RETURN_BLOCK;
+    }
+    if copy_to_user(pointer, &bytes).is_err() {
+        return SYSCALL_ERROR;
     }
     bytes.len() as u64
 }
@@ -1790,6 +1806,117 @@ fn connect_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
         .unwrap_or(SYSCALL_ERROR)
 }
 
+fn is_native_path(path: &str) -> bool {
+    let p = path.strip_prefix('/').unwrap_or(path);
+    if p.starts_with("compat/linux/") || p == "bin/busybox" || p == "busybox" || p == "bin/lua" || p == "lua" {
+        return false;
+    }
+    if matches!(
+        p,
+        "bin/sh"
+            | "bin/ash"
+            | "bin/vi"
+            | "bin/grep"
+            | "bin/sed"
+            | "bin/awk"
+            | "bin/find"
+            | "bin/wc"
+            | "bin/sleep"
+            | "bin/date"
+            | "bin/uname"
+            | "bin/which"
+            | "bin/clear"
+            | "bin/reset"
+            | "bin/env"
+            | "bin/tar"
+            | "bin/gzip"
+            | "bin/gunzip"
+            | "bin/cp"
+            | "bin/chmod"
+            | "bin/chown"
+            | "bin/head"
+            | "bin/tail"
+            | "bin/more"
+            | "bin/less"
+            | "bin/ps"
+            | "bin/killall"
+            | "bin/top"
+            | "bin/wget"
+            | "bin/nc"
+            | "bin/diff"
+            | "bin/patch"
+            | "bin/cut"
+            | "bin/sort"
+            | "bin/uniq"
+            | "bin/tr"
+            | "bin/xargs"
+            | "bin/strings"
+            | "bin/hexdump"
+            | "bin/dd"
+            | "bin/df"
+            | "bin/du"
+            | "bin/free"
+            | "bin/seq"
+            | "bin/tee"
+            | "bin/touch"
+            | "bin/uptime"
+            | "bin/whoami"
+            | "bin/id"
+            | "sh"
+            | "ash"
+            | "vi"
+            | "grep"
+            | "sed"
+            | "awk"
+            | "find"
+            | "wc"
+            | "sleep"
+            | "date"
+            | "uname"
+            | "which"
+            | "clear"
+            | "reset"
+            | "env"
+            | "tar"
+            | "gzip"
+            | "gunzip"
+            | "cp"
+            | "chmod"
+            | "chown"
+            | "head"
+            | "tail"
+            | "more"
+            | "less"
+            | "ps"
+            | "killall"
+            | "top"
+            | "wget"
+            | "nc"
+            | "diff"
+            | "patch"
+            | "cut"
+            | "sort"
+            | "uniq"
+            | "tr"
+            | "xargs"
+            | "strings"
+            | "hexdump"
+            | "dd"
+            | "df"
+            | "du"
+            | "free"
+            | "seq"
+            | "tee"
+            | "touch"
+            | "uptime"
+            | "whoami"
+            | "id"
+    ) {
+        return false;
+    }
+    true
+}
+
 fn spawn_legacy_user(pointer: u64, length: u64) -> u64 {
     let Ok(path) = copy_from_user(pointer, length, false) else {
         return SYSCALL_ERROR;
@@ -1800,7 +1927,15 @@ fn spawn_legacy_user(pointer: u64, length: u64) -> u64 {
     let Ok(image) = crate::vfs::read_root(path) else {
         return SYSCALL_ERROR;
     };
-    let Ok(process) = crate::process::load_elf(&image) else {
+    let is_native = is_native_path(path);
+    let process = if !is_native {
+        let default_args = [path.as_bytes()];
+        let default_env = [b"PATH=/bin:/sbin\0".as_slice(), b"HOME=/home/vanta\0".as_slice(), b"USER=root\0".as_slice()];
+        crate::process::load_linux_elf_with_args_and_env(&image, &default_args, &default_env)
+    } else {
+        crate::process::load_elf(&image)
+    };
+    let Ok(process) = process else {
         return SYSCALL_ERROR;
     };
     crate::scheduler::spawn_current(alloc::boxed::Box::new(process)).unwrap_or(SYSCALL_ERROR)
@@ -1858,12 +1993,26 @@ fn spawn_native_user(pointer: u64, length: u64, stdio_pointer: u64, with_args: u
             }
         }
     }
-    let linux_personality = path.starts_with("/compat/linux/");
-    let process = match if linux_personality {
-        crate::process::load_linux_elf(&image)
+    let is_native = is_native_path(path);
+    let default_argv = [path.as_bytes()];
+    let argument_references = if !arguments.is_empty() {
+        arguments.iter().map(Vec::as_slice).collect::<Vec<_>>()
+    } else {
+        default_argv.to_vec()
+    };
+    let default_env = [b"PATH=/bin:/sbin\0".as_slice(), b"HOME=/home/vanta\0".as_slice(), b"USER=root\0".as_slice()];
+    let environment_references = if !environment.is_empty() {
+        environment.iter().map(Vec::as_slice).collect::<Vec<_>>()
+    } else {
+        default_env.to_vec()
+    };
+    let process = match if !is_native {
+        crate::process::load_linux_elf_with_args_and_env(
+            &image,
+            &argument_references,
+            &environment_references,
+        )
     } else if with_args == 2 {
-        let argument_references = arguments.iter().map(Vec::as_slice).collect::<Vec<_>>();
-        let environment_references = environment.iter().map(Vec::as_slice).collect::<Vec<_>>();
         crate::process::load_elf_with_args_and_env(
             &image,
             &argument_references,
@@ -1973,6 +2122,16 @@ fn user_physical_address(address: u64, writable: bool) -> Result<u64, ()> {
     paging::phys_to_virt(translation.physical_address).ok_or(())
 }
 
+fn validate_user_buffer(pointer: u64, length: u64, writable: bool) -> Result<(), ()> {
+    if length == 0 {
+        return Ok(());
+    }
+    let end = pointer.checked_add(length - 1).ok_or(())?;
+    user_physical_address(pointer, writable)?;
+    user_physical_address(end, writable)?;
+    Ok(())
+}
+
 #[no_mangle]
 extern "C" fn vanta_syscall_yield(frame: *const u64, stack_pointer: u64) -> *const UserContext {
     crate::scheduler::yield_current(user_context(frame, stack_pointer))
@@ -2004,17 +2163,69 @@ extern "C" fn vanta_syscall_futex_wait(frame: *const u64, stack_pointer: u64) ->
 #[no_mangle]
 extern "C" fn vanta_syscall_exec(frame: *const u64) -> *const UserContext {
     let pointer = unsafe { *frame.add(1) };
-    let length = unsafe { *frame.add(2) };
-    let Ok(path) = copy_from_user(pointer, length, false) else {
+    let is_linux = crate::scheduler::current_personality() == crate::process::ProcessPersonality::LinuxX86_64Static;
+    let path = if is_linux {
+        copy_cstring(pointer, 256).ok()
+    } else {
+        let length = unsafe { *frame.add(2) };
+        copy_from_user(pointer, length, false).ok()
+    };
+    let Some(path_bytes) = path else {
         return core::ptr::null();
     };
-    let Ok(path) = core::str::from_utf8(&path) else {
+    let Ok(path) = core::str::from_utf8(&path_bytes) else {
         return core::ptr::null();
     };
     let Ok(image) = crate::vfs::read_root(path) else {
         return core::ptr::null();
     };
-    let Ok(process) = crate::process::load_elf(&image) else {
+    let mut arguments = Vec::new();
+    let mut environment = Vec::new();
+    if is_linux {
+        let argv_ptr = unsafe { *frame.add(2) };
+        if argv_ptr != 0 {
+            for i in 0..64 {
+                if let Ok(ptr_bytes) = copy_from_user(argv_ptr + i * 8, 8, false) {
+                    let ptr = u64::from_ne_bytes(ptr_bytes.try_into().unwrap());
+                    if ptr == 0 { break; }
+                    if let Ok(arg) = copy_cstring(ptr, 512) {
+                        arguments.push(arg);
+                    } else { break; }
+                } else { break; }
+            }
+        }
+        let envp_ptr = unsafe { *frame.add(3) };
+        if envp_ptr != 0 {
+            for i in 0..64 {
+                if let Ok(ptr_bytes) = copy_from_user(envp_ptr + i * 8, 8, false) {
+                    let ptr = u64::from_ne_bytes(ptr_bytes.try_into().unwrap());
+                    if ptr == 0 { break; }
+                    if let Ok(env) = copy_cstring(ptr, 512) {
+                        environment.push(env);
+                    } else { break; }
+                } else { break; }
+            }
+        }
+    }
+    let is_native = is_native_path(path);
+    let default_argv = [path.as_bytes()];
+    let argument_references = if !arguments.is_empty() {
+        arguments.iter().map(Vec::as_slice).collect::<Vec<_>>()
+    } else {
+        default_argv.to_vec()
+    };
+    let default_env = [b"PATH=/bin:/sbin\0".as_slice(), b"HOME=/home/vanta\0".as_slice(), b"USER=root\0".as_slice()];
+    let environment_references = if !environment.is_empty() {
+        environment.iter().map(Vec::as_slice).collect::<Vec<_>>()
+    } else {
+        default_env.to_vec()
+    };
+    let process = if !is_native {
+        crate::process::load_linux_elf_with_args_and_env(&image, &argument_references, &environment_references)
+    } else {
+        crate::process::load_elf(&image)
+    };
+    let Ok(process) = process else {
         return core::ptr::null();
     };
     crate::scheduler::exec_current(alloc::boxed::Box::new(process))
@@ -2023,7 +2234,7 @@ extern "C" fn vanta_syscall_exec(frame: *const u64) -> *const UserContext {
 fn user_context(frame: *const u64, stack_pointer: u64) -> UserContext {
     unsafe {
         UserContext {
-            return_value: 0,
+            return_value: *frame,
             rbx: *frame.add(9),
             rbp: *frame.add(10),
             r12: *frame.add(11),
@@ -2213,4 +2424,131 @@ fn input_poll_user(event_ptr: u64) -> u64 {
 
 fn audio_play_user(_buf_ptr: u64, len: u64) -> u64 {
     len
+}
+
+fn tty_ioctl_user(_fd: u64, cmd: u64, arg: u64) -> u64 {
+    match cmd {
+        // TIOCGWINSZ = 0x5413: Get window size (rows=24, cols=80, xpixel=1280, ypixel=800)
+        0x5413 => {
+            if arg == 0 {
+                return SYSCALL_ERROR;
+            }
+            let winsize: [u16; 4] = [24, 80, 1280, 800];
+            let raw: &[u8] = unsafe {
+                core::slice::from_raw_parts(winsize.as_ptr() as *const u8, 8)
+            };
+            if copy_to_user(arg, raw).is_ok() {
+                0
+            } else {
+                SYSCALL_ERROR
+            }
+        }
+        // TIOCSWINSZ = 0x5414: Set window size
+        0x5414 => 0,
+        // TCGETS = 0x5401
+        0x5401 => {
+            if arg == 0 {
+                return SYSCALL_ERROR;
+            }
+            let mut termios = [0u8; 60];
+            // c_iflag: ICRNL(0x100) | IXON(0x400) = 0x0500
+            termios[0..4].copy_from_slice(&0x0500u32.to_ne_bytes());
+            // c_oflag: OPOST(1) | ONLCR(4) = 0x0005
+            termios[4..8].copy_from_slice(&0x0005u32.to_ne_bytes());
+            // c_cflag: B38400(0xf) | CS8(0x30) | CREAD(0x80) | HUPCL(0x400) = 0x04bf
+            termios[8..12].copy_from_slice(&0x04bfu32.to_ne_bytes());
+            // c_lflag: ISIG(1) | ICANON(2) | ECHO(8) | ECHOE(0x10) | ECHOK(0x20) | ECHOCTL(0x200) | ECHOKE(0x800) | IEXTEN(0x8000) = 0x8a3b
+            termios[12..16].copy_from_slice(&0x8a3bu32.to_ne_bytes());
+            // c_line = 0 (byte 16)
+            // c_cc control chars
+            termios[17] = 3;   // VINTR (^C)
+            termios[18] = 28;  // VQUIT (^\)
+            termios[19] = 127; // VERASE
+            termios[20] = 21;  // VKILL (^U)
+            termios[21] = 4;   // VEOF (^D)
+            termios[22] = 0;   // VTIME
+            termios[23] = 1;   // VMIN
+            termios[27] = 17;  // VSTART (^Q)
+            termios[28] = 19;  // VSTOP (^S)
+            termios[29] = 26;  // VSUSP (^Z)
+            if copy_to_user(arg, &termios).is_ok() {
+                0
+            } else {
+                SYSCALL_ERROR
+            }
+        }
+        // TCSETS = 0x5402, TCSETSW = 0x5403, TCSETSF = 0x5404
+        0x5402 | 0x5403 | 0x5404 => 0,
+        // TIOCSCTTY = 0x540E (acquire controlling terminal)
+        0x540E => 0,
+        // TIOCGPGRP = 0x540F (get foreground pgrp)
+        0x540F => {
+            if arg == 0 {
+                return SYSCALL_ERROR;
+            }
+            let pgid = (crate::scheduler::current_pgid() as u32).to_ne_bytes();
+            if copy_to_user(arg, &pgid).is_ok() {
+                0
+            } else {
+                SYSCALL_ERROR
+            }
+        }
+        // TIOCSPGRP = 0x5410 (set foreground pgrp)
+        0x5410 => {
+            if arg == 0 {
+                return SYSCALL_ERROR;
+            }
+            if let Ok(bytes) = copy_from_user(arg, 4, false) {
+                let pgid = u32::from_ne_bytes(bytes[0..4].try_into().unwrap_or([0; 4]));
+                let _ = crate::scheduler::set_current_pgid(pgid as u64);
+                0
+            } else {
+                SYSCALL_ERROR
+            }
+        }
+        // TIOCGSID = 0x5429 (get session id)
+        0x5429 => {
+            if arg == 0 {
+                return SYSCALL_ERROR;
+            }
+            let sid = (crate::scheduler::current_sid() as u32).to_ne_bytes();
+            if copy_to_user(arg, &sid).is_ok() {
+                0
+            } else {
+                SYSCALL_ERROR
+            }
+        }
+        // FIONREAD = 0x541B
+        0x541B => {
+            if arg == 0 {
+                return SYSCALL_ERROR;
+            }
+            let n = 0u32.to_ne_bytes();
+            if copy_to_user(arg, &n).is_ok() {
+                0
+            } else {
+                SYSCALL_ERROR
+            }
+        }
+        // TCFLSH = 0x540B
+        0x540B => 0,
+        // OpenPty command (0x5430): creates PTY master & slave fds and writes them to [u64; 2] at arg
+        0x5430 => {
+            match crate::scheduler::open_pty_current() {
+                Ok((master, slave)) => {
+                    let fds = [master, slave];
+                    let raw: &[u8] = unsafe {
+                        core::slice::from_raw_parts(fds.as_ptr() as *const u8, 16)
+                    };
+                    if copy_to_user(arg, raw).is_ok() {
+                        0
+                    } else {
+                        SYSCALL_ERROR
+                    }
+                }
+                Err(()) => SYSCALL_ERROR,
+            }
+        }
+        _ => 0,
+    }
 }

@@ -86,7 +86,14 @@ impl Process {
         self.user_stack_top
     }
 
-    pub fn clone_process(&self, new_space: AddressSpace) -> Self {
+    pub fn clone_process(&self, new_space: AddressSpace, new_mappings: alloc::vec::Vec<(u64, u64)>) -> Self {
+        let mappings = new_mappings
+            .into_iter()
+            .map(|(virtual_address, physical_address)| MappedPage {
+                virtual_address,
+                physical_address,
+            })
+            .collect();
         Self {
             space: new_space,
             entry: self.entry,
@@ -96,7 +103,7 @@ impl Process {
             brk_start: self.brk_start,
             brk_current: self.brk_current,
             mmap_next: self.mmap_next,
-            mappings: self.mappings.clone(),
+            mappings,
             destroyed: false,
         }
     }
@@ -310,6 +317,7 @@ pub fn load_elf_with_args_and_env(
     load_elf_with_personality(bytes, args, environment, ProcessPersonality::NativeVanta)
 }
 
+#[allow(dead_code)]
 pub fn load_linux_elf(bytes: &[u8]) -> Result<Process, ProcessError> {
     load_linux_elf_with_args_and_env(bytes, &[], &[])
 }

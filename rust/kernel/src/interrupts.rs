@@ -39,6 +39,7 @@ lazy_static! {
         idt.breakpoint
             .set_handler_fn(breakpoint_handler)
             .set_privilege_level(PrivilegeLevel::Ring3);
+        idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
         idt.general_protection_fault.set_handler_fn(gp_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
         unsafe {
@@ -117,6 +118,10 @@ pub fn init_idt() {
 
 extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
     serial_println!("[user] ring3 breakpoint: {:#?}", frame);
+}
+
+extern "x86-interrupt" fn invalid_opcode_handler(frame: InterruptStackFrame) {
+    panic!("INVALID OPCODE frame={:#?}", frame);
 }
 
 extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, code: u64) -> ! {

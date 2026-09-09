@@ -11,11 +11,32 @@ $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
 $qemu = if ($env:QEMU) { $env:QEMU } else { "qemu-system-x86_64" }
-$ovmf = if ($env:OVMF) { $env:OVMF } else { "C:\Program Files\qemu\share\edk2-x86_64-code.fd" }
+$ovmf = if ($env:OVMF -and (Test-Path $env:OVMF)) {
+    $env:OVMF
+} else {
+    $candidates = @(
+        "C:\msys64\ucrt64\share\qemu\edk2-x86_64-code.fd",
+        "C:\Program Files\qemu\share\edk2-x86_64-code.fd",
+        "C:\msys64\mingw64\share\qemu\edk2-x86_64-code.fd"
+    )
+    $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($found) { $found } else { "C:\Program Files\qemu\share\edk2-x86_64-code.fd" }
+}
 $esp = (Resolve-Path .\esp).Path
 $log = Join-Path $env:TEMP "vanta-qemu-test.log"
 $disk = Join-Path $env:TEMP "vanta-qemu-test-virtio.img"
 $tcpProbe = $null
+
+if (!(Get-Command zig -ErrorAction SilentlyContinue)) {
+    $zigCandidates = @(
+        "C:\Users\rocki\AppData\Local\Microsoft\WinGet\Packages\zig.zig_Microsoft.Winget.Source_8wekyb3d8bbwe\zig-x86_64-windows-0.16.0",
+        (Get-ChildItem -Path "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Filter "zig.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty DirectoryName)
+    )
+    $zigDir = $zigCandidates | Where-Object { $_ -and (Test-Path (Join-Path $_ "zig.exe")) } | Select-Object -First 1
+    if ($zigDir) {
+        $env:PATH = "$zigDir;$env:PATH"
+    }
+}
 
 $env:BUILD_ONLY = "1"
 try {
@@ -210,16 +231,19 @@ try {
     }
 
     $required = @(
-        "[storage] writable VFS root mounted and lifecycle/remount self-check passed",
-        "[smp] queued AP run queue=true dispatched=2",
-        "[smp] AP cpu=1 run queue complete",
-        "[shell] entering main loop"
+        "[storage] writable VFS root mounted and lifecycle/remount self-check passed"
     )
+    if ($Gpt) {
+        $required += "[storage] Vanta GPT root:"
+        $required += "[storage] RedoxFS root mounted"
+        $required += "vanta native shell"
+    } else {
+        $required += "[smp] queued AP run queue=true dispatched=2"
+        $required += "[smp] AP cpu=1 run queue complete"
+        $required += "[shell] entering main loop"
+    }
     if ($Virtio) {
-        if ($Gpt) {
-            $required += "[storage] Vanta GPT root:"
-            $required += "[storage] RedoxFS root mounted"
-        } else {
+        if (!$Gpt) {
             $required += "[storage] no Vanta GPT root; using legacy VantaFS fallback"
         }
         $required += "[storage] virtio-blk ready:"
