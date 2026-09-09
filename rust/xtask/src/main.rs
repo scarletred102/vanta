@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-use vanta_image::{build_image, ImageContents, ImageOptions, RootFile};
+use vanta_image::{build_image, ImageContents, ImageOptions, RootFile, RootLink};
 
 const REDOXFS_REVISION: &str = "99bc185bf8ad8bd6f4d2562c424d800c2a3d310b";
 const RUST_TOOLCHAIN: &str = "nightly-2026-07-10";
@@ -216,6 +216,9 @@ fn build_default_image() -> Result<(), String> {
     let displayd = read_file(root.join("target/x86_64-unknown-none/release/displayd"))?;
     let desktop = read_file(root.join("target/x86_64-unknown-none/release/desktop"))?;
     let audiod = read_file(root.join("target/x86_64-unknown-none/release/audiod"))?;
+    let orbital = read_file(root.join("target/x86_64-unknown-none/release/orbital"))?;
+    let orbterm = read_file(root.join("target/x86_64-unknown-none/release/orbterm"))?;
+    let vpkg = read_file(root.join("target/x86_64-unknown-none/release/vpkg"))?;
     let ls = read_file(root.join("target/x86_64-unknown-none/release/ls"))?;
     let mkdir = read_file(root.join("target/x86_64-unknown-none/release/mkdir"))?;
     let rm = read_file(root.join("target/x86_64-unknown-none/release/rm"))?;
@@ -251,6 +254,8 @@ fn build_default_image() -> Result<(), String> {
     let linux_dynamic_fork = read_file(root.join("target/compat/linux/dynamic-fork"))?;
     let linux_dynamic_epoll = read_file(root.join("target/compat/linux/dynamic-epoll"))?;
     let linux_dynamic_proc = read_file(root.join("target/compat/linux/dynamic-proc"))?;
+    let busybox = read_file(root.join("target/compat/linux/busybox"))?;
+    let lua = read_file(root.join("target/compat/linux/lua"))?;
     let vanta_release = b"Vanta OS 0.1.0 (musl-compat)\n".to_vec();
     let root_files = [
         RootFile {
@@ -562,6 +567,20 @@ fn build_default_image() -> Result<(), String> {
             gid: 0,
         },
         RootFile {
+            path: "/bin/orbital",
+            contents: &orbital,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/orbterm",
+            contents: &orbterm,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
             path: "/bin/audiod",
             contents: &audiod,
             mode: 0o755,
@@ -603,7 +622,89 @@ fn build_default_image() -> Result<(), String> {
             uid: 0,
             gid: 0,
         },
+        RootFile {
+            path: "/bin/busybox",
+            contents: &busybox,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/lua",
+            contents: &lua,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/bin/vpkg",
+            contents: &vpkg,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
     ];
+
+    let busybox_applets = [
+        "/bin/sh",
+        "/bin/ash",
+        "/bin/vi",
+        "/bin/grep",
+        "/bin/sed",
+        "/bin/awk",
+        "/bin/find",
+        "/bin/wc",
+        "/bin/sleep",
+        "/bin/date",
+        "/bin/uname",
+        "/bin/which",
+        "/bin/clear",
+        "/bin/reset",
+        "/bin/env",
+        "/bin/tar",
+        "/bin/gzip",
+        "/bin/gunzip",
+        "/bin/cp",
+        "/bin/chmod",
+        "/bin/chown",
+        "/bin/head",
+        "/bin/tail",
+        "/bin/more",
+        "/bin/less",
+        "/bin/ps",
+        "/bin/killall",
+        "/bin/top",
+        "/bin/wget",
+        "/bin/nc",
+        "/bin/diff",
+        "/bin/patch",
+        "/bin/cut",
+        "/bin/sort",
+        "/bin/uniq",
+        "/bin/tr",
+        "/bin/xargs",
+        "/bin/strings",
+        "/bin/hexdump",
+        "/bin/dd",
+        "/bin/df",
+        "/bin/du",
+        "/bin/free",
+        "/bin/seq",
+        "/bin/tee",
+        "/bin/touch",
+        "/bin/uptime",
+        "/bin/whoami",
+        "/bin/id",
+    ];
+
+    let root_links: Vec<RootLink<'_>> = busybox_applets
+        .iter()
+        .map(|&applet| RootLink {
+            path: applet,
+            target: "/bin/busybox",
+        })
+        .collect();
+
     let image = build_image(
         ImageOptions {
             esp_sectors: ESP_SECTORS,
@@ -614,6 +715,7 @@ fn build_default_image() -> Result<(), String> {
             kernel: &kernel,
             limine_config: &limine_config,
             root_files: &root_files,
+            root_links: &root_links,
         },
     )
     .map_err(|error| format!("image construction failed: {error:?}"))?;
@@ -641,6 +743,9 @@ fn build_default_image() -> Result<(), String> {
             file.gid,
             deterministic_hash(file.contents),
         ));
+    }
+    for link in &root_links {
+        manifest_text.push_str(&format!("root-link={}\ttarget={}\n", link.path, link.target));
     }
     fs::write(&manifest, manifest_text)
         .map_err(|error| format!("{}: {error}", manifest.display()))?;
@@ -857,6 +962,30 @@ fn build_linux_samples(root: &Path) -> Result<(), String> {
                 "dynamic Linux sample compilation for {source} exited with {status}"
             ));
         }
+    }
+    let busybox_source = root.join("../compat/linux/busybox");
+    let busybox_dest = output.join("busybox");
+    if !busybox_source.exists() && !busybox_dest.exists() {
+        println!("[xtask] downloading static busybox-x86_64-musl...");
+        let _ = Command::new("powershell")
+            .args([
+                "-Command",
+                "Invoke-WebRequest -Uri 'https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox' -OutFile '../compat/linux/busybox'",
+            ])
+            .current_dir(root)
+            .status();
+    }
+    if busybox_source.exists() {
+        fs::copy(&busybox_source, &busybox_dest)
+            .map_err(|e| format!("failed to copy busybox: {e}"))?;
+    } else if !busybox_dest.exists() {
+        return Err("busybox binary not found at ../compat/linux/busybox".to_string());
+    }
+    let lua_source = root.join("../compat/linux/lua");
+    let lua_dest = output.join("lua");
+    if lua_source.exists() {
+        fs::copy(&lua_source, &lua_dest)
+            .map_err(|e| format!("failed to copy lua: {e}"))?;
     }
     Ok(())
 }

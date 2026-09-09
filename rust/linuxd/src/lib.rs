@@ -38,6 +38,15 @@ pub enum LinuxOp {
     GetEGid,
     SetPGid,
     GetPGrp,
+    SetSid,
+    GetSid,
+    SetUid,
+    SetGid,
+    SetGroups,
+    GetGroups,
+    Prctl,
+    Personality,
+    Prlimit64,
     Uname,
     GetCwd,
     ChDir,
@@ -431,13 +440,26 @@ pub fn translate(number: u64) -> Result<Translation, UnsupportedSyscall> {
         80 | 81 => (LinuxOp::ChDir, None),
         89 | 267 => (LinuxOp::ReadLink, None),
         96 => (LinuxOp::GetTimeOfDay, None),
+        97 => (LinuxOp::Prlimit64, None),
         102 | 107 => (LinuxOp::GetUid, None),
         104 | 108 => (LinuxOp::GetGid, None),
+        105 | 113 | 117 | 122 => (LinuxOp::SetUid, None),
+        106 | 114 | 119 | 123 => (LinuxOp::SetGid, None),
         109 => (LinuxOp::SetPGid, None),
         110 => (LinuxOp::GetPPid, Some(Syscall::GetPpid)),
         111 | 121 => (LinuxOp::GetPGrp, None),
+        112 => (LinuxOp::SetSid, None),
+        115 | 118 | 120 => (LinuxOp::GetGroups, None),
+        116 => (LinuxOp::SetGroups, None),
+        124 => (LinuxOp::GetSid, None),
+        125 => (LinuxOp::GetUid, None),
+        126 => (LinuxOp::SetUid, None),
+        130 => (LinuxOp::Nanosleep, None),
         131 => (LinuxOp::SigAltStack, None),
+        135 => (LinuxOp::Personality, None),
+        157 => (LinuxOp::Prctl, None),
         158 => (LinuxOp::ArchPrctl, None),
+        160 | 302 => (LinuxOp::Prlimit64, None),
         186 => (LinuxOp::GetTid, None),
         200 => (LinuxOp::TKill, None),
         202 => (LinuxOp::Futex, None),
@@ -731,6 +753,22 @@ mod tests {
             Translation {
                 linux_number: 63,
                 operation: LinuxOp::Uname,
+                native: None,
+            }
+        );
+        assert_eq!(
+            translate(112).unwrap(),
+            Translation {
+                linux_number: 112,
+                operation: LinuxOp::SetSid,
+                native: None,
+            }
+        );
+        assert_eq!(
+            translate(124).unwrap(),
+            Translation {
+                linux_number: 124,
+                operation: LinuxOp::GetSid,
                 native: None,
             }
         );

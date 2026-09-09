@@ -30,6 +30,7 @@ pub struct ImageContents<'a> {
     pub kernel: &'a [u8],
     pub limine_config: &'a [u8],
     pub root_files: &'a [RootFile<'a>],
+    pub root_links: &'a [RootLink<'a>],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -39,6 +40,12 @@ pub struct RootFile<'a> {
     pub mode: u16,
     pub uid: u32,
     pub gid: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RootLink<'a> {
+    pub path: &'a str,
+    pub target: &'a str,
 }
 
 #[derive(Debug)]
@@ -118,7 +125,7 @@ pub fn build_image(
     let mut bytes = vec![0_u8; image_len];
 
     let esp_bytes = build_esp(options.esp_sectors, contents)?;
-    let root_bytes = build_redoxfs(options.root_sectors, contents.root_files)?;
+    let root_bytes = build_redoxfs(options.root_sectors, contents.root_files, contents.root_links)?;
     copy_partition(&mut bytes, esp, &esp_bytes)?;
     copy_partition(&mut bytes, root, &root_bytes)?;
     write_gpt(&mut bytes, esp, root, total_sectors)?;
@@ -161,7 +168,11 @@ fn write_fat_file(
     Ok(())
 }
 
-fn build_redoxfs(sectors: u64, root_files: &[RootFile<'_>]) -> Result<Vec<u8>, ImageError> {
+fn build_redoxfs(
+    sectors: u64,
+    root_files: &[RootFile<'_>],
+    root_links: &[RootLink<'_>],
+) -> Result<Vec<u8>, ImageError> {
     let bytes = usize::try_from(
         sectors
             .checked_mul(SECTOR_SIZE as u64)
@@ -184,6 +195,9 @@ fn build_redoxfs(sectors: u64, root_files: &[RootFile<'_>]) -> Result<Vec<u8>, I
         tx.write_node(config, 0, b"vanta-vfs-syscall\n", 0, 0)?;
         for file in root_files {
             install_root_file(tx, *file)?;
+        }
+        for link in root_links {
+            install_root_link(tx, *link)?;
         }
         Ok(())
     })
@@ -220,6 +234,36 @@ fn install_root_file(
         )?
         .ptr();
     tx.write_node(node, 0, file.contents, 0, 0)?;
+    Ok(())
+}
+
+fn install_root_link(
+    tx: &mut redoxfs::Transaction<MemoryDisk>,
+    link: RootLink<'_>,
+) -> Result<(), SyscallError> {
+    let mut target_parent = TreePtr::root();
+    let mut target_components = link.target.split('/').filter(|part| !part.is_empty());
+    let target_name = target_components.next_back().ok_or_else(|| SyscallError::new(EIO))?;
+    for component in target_components {
+        target_parent = tx.find_node(target_parent, component)?.ptr();
+    }
+    let target_node = tx.find_node(target_parent, target_name)?.ptr();
+
+    let mut link_components = link.path.split('/').filter(|part| !part.is_empty());
+    let link_name = link_components.next_back().ok_or_else(|| SyscallError::new(EIO))?;
+    let mut link_parent = TreePtr::root();
+    for component in link_components {
+        link_parent = match tx.find_node(link_parent, component) {
+            Ok(node) if node.data().is_dir() => node.ptr(),
+            Ok(_) => return Err(SyscallError::new(EIO)),
+            Err(error) if error.errno == syscall::error::ENOENT => tx
+                .create_node(link_parent, component, Node::MODE_DIR | 0o755, 0, 0)?
+                .ptr(),
+            Err(error) => return Err(error),
+        };
+    }
+
+    tx.link_node(link_parent, link_name, target_node)?;
     Ok(())
 }
 
@@ -475,6 +519,7 @@ mod tests {
                 kernel: b"kernel",
                 limine_config: b"config",
                 root_files: &[init, shell],
+                root_links: &[],
             },
         )
         .unwrap();
