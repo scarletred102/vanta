@@ -21,7 +21,7 @@ pub extern "C" fn _start() -> ! {
     let win_y = 440;
 
     unsafe {
-        let slice = core::slice::from_raw_parts_mut(WIDGET_BUFFER.as_mut_ptr(), WIDGET_W * WIDGET_H * 4);
+        let slice = core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(WIDGET_BUFFER).cast::<u8>(), WIDGET_W * WIDGET_H * 4);
         let mut canvas = Canvas::new(slice, WIDGET_W, WIDGET_H);
 
         // Render Control Center Window
@@ -47,7 +47,7 @@ pub extern "C" fn _start() -> ! {
 
         canvas.draw_text(16, 226, "Vanta Desktop Suite v1.0", Color::TEXT_MUTED, 1);
 
-        let blit_slice = core::slice::from_raw_parts(WIDGET_BUFFER.as_ptr(), WIDGET_W * WIDGET_H * 4);
+        let blit_slice = core::slice::from_raw_parts(core::ptr::addr_of!(WIDGET_BUFFER).cast::<u8>(), WIDGET_W * WIDGET_H * 4);
         if vanta_userland::display_blit(win_x, win_y, WIDGET_W as u32, WIDGET_H as u32, blit_slice) == u64::MAX - 1 {
             vanta_userland::exit(2);
         }

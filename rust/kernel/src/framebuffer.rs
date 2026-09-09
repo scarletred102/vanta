@@ -191,6 +191,7 @@ pub fn display_info() -> vanta_abi::DisplayInfo {
     }
 }
 
+#[allow(dead_code)]
 pub fn display_blit(x: usize, y: usize, w: usize, h: usize, buf: &[u8]) -> bool {
     let mut writer = WRITER.lock();
     let Some(ref mut writer) = *writer else {

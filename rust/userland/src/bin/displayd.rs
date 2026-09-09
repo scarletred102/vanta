@@ -37,7 +37,7 @@ pub extern "C" fn _start() -> ! {
     let mut tick_counter: usize = 0;
 
     unsafe {
-        let buf_ptr = SCREEN_BUFFER.as_mut_ptr();
+        let buf_ptr = core::ptr::addr_of_mut!(SCREEN_BUFFER).cast::<u8>();
         let buf_len = width * height * 4;
 
         loop {
