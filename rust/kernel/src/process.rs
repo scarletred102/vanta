@@ -56,6 +56,7 @@ pub struct Process {
     brk_current: u64,
     mmap_next: u64,
     mappings: Vec<MappedPage>,
+    pub memory_map: alloc::sync::Arc<spin::Mutex<crate::vma::ProcessMemoryMap>>,
     destroyed: bool,
 }
 
@@ -94,6 +95,8 @@ impl Process {
                 physical_address,
             })
             .collect();
+        let child_memory_map = alloc::sync::Arc::new(spin::Mutex::new(self.memory_map.lock().clone()));
+        crate::vma::register_address_space_vmas(new_space, alloc::sync::Arc::clone(&child_memory_map));
         Self {
             space: new_space,
             entry: self.entry,
@@ -104,6 +107,7 @@ impl Process {
             brk_current: self.brk_current,
             mmap_next: self.mmap_next,
             mappings,
+            memory_map: child_memory_map,
             destroyed: false,
         }
     }
@@ -148,6 +152,7 @@ impl Process {
             }
         }
         self.brk_current = new_brk;
+        self.memory_map.lock().heap_break = new_brk;
         self.brk_current
     }
 
@@ -223,6 +228,22 @@ impl Process {
                 physical_address: physical,
             });
         }
+        let mut vma_flags = crate::vma::VmaFlags::ANONYMOUS;
+        if prot & 1 != 0 {
+            vma_flags |= crate::vma::VmaFlags::READ;
+        }
+        if prot & 2 != 0 {
+            vma_flags |= crate::vma::VmaFlags::WRITE;
+        }
+        if prot & 4 != 0 {
+            vma_flags |= crate::vma::VmaFlags::EXEC;
+        }
+        let _ = self.memory_map.lock().insert_vma(
+            base_address,
+            base_address + aligned_length,
+            vma_flags,
+            crate::vma::VmaBacking::Anonymous,
+        );
         Ok(base_address)
     }
 
@@ -261,6 +282,7 @@ impl Process {
             }
             page += PAGE_SIZE;
         }
+        let _ = self.memory_map.lock().remove_vma_range(addr, addr + aligned_length);
         Ok(())
     }
 
@@ -268,6 +290,18 @@ impl Process {
         let translation = paging::translate_in(self.space, virtual_address)?;
         let physical = paging::phys_to_virt(translation.physical_address)?;
         Some(unsafe { (physical as *const u8).read_volatile() })
+    }
+
+    pub fn update_mapping(&mut self, virtual_address: u64, new_physical: u64) {
+        let page_vaddr = virtual_address & !(PAGE_SIZE - 1);
+        if let Some(m) = self.mappings.iter_mut().find(|m| m.virtual_address == page_vaddr) {
+            m.physical_address = new_physical;
+        } else {
+            self.mappings.push(MappedPage {
+                virtual_address: page_vaddr,
+                physical_address: new_physical,
+            });
+        }
     }
 
     /// Tear down all user leaf mappings and then the process page tables.
@@ -280,12 +314,13 @@ impl Process {
             return Ok(0);
         }
 
+        crate::vma::unregister_address_space_vmas(self.space);
+
         while let Some(mapping) = self.mappings.pop() {
-            let unmapped = paging::unmap(self.space, mapping.virtual_address)
-                .map_err(ProcessError::Map)?
-                .ok_or(ProcessError::Map(MapError::NoHhdm))?;
-            if unmapped != mapping.physical_address || !memory::free_frame(PhysFrame(unmapped)) {
-                return Err(ProcessError::FrameReleaseFailed);
+            if let Ok(Some(unmapped)) = paging::unmap(self.space, mapping.virtual_address) {
+                if !memory::free_frame(PhysFrame(unmapped)) {
+                    return Err(ProcessError::FrameReleaseFailed);
+                }
             }
         }
 
@@ -425,6 +460,12 @@ fn load_elf_with_personality(
     }
     let brk_start = (max_main_segment_end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
+    let memory_map = alloc::sync::Arc::new(spin::Mutex::new(crate::vma::ProcessMemoryMap::new(
+        USER_STACK_TOP,
+        USER_STACK_TOP - 8 * 1024 * 1024,
+    )));
+    crate::vma::register_address_space_vmas(space, alloc::sync::Arc::clone(&memory_map));
+
     let mut process = Process {
         space,
         entry: execution_entry,
@@ -435,10 +476,11 @@ fn load_elf_with_personality(
         brk_current: brk_start,
         mmap_next: 0x0000_7000_0000_0000,
         mappings: Vec::new(),
+        memory_map: alloc::sync::Arc::clone(&memory_map),
         destroyed: false,
     };
 
-    for plan in plans {
+    for plan in &plans {
         let frame = memory::alloc_frame().ok_or(ProcessError::OutOfMemory)?;
         let physical_address = frame.start_address();
         let Some(virtual_address) = paging::phys_to_virt(physical_address) else {
@@ -515,6 +557,34 @@ fn load_elf_with_personality(
         main_entry,
         interp_base,
     )?;
+
+    for plan in &plans {
+        let mut flags = crate::vma::VmaFlags::READ;
+        if plan.flags & paging::MAP_WRITABLE != 0 {
+            flags |= crate::vma::VmaFlags::WRITE;
+        }
+        if plan.executable {
+            flags |= crate::vma::VmaFlags::EXEC;
+        }
+        let _ = process.memory_map.lock().insert_vma(
+            plan.virtual_address,
+            plan.virtual_address + PAGE_SIZE,
+            flags,
+            crate::vma::VmaBacking::Anonymous,
+        );
+    }
+
+    let _ = process.memory_map.lock().insert_vma(
+        USER_STACK_START,
+        USER_STACK_TOP,
+        crate::vma::VmaFlags::READ
+            | crate::vma::VmaFlags::WRITE
+            | crate::vma::VmaFlags::ANONYMOUS
+            | crate::vma::VmaFlags::STACK
+            | crate::vma::VmaFlags::GROWSDOWN,
+        crate::vma::VmaBacking::Anonymous,
+    );
+
     Ok(process)
 }
 
@@ -631,6 +701,11 @@ fn initialize_stack(
 }
 
 pub fn write_user_byte_in(space: AddressSpace, address: u64, value: u8) -> Result<(), ProcessError> {
+    if let Some(flags) = paging::flags_in(space, address) {
+        if flags & paging::MAP_COW != 0 {
+            paging::resolve_cow_page(space, address).map_err(|_| ProcessError::InvalidUserAddress)?;
+        }
+    }
     let translation =
         paging::translate_in(space, address).ok_or(ProcessError::InvalidUserAddress)?;
     let physical = paging::phys_to_virt(translation.physical_address)

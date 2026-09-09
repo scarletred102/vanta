@@ -14,7 +14,6 @@ use crate::paging::{self, AddressSpace};
 use crate::process::Process;
 use crate::syscall::UserContext;
 
-const TIMER_TICKS_PER_SLICE: u64 = 3;
 const MAX_CPUS: usize = 8;
 
 #[repr(C)]
@@ -120,11 +119,37 @@ impl InterruptContext {
     }
 }
 
+#[allow(dead_code)]
+pub const PRIO_RT_MIN: u8 = 0;
+#[allow(dead_code)]
+pub const PRIO_RT_MAX: u8 = 3;
+pub const PRIO_INTERACTIVE_MIN: u8 = 4;
+#[allow(dead_code)]
+pub const PRIO_INTERACTIVE_MAX: u8 = 7;
+pub const PRIO_NORMAL_MIN: u8 = 8;
+#[allow(dead_code)]
+pub const PRIO_NORMAL_MAX: u8 = 15;
+#[allow(dead_code)]
+pub const PRIO_BATCH_MIN: u8 = 16;
+pub const PRIO_BATCH_MAX: u8 = 19;
+
+pub fn slice_for_priority(priority: u8) -> u8 {
+    match priority {
+        0..=3 => 1,
+        4..=7 => 2,
+        8..=15 => 4,
+        _ => 8,
+    }
+}
+
 struct Task {
     tid: u64,
     tgid: u64,
     parent_pid: Option<u64>,
     state: TaskState,
+    priority: u8,
+    base_priority: u8,
+    time_slice_remaining: u8,
     process: Option<Arc<Mutex<Process>>>,
     context: UserContext,
     interrupt_context: InterruptContext,
@@ -305,6 +330,8 @@ fn wake_pipe_waiters(pipe_id: u64) {
         for task in &mut scheduler.tasks {
             if task.state == (TaskState::PipeWaiting { pipe_id }) {
                 task.state = TaskState::Runnable;
+                task.priority = task.priority.saturating_sub(2).max(PRIO_INTERACTIVE_MIN);
+                task.time_slice_remaining = slice_for_priority(task.priority);
             }
         }
     }
@@ -323,6 +350,8 @@ fn futex_wake_unlocked(scheduler: &mut Scheduler, uaddr: u64, count: u32, bitset
         {
             if w_uaddr == uaddr && (w_bitset & bitset) != 0 {
                 task.state = TaskState::Runnable;
+                task.priority = task.priority.saturating_sub(2).max(PRIO_INTERACTIVE_MIN);
+                task.time_slice_remaining = slice_for_priority(task.priority);
                 woken += 1;
             }
         }
@@ -493,6 +522,10 @@ pub fn yield_current(context: UserContext) -> *const UserContext {
         scheduler.tasks[previous].interrupt_context.rax = context.return_value;
         scheduler.tasks[previous].interrupt_context.flags = context.flags;
         scheduler.tasks[previous].interrupt_context.stack_pointer = context.stack_pointer;
+        if scheduler.tasks[previous].priority > scheduler.tasks[previous].base_priority {
+            scheduler.tasks[previous].priority -= 1;
+        }
+        scheduler.tasks[previous].time_slice_remaining = slice_for_priority(scheduler.tasks[previous].priority);
         let next = next_alive(scheduler, previous).unwrap_or(previous);
         scheduler.current = next;
         scheduler.slice_ticks = 0;
@@ -526,12 +559,20 @@ pub fn timer_tick(context: *mut InterruptContext) -> *const InterruptContext {
             return context;
         };
         scheduler.ticks = scheduler.ticks.wrapping_add(1);
-        scheduler.slice_ticks += 1;
-        if scheduler.slice_ticks < TIMER_TICKS_PER_SLICE {
+
+        let previous = scheduler.current;
+        if scheduler.tasks[previous].time_slice_remaining > 0 {
+            scheduler.tasks[previous].time_slice_remaining -= 1;
+        }
+        if scheduler.tasks[previous].time_slice_remaining > 0 {
             return context;
         }
 
-        let previous = scheduler.current;
+        if scheduler.tasks[previous].priority < PRIO_BATCH_MAX {
+            scheduler.tasks[previous].priority += 1;
+        }
+        scheduler.tasks[previous].time_slice_remaining = slice_for_priority(scheduler.tasks[previous].priority);
+
         let next = next_alive(scheduler, previous).unwrap_or(previous);
         scheduler.slice_ticks = 0;
         if previous == next {
@@ -786,13 +827,24 @@ fn current_target() -> (UserContext, AddressSpace) {
 }
 
 fn next_alive(scheduler: &Scheduler, current: usize) -> Option<usize> {
-    for offset in 1..=scheduler.tasks.len() {
-        let index = (current + offset) % scheduler.tasks.len();
-        if scheduler.tasks[index].state == TaskState::Runnable {
-            return Some(index);
+    let mut best_index = None;
+    let mut best_priority = 255u8;
+    let n = scheduler.tasks.len();
+
+    for offset in 1..=n {
+        let index = (current + offset) % n;
+        let task = &scheduler.tasks[index];
+        if task.state == TaskState::Runnable {
+            if task.priority < best_priority {
+                best_priority = task.priority;
+                best_index = Some(index);
+                if best_priority == 0 {
+                    break;
+                }
+            }
         }
     }
-    None
+    best_index
 }
 
 fn wait_for_next_runnable(
@@ -803,6 +855,37 @@ fn wait_for_next_runnable(
         if let Some(scheduler) = scheduler_guard.as_ref() {
             if let Some(next) = next_alive(scheduler, previous) {
                 return (scheduler_guard, next);
+            }
+        }
+        let my_cpu = crate::syscall::current_cpu_index().min(MAX_CPUS - 1);
+        for peer_cpu in 0..MAX_CPUS {
+            if peer_cpu == my_cpu {
+                continue;
+            }
+            if let Some(mut peer_guard) = SCHEDULERS[peer_cpu].try_lock() {
+                if let Some(peer_scheduler) = peer_guard.as_mut() {
+                    let runnable_count = peer_scheduler
+                        .tasks
+                        .iter()
+                        .filter(|t| t.state == TaskState::Runnable)
+                        .count();
+                    if runnable_count >= 3 {
+                        if let Some(pos) = peer_scheduler
+                            .tasks
+                            .iter()
+                            .rposition(|t| t.state == TaskState::Runnable)
+                        {
+                            if pos != peer_scheduler.current {
+                                let stolen_task = peer_scheduler.tasks.remove(pos);
+                                if let Some(my_scheduler) = scheduler_guard.as_mut() {
+                                    my_scheduler.tasks.push(stolen_task);
+                                    let new_idx = my_scheduler.tasks.len() - 1;
+                                    return (scheduler_guard, new_idx);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         drop(scheduler_guard);
@@ -1451,6 +1534,9 @@ pub fn clone_task_current(
         tgid: child_tgid,
         parent_pid: child_parent_pid,
         state: TaskState::Runnable,
+        priority: parent_task.priority,
+        base_priority: parent_task.base_priority,
+        time_slice_remaining: slice_for_priority(parent_task.priority),
         context: child_context,
         interrupt_context: child_interrupt_context,
         process: Some(child_process),
@@ -1851,11 +1937,15 @@ fn new_task(
 ) -> Task {
     let entry = process.entry();
     let stack_top = process.user_stack_top();
+    let priority = if tgid <= 2 { PRIO_INTERACTIVE_MIN } else { PRIO_NORMAL_MIN };
     Task {
         tid,
         tgid,
         parent_pid,
         state: TaskState::Runnable,
+        priority,
+        base_priority: priority,
+        time_slice_remaining: slice_for_priority(priority),
         context: UserContext {
             return_value: 0,
             rbx: 0,
@@ -2724,3 +2814,4 @@ fn task_count() -> usize {
         .map(|scheduler| scheduler.tasks.len())
         .unwrap_or(0)
 }
+

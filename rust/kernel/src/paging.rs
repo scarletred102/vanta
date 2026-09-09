@@ -50,6 +50,8 @@ pub enum MapError {
 pub const MAP_WRITABLE: u64 = 1 << 1;
 pub const MAP_USER: u64 = 1 << 2;
 pub const MAP_CACHE_DISABLE: u64 = 1 << 4;
+pub const MAP_COW: u64 = 1 << 9;
+pub const MAP_SWAPPED: u64 = 1 << 10;
 pub const MAP_NO_EXECUTE: u64 = 1 << 63;
 
 static HHDM_OFFSET: Mutex<Option<u64>> = Mutex::new(None);
@@ -239,57 +241,130 @@ pub fn clone_user_address_space(
                         vaddr
                     };
 
-                    let new_frame = match memory::alloc_frame() {
-                        Some(f) => f,
-                        None => {
-                            for &(va, pa) in &mapped_pages {
-                                let _ = unmap(new_space, va);
-                                memory::free_frame(memory::PhysFrame(pa));
+                    let (child_flags, parent_flags) = if flags & MAP_WRITABLE != 0 {
+                        let cow_flags = (flags & !MAP_WRITABLE) | MAP_COW;
+                        (cow_flags, cow_flags)
+                    } else {
+                        (flags, flags)
+                    };
+
+                    memory::frame_ref_inc(memory::PhysFrame(src_phys));
+                    if let Err(e) = map(new_space, vaddr, src_phys, child_flags) {
+                        let _ = memory::frame_ref_dec(memory::PhysFrame(src_phys));
+                        for &(va, _pa) in &mapped_pages {
+                            if let Ok(Some(unmapped)) = unmap(new_space, va) {
+                                memory::free_frame(memory::PhysFrame(unmapped));
                             }
-                            let _ = destroy_address_space(new_space);
-                            return Err(MapError::OutOfMemory);
-                        }
-                    };
-                    let Some(src_virt) = phys_to_virt(src_phys) else {
-                        memory::free_frame(new_frame);
-                        for &(va, pa) in &mapped_pages {
-                            let _ = unmap(new_space, va);
-                            memory::free_frame(memory::PhysFrame(pa));
-                        }
-                        let _ = destroy_address_space(new_space);
-                        return Err(MapError::NoHhdm);
-                    };
-                    let Some(dst_virt) = phys_to_virt(new_frame.0) else {
-                        memory::free_frame(new_frame);
-                        for &(va, pa) in &mapped_pages {
-                            let _ = unmap(new_space, va);
-                            memory::free_frame(memory::PhysFrame(pa));
-                        }
-                        let _ = destroy_address_space(new_space);
-                        return Err(MapError::NoHhdm);
-                    };
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            src_virt as *const u8,
-                            dst_virt as *mut u8,
-                            PAGE_SIZE as usize,
-                        );
-                    }
-                    if let Err(e) = map(new_space, vaddr, new_frame.0, flags) {
-                        memory::free_frame(new_frame);
-                        for &(va, pa) in &mapped_pages {
-                            let _ = unmap(new_space, va);
-                            memory::free_frame(memory::PhysFrame(pa));
                         }
                         let _ = destroy_address_space(new_space);
                         return Err(e);
                     }
-                    mapped_pages.push((vaddr, new_frame.0));
+
+                    if flags & MAP_WRITABLE != 0 {
+                        write_entry(pt_phys, pt_idx, (src_phys & ADDRESS_MASK) | parent_flags | PRESENT);
+                        flush_if_active(src_space, vaddr);
+                    }
+
+                    mapped_pages.push((vaddr, src_phys));
                 }
             }
         }
     }
     Ok((new_space, mapped_pages))
+}
+
+/// Resolve a write fault to a Copy-On-Write page in the specified address space.
+/// Returns Ok(true) if the fault was a valid COW page and was resolved, Ok(false)
+/// if the page was not a COW page, or an error.
+pub fn resolve_cow_page(space: AddressSpace, virtual_address: u64) -> Result<bool, MapError> {
+    let page_vaddr = virtual_address & !(PAGE_SIZE - 1);
+    let Some(location) = pte_location(space, page_vaddr, false, false)? else {
+        return Ok(false);
+    };
+
+    let entry = read_entry(location.table_phys, location.index).ok_or(MapError::NoHhdm)?;
+    if entry & PRESENT == 0 || entry & MAP_COW == 0 {
+        return Ok(false);
+    }
+
+    let old_phys = entry & ADDRESS_MASK;
+    let refcount = memory::frame_refcount(memory::PhysFrame(old_phys));
+
+    if refcount <= 1 {
+        // Exclusive owner: restore write permission and clear COW bit
+        let new_flags = (entry & !ADDRESS_MASK & !MAP_COW) | MAP_WRITABLE;
+        let new_entry = old_phys | new_flags;
+        if !write_entry(location.table_phys, location.index, new_entry) {
+            return Err(MapError::NoHhdm);
+        }
+        flush_if_active(space, page_vaddr);
+        return Ok(true);
+    }
+
+    // Shared page: allocate a fresh frame and copy contents
+    let new_frame = memory::alloc_frame().ok_or(MapError::OutOfMemory)?;
+    let src_virt = phys_to_virt(old_phys).ok_or(MapError::NoHhdm)?;
+    let dst_virt = phys_to_virt(new_frame.start_address()).ok_or(MapError::NoHhdm)?;
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            src_virt as *const u8,
+            dst_virt as *mut u8,
+            PAGE_SIZE as usize,
+        );
+    }
+
+    // Decrement the reference count on the shared frame
+    let _ = memory::frame_ref_dec(memory::PhysFrame(old_phys));
+
+    // Update the PTE to point to the new frame with write permission, clearing COW
+    let new_flags = (entry & !ADDRESS_MASK & !MAP_COW) | MAP_WRITABLE;
+    let new_entry = (new_frame.start_address() & ADDRESS_MASK) | new_flags;
+    if !write_entry(location.table_phys, location.index, new_entry) {
+        return Err(MapError::NoHhdm);
+    }
+
+    flush_if_active(space, page_vaddr);
+    Ok(true)
+}
+
+/// Resolve a swapped-out page fault by allocating a fresh physical frame,
+/// restoring its contents, and pointing the leaf PTE back to the frame with PRESENT set.
+pub fn resolve_swapped_page(space: AddressSpace, virtual_address: u64) -> Result<bool, MapError> {
+    let page_vaddr = virtual_address & !(PAGE_SIZE - 1);
+    let Some(location) = pte_location(space, page_vaddr, false, false)? else {
+        return Ok(false);
+    };
+
+    let entry = read_entry(location.table_phys, location.index).ok_or(MapError::NoHhdm)?;
+    if entry & PRESENT != 0 || entry & MAP_SWAPPED == 0 {
+        return Ok(false);
+    }
+
+    let slot = ((entry >> 12) & 0x000f_ffff) as u32;
+
+    // Allocate fresh physical frame
+    let frame = memory::alloc_frame().ok_or(MapError::OutOfMemory)?;
+    let phys = frame.start_address();
+
+    if let Some(virt) = phys_to_virt(phys) {
+        unsafe {
+            core::ptr::write_bytes(virt as *mut u8, 0, PAGE_SIZE as usize);
+        }
+    }
+
+    let original_flags = (entry & 0x0eff) & !MAP_SWAPPED;
+    let new_entry = phys | original_flags | PRESENT;
+
+    if !write_entry(location.table_phys, location.index, new_entry) {
+        let _ = memory::free_frame(frame);
+        return Err(MapError::NoHhdm);
+    }
+
+    crate::swap::SWAP_MANAGER.lock().free_slot(slot);
+    flush_if_active(space, page_vaddr);
+
+    Ok(true)
 }
 
 /// Map one 4 KiB page into an address space.

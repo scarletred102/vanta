@@ -2114,9 +2114,28 @@ fn user_physical_address(address: u64, writable: bool) -> Result<u64, ()> {
     if address >= USER_ADDRESS_LIMIT {
         return Err(());
     }
-    let flags = paging::flags_in(paging::current_address_space(), address).ok_or(())?;
-    if flags & paging::MAP_USER == 0 || (writable && flags & paging::MAP_WRITABLE == 0) {
+    let space = paging::current_address_space();
+    let mut flags = match paging::flags_in(space, address) {
+        Some(f) => f,
+        None => {
+            if let Ok(true) = crate::vma::resolve_demand_page(space, address) {
+                paging::flags_in(space, address).ok_or(())?
+            } else {
+                return Err(());
+            }
+        }
+    };
+    if flags & paging::MAP_USER == 0 {
         return Err(());
+    }
+    if writable && (flags & paging::MAP_WRITABLE == 0) {
+        if flags & paging::MAP_COW != 0 {
+            paging::resolve_cow_page(space, address).map_err(|_| ())?;
+            flags = paging::flags_in(space, address).ok_or(())?;
+        }
+        if flags & paging::MAP_WRITABLE == 0 {
+            return Err(());
+        }
     }
     let translation = paging::translate(address).ok_or(())?;
     paging::phys_to_virt(translation.physical_address).ok_or(())

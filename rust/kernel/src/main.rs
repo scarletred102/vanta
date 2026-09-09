@@ -40,6 +40,8 @@ mod syscall;
 mod vfs;
 mod virtio;
 mod virtio_net;
+mod vma;
+mod swap;
 
 #[used]
 #[link_section = ".requests"]

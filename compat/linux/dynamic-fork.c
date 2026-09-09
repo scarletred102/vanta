@@ -7,6 +7,17 @@
 
 static int shared_val = 100;
 
+static __attribute__((noinline)) int recurse_stack(int depth, int acc) {
+    volatile char frame_buf[4096];
+    frame_buf[0] = (char)(depth + 1);
+    frame_buf[4095] = (char)(depth ^ 0x55);
+    acc += (int)frame_buf[0] + (int)frame_buf[4095];
+    if (depth <= 0) {
+        return acc;
+    }
+    return recurse_stack(depth - 1, acc);
+}
+
 int main(void) {
     // Phase 1: Rapid 50-iteration fork loop stress test
     for (int i = 0; i < 50; i++) {
@@ -47,10 +58,29 @@ int main(void) {
         int status = 0;
         pid_t w = waitpid(pid, &status, 0);
         printf("[linux-fork] parent waited w=%d status=%d shared_val=%d\n", (int)w, WEXITSTATUS(status), shared_val);
-        if (shared_val == 100 && WEXITSTATUS(status) == 42) {
-            printf("[linux-fork] COW fork and waitpid verified\n");
-            return 0;
+        if (shared_val != 100 || WEXITSTATUS(status) != 42) {
+            return 2;
         }
-        return 2;
+        printf("[linux-fork] COW fork and waitpid verified\n");
     }
+
+    // Phase 3: Stack auto-expansion beyond initial 64KB stack limit
+    int stack_res = recurse_stack(48, 0);
+    if (stack_res != 0) {
+        printf("[linux-fork] stack auto-expansion verified\n");
+    }
+
+    // Phase 4: Anonymous demand allocation test
+    char *sparse = malloc(2 * 1024 * 1024);
+    if (sparse != NULL) {
+        sparse[0] = 'V';
+        sparse[1024 * 1024] = 'A';
+        sparse[2 * 1024 * 1024 - 1] = 'N';
+        if (sparse[0] == 'V' && sparse[1024 * 1024] == 'A' && sparse[2 * 1024 * 1024 - 1] == 'N') {
+            printf("[linux-fork] anonymous demand paging verified\n");
+        }
+        free(sparse);
+    }
+
+    return 0;
 }

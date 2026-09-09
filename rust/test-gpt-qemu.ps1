@@ -144,6 +144,8 @@ $common = @(
     "[linux-dynamic] network acceptance passed",
     "[linux-fork] 50-iteration fork loop verified",
     "[linux-fork] COW fork and waitpid verified",
+    "[linux-fork] stack auto-expansion verified",
+    "[linux-fork] anonymous demand paging verified",
     "[linux-epoll] epoll and eventfd multiplexing verified",
     "[linux-proc] /proc virtual filesystem verified",
     "desktop: GUI window surface composition verified",
@@ -179,4 +181,4 @@ Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required 
 ) | Out-Null
 Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
 
-Write-Host "[test] GPT Gate A, Gate B, Gate C, and Gate D native acceptance passed"
+Write-Host "[test] GPT Gate A, Gate B, Gate C, Gate D, and Gate E acceptance passed"

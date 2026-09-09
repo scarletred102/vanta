@@ -133,10 +133,34 @@ extern "x86-interrupt" fn gp_handler(frame: InterruptStackFrame, code: u64) {
 }
 
 extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: PageFaultErrorCode) {
-    let addr = x86_64::registers::control::Cr2::read();
+    let fault_vaddr = x86_64::registers::control::Cr2::read().map_or(0, |value| value.as_u64());
+    let space = crate::paging::current_address_space();
+
+    if code.contains(PageFaultErrorCode::CAUSED_BY_WRITE) {
+        match crate::paging::resolve_cow_page(space, fault_vaddr) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(e) => {
+                panic!("PAGE FAULT: COW resolution error {:?} at {:#x}", e, fault_vaddr);
+            }
+        }
+    }
+
+    if !code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
+        if let Ok(true) = crate::paging::resolve_swapped_page(space, fault_vaddr) {
+            return;
+        }
+
+        if fault_vaddr < 0x0000_8000_0000_0000 {
+            if let Ok(true) = crate::vma::resolve_demand_page(space, fault_vaddr) {
+                return;
+            }
+        }
+    }
+
     panic!(
         "PAGE FAULT addr={:#x} code={:#x} instruction={:#x}",
-        addr.map_or(0, |value| value.as_u64()),
+        fault_vaddr,
         code.bits(),
         frame.instruction_pointer.as_u64()
     );
