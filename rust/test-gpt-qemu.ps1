@@ -142,6 +142,8 @@ $common = @(
     "[linux-dynamic] signal delivered and handled",
     "[linux-dynamic] rt_sigreturn restored context",
     "[linux-dynamic] thread TLS verified",
+    "[linux-dynamic] futex synchronization passed",
+    "[linux-dynamic] thread joined successfully",
     "[linux-dynamic] thread spawned",
     "[net] virtio-net adapter initialized",
     "[linux-dynamic] network acceptance passed",

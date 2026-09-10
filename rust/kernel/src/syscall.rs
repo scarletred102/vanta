@@ -1182,12 +1182,12 @@ fn linux_futex_user(
     uaddr: u64,
     op: u64,
     val: u64,
-    _timeout: u64,
-    _uaddr2: u64,
+    timeout_or_val2: u64,
+    uaddr2: u64,
     val3: u64,
 ) -> u64 {
-    if uaddr == 0 || uaddr >= USER_ADDRESS_LIMIT {
-        return SYSCALL_ERROR;
+    if uaddr == 0 || uaddr >= USER_ADDRESS_LIMIT || uaddr % 4 != 0 {
+        return (-(22 as i64)) as u64; // EINVAL
     }
     let cmd = (op as u32) & vanta_linuxd::FUTEX_CMD_MASK;
     let bitset = if cmd == vanta_linuxd::FUTEX_WAIT_BITSET || cmd == vanta_linuxd::FUTEX_WAKE_BITSET {
@@ -1200,7 +1200,7 @@ fn linux_futex_user(
         vanta_linuxd::FUTEX_WAIT | vanta_linuxd::FUTEX_WAIT_BITSET => {
             let mut val_bytes = [0u8; 4];
             if copy_from_user_into(uaddr, &mut val_bytes).is_err() {
-                return SYSCALL_ERROR;
+                return (-(14 as i64)) as u64; // EFAULT
             }
             let current_val = u32::from_ne_bytes(val_bytes);
             if current_val != (val as u32) {
@@ -1216,9 +1216,43 @@ fn linux_futex_user(
             let count = val as u32;
             crate::scheduler::futex_wake(uaddr, count, bitset)
         }
-        vanta_linuxd::FUTEX_REQUEUE | vanta_linuxd::FUTEX_CMP_REQUEUE => {
-            let count = val as u32;
-            crate::scheduler::futex_wake(uaddr, count, vanta_linuxd::FUTEX_BITSET_MATCH_ANY)
+        vanta_linuxd::FUTEX_REQUEUE => {
+            if uaddr2 == 0 || uaddr2 >= USER_ADDRESS_LIMIT || uaddr2 % 4 != 0 || uaddr == uaddr2 {
+                return (-(22 as i64)) as u64; // EINVAL
+            }
+            let wake_count = val as u32;
+            let requeue_count = timeout_or_val2 as u32;
+            let (woken, requeued) = crate::scheduler::futex_requeue(
+                uaddr,
+                wake_count,
+                bitset,
+                uaddr2,
+                requeue_count,
+            );
+            woken + requeued
+        }
+        vanta_linuxd::FUTEX_CMP_REQUEUE => {
+            if uaddr2 == 0 || uaddr2 >= USER_ADDRESS_LIMIT || uaddr2 % 4 != 0 || uaddr == uaddr2 {
+                return (-(22 as i64)) as u64; // EINVAL
+            }
+            let mut val_bytes = [0u8; 4];
+            if copy_from_user_into(uaddr, &mut val_bytes).is_err() {
+                return (-(14 as i64)) as u64; // EFAULT
+            }
+            let current_val = u32::from_ne_bytes(val_bytes);
+            if current_val != (val3 as u32) {
+                return (-(11 as i64)) as u64; // EAGAIN
+            }
+            let wake_count = val as u32;
+            let requeue_count = timeout_or_val2 as u32;
+            let (woken, requeued) = crate::scheduler::futex_requeue(
+                uaddr,
+                wake_count,
+                bitset,
+                uaddr2,
+                requeue_count,
+            );
+            woken + requeued
         }
         _ => SYSCALL_ERROR,
     }

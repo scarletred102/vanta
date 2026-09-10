@@ -383,6 +383,93 @@ pub fn futex_wake(uaddr: u64, count: u32, bitset: u32) -> u64 {
     total_woken
 }
 
+fn futex_requeue_unlocked(
+    scheduler: &mut Scheduler,
+    uaddr: u64,
+    wake_remaining: u32,
+    bitset: u32,
+    uaddr2: u64,
+    requeue_remaining: u32,
+) -> (u64, u64) {
+    let mut woken = 0u64;
+    let mut requeued = 0u64;
+    for task in &mut scheduler.tasks {
+        if woken >= wake_remaining as u64 && requeued >= requeue_remaining as u64 {
+            break;
+        }
+        let mut should_wake = false;
+        let mut should_requeue = false;
+        if let TaskState::FutexWait {
+            uaddr: w_uaddr,
+            bitset: w_bitset,
+        } = task.state
+        {
+            if w_uaddr == uaddr && (w_bitset & bitset) != 0 {
+                if woken < wake_remaining as u64 {
+                    should_wake = true;
+                } else if requeued < requeue_remaining as u64 {
+                    should_requeue = true;
+                }
+            }
+        }
+        if should_wake {
+            task.state = TaskState::Runnable;
+            task.priority = task.priority.saturating_sub(2).max(PRIO_INTERACTIVE_MIN);
+            task.time_slice_remaining = slice_for_priority(task.priority);
+            woken += 1;
+        } else if should_requeue {
+            if let TaskState::FutexWait { ref mut uaddr, .. } = task.state {
+                *uaddr = uaddr2;
+            }
+            requeued += 1;
+        }
+    }
+    (woken, requeued)
+}
+
+pub fn futex_requeue(
+    uaddr: u64,
+    wake_count: u32,
+    bitset: u32,
+    uaddr2: u64,
+    requeue_count: u32,
+) -> (u64, u64) {
+    let mut total_woken = 0u64;
+    let mut total_requeued = 0u64;
+    for sched_lock in &SCHEDULERS {
+        if total_woken >= wake_count as u64 && total_requeued >= requeue_count as u64 {
+            break;
+        }
+        let mut scheduler = sched_lock.lock();
+        let Some(scheduler) = scheduler.as_mut() else {
+            continue;
+        };
+        let wake_remaining = (wake_count as u64 - total_woken) as u32;
+        let requeue_remaining = (requeue_count as u64 - total_requeued) as u32;
+        let (woken, requeued) = futex_requeue_unlocked(
+            scheduler,
+            uaddr,
+            wake_remaining,
+            bitset,
+            uaddr2,
+            requeue_remaining,
+        );
+        total_woken += woken;
+        total_requeued += requeued;
+    }
+    crate::serial_println!(
+        "[futex] requeue uaddr={:#x} wake_count={} uaddr2={:#x} requeue_count={} bitset={:#x} woken={} requeued={}",
+        uaddr,
+        wake_count,
+        uaddr2,
+        requeue_count,
+        bitset,
+        total_woken,
+        total_requeued
+    );
+    (total_woken, total_requeued)
+}
+
 struct Scheduler {
     tasks: Vec<Task>,
     current: usize,

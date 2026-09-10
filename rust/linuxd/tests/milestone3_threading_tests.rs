@@ -177,4 +177,29 @@ fn test_broker_routing_for_threading_and_futex() {
             operation: LinuxOp::Wait4,
         }
     );
+
+    // Futex Requeue & CmpRequeue broker tests
+    let requeue_req = LinuxSyscallRequest {
+        number: 202,
+        args: [0x500000, (FUTEX_REQUEUE | FUTEX_PRIVATE_FLAG) as u64, 1, 100, 0x600000, 0],
+        authority: vanta_abi::CapabilityId::INVALID,
+    };
+    assert_eq!(
+        broker(requeue_req),
+        BrokerDecision::ProcessPrimitive {
+            operation: LinuxOp::Futex,
+        }
+    );
+
+    let cmp_requeue_req = LinuxSyscallRequest {
+        number: 202,
+        args: [0x500000, (FUTEX_CMP_REQUEUE | FUTEX_PRIVATE_FLAG) as u64, 1, 100, 0x600000, 42],
+        authority: vanta_abi::CapabilityId::INVALID,
+    };
+    assert_eq!(
+        broker(cmp_requeue_req),
+        BrokerDecision::ProcessPrimitive {
+            operation: LinuxOp::Futex,
+        }
+    );
 }
