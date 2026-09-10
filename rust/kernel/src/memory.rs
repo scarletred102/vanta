@@ -10,8 +10,9 @@ use spin::Mutex;
 pub const PAGE_SIZE: u64 = 4096;
 pub const MAX_ORDER: usize = 11; // Orders 0 through 10 (4 KiB to 4 MiB)
 
-/// Maximum physical frames tracked (524,288 * 4096 = 2 GiB physical address space).
-pub const MAX_TRACKED_FRAMES: usize = 524_288;
+/// Maximum physical frames supported (16,777,216 * 4096 = 64 GiB physical address space).
+pub const MAX_SUPPORTED_FRAMES: usize = 16_777_216;
+pub const MAX_TRACKED_FRAMES: usize = MAX_SUPPORTED_FRAMES;
 const NONE: u32 = u32::MAX;
 
 const FLAG_ALLOCATED: u8 = 1 << 4;
@@ -51,52 +52,62 @@ struct BuddyAllocator {
     /// Heads of doubly-linked free lists for each order (0..=10).
     free_lists: [Option<usize>; MAX_ORDER],
     /// Doubly linked list next pointers for each frame.
-    next_free: [u32; MAX_TRACKED_FRAMES],
+    next_free: &'static mut [u32],
     /// Doubly linked list prev pointers for each frame.
-    prev_free: [u32; MAX_TRACKED_FRAMES],
+    prev_free: &'static mut [u32],
     /// Per-frame order and status flags.
-    flags: [u8; MAX_TRACKED_FRAMES],
+    flags: &'static mut [u8],
     /// Per-frame reference count (0 = free, 1 = exclusive, >1 = shared COW).
-    refcounts: [u16; MAX_TRACKED_FRAMES],
+    refcounts: &'static mut [u16],
     total_usable_frames: usize,
     free_frames: usize,
+    max_pfn: usize,
 }
 
 impl BuddyAllocator {
     const fn empty() -> Self {
         Self {
             free_lists: [None; MAX_ORDER],
-            next_free: [NONE; MAX_TRACKED_FRAMES],
-            prev_free: [NONE; MAX_TRACKED_FRAMES],
-            flags: [0; MAX_TRACKED_FRAMES],
-            refcounts: [0; MAX_TRACKED_FRAMES],
+            next_free: &mut [],
+            prev_free: &mut [],
+            flags: &mut [],
+            refcounts: &mut [],
             total_usable_frames: 0,
             free_frames: 0,
+            max_pfn: 0,
         }
     }
 
     fn list_push(&mut self, order: usize, pfn: usize) {
+        if pfn >= self.max_pfn {
+            return;
+        }
         let head = self.free_lists[order];
         self.next_free[pfn] = head.map_or(NONE, |h| h as u32);
         self.prev_free[pfn] = NONE;
         if let Some(h) = head {
-            self.prev_free[h] = pfn as u32;
+            if h < self.max_pfn {
+                self.prev_free[h] = pfn as u32;
+            }
         }
         self.free_lists[order] = Some(pfn);
         self.flags[pfn] = (order as u8 & ORDER_MASK) | FLAG_FREE;
     }
 
     fn list_remove(&mut self, order: usize, pfn: usize) {
+        if pfn >= self.max_pfn {
+            return;
+        }
         let prev = self.prev_free[pfn];
         let next = self.next_free[pfn];
 
-        if prev != NONE {
+        if prev != NONE && (prev as usize) < self.max_pfn {
             self.next_free[prev as usize] = next;
         } else if self.free_lists[order] == Some(pfn) {
-            self.free_lists[order] = if next != NONE { Some(next as usize) } else { None };
+            self.free_lists[order] = if next != NONE && (next as usize) < self.max_pfn { Some(next as usize) } else { None };
         }
 
-        if next != NONE {
+        if next != NONE && (next as usize) < self.max_pfn {
             self.prev_free[next as usize] = prev;
         }
 
@@ -124,7 +135,7 @@ impl BuddyAllocator {
         }
 
         let mut start_pfn = (first / PAGE_SIZE) as usize;
-        let end_pfn = ((last / PAGE_SIZE) as usize).min(MAX_TRACKED_FRAMES);
+        let end_pfn = ((last / PAGE_SIZE) as usize).min(self.max_pfn);
         if start_pfn >= end_pfn {
             return 0;
         }
@@ -185,7 +196,7 @@ impl BuddyAllocator {
 
         while order < MAX_ORDER - 1 {
             let buddy_pfn = pfn ^ (1usize << order);
-            if buddy_pfn >= MAX_TRACKED_FRAMES {
+            if buddy_pfn >= self.max_pfn {
                 break;
             }
 
@@ -216,7 +227,7 @@ impl BuddyAllocator {
         }
 
         let pfn = (addr / PAGE_SIZE) as usize;
-        if pfn >= MAX_TRACKED_FRAMES {
+        if pfn >= self.max_pfn {
             return false;
         }
 
@@ -243,7 +254,7 @@ impl BuddyAllocator {
         }
 
         let pfn = (addr / PAGE_SIZE) as usize;
-        if pfn >= MAX_TRACKED_FRAMES {
+        if pfn >= self.max_pfn {
             return false;
         }
 
@@ -287,7 +298,7 @@ impl BuddyAllocator {
     }
 
     fn refcount(&self, pfn: usize) -> u16 {
-        if pfn < MAX_TRACKED_FRAMES {
+        if pfn < self.max_pfn {
             self.refcounts[pfn]
         } else {
             0
@@ -295,13 +306,13 @@ impl BuddyAllocator {
     }
 
     fn ref_inc(&mut self, pfn: usize) {
-        if pfn < MAX_TRACKED_FRAMES {
+        if pfn < self.max_pfn {
             self.refcounts[pfn] = self.refcounts[pfn].saturating_add(1);
         }
     }
 
     fn ref_dec(&mut self, pfn: usize) -> u16 {
-        if pfn < MAX_TRACKED_FRAMES {
+        if pfn < self.max_pfn {
             let new_ref = self.refcounts[pfn].saturating_sub(1);
             self.refcounts[pfn] = new_ref;
             new_ref
@@ -318,13 +329,61 @@ const fn align_up(address: u64) -> u64 {
     address.saturating_add(PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
 }
 
-pub fn init(response: &MemmapResponse) -> MemoryStats {
-    let mut allocator = FRAME_ALLOCATOR.lock();
-    *allocator = BuddyAllocator::empty();
+pub fn init(response: &MemmapResponse, hhdm_offset: u64) -> MemoryStats {
+    let mut max_usable_phys = 0u64;
+    let mut total_usable_bytes = 0u64;
+    for entry in response.entries() {
+        if entry.type_ == memmap::MEMMAP_USABLE {
+            max_usable_phys = max_usable_phys.max(entry.base.saturating_add(entry.length));
+            total_usable_bytes = total_usable_bytes.saturating_add(entry.length);
+        }
+    }
 
-    let mut stats = MemoryStats {
-        map_entries: response.entries().len(),
-        ..MemoryStats::empty()
+    let raw_max_pfn = ((max_usable_phys.saturating_add(PAGE_SIZE - 1)) / PAGE_SIZE) as usize;
+    let max_pfn = raw_max_pfn.min(MAX_SUPPORTED_FRAMES);
+
+    let meta_bytes = max_pfn * (core::mem::size_of::<u32>() * 2 + core::mem::size_of::<u8>() + core::mem::size_of::<u16>());
+    let meta_bytes_aligned = (meta_bytes + (PAGE_SIZE as usize) - 1) & !((PAGE_SIZE as usize) - 1);
+    let meta_frames = meta_bytes_aligned / (PAGE_SIZE as usize);
+
+    // Pick the largest usable memory block to house the metadata arrays
+    let mut chosen_entry: Option<&memmap::Entry> = None;
+    for entry in response.entries() {
+        if entry.type_ == memmap::MEMMAP_USABLE && entry.length >= (meta_bytes_aligned as u64) {
+            if chosen_entry.is_none() || entry.length > chosen_entry.unwrap().length {
+                chosen_entry = Some(entry);
+            }
+        }
+    }
+    let chosen = chosen_entry.expect("No usable memory region large enough for frame tracking metadata");
+    let meta_phys_base = align_up(chosen.base);
+
+    let meta_virt = hhdm_offset.checked_add(meta_phys_base).expect("Invalid HHDM offset");
+    let next_free_ptr = meta_virt as *mut u32;
+    let prev_free_ptr = unsafe { next_free_ptr.add(max_pfn) };
+    let flags_ptr = unsafe { prev_free_ptr.add(max_pfn) as *mut u8 };
+    let refcounts_ptr = unsafe { flags_ptr.add(max_pfn) as *mut u16 };
+
+    let next_free: &'static mut [u32] = unsafe { core::slice::from_raw_parts_mut(next_free_ptr, max_pfn) };
+    let prev_free: &'static mut [u32] = unsafe { core::slice::from_raw_parts_mut(prev_free_ptr, max_pfn) };
+    let flags: &'static mut [u8] = unsafe { core::slice::from_raw_parts_mut(flags_ptr, max_pfn) };
+    let refcounts: &'static mut [u16] = unsafe { core::slice::from_raw_parts_mut(refcounts_ptr, max_pfn) };
+
+    next_free.fill(NONE);
+    prev_free.fill(NONE);
+    flags.fill(0);
+    refcounts.fill(0);
+
+    let mut allocator = FRAME_ALLOCATOR.lock();
+    *allocator = BuddyAllocator {
+        free_lists: [None; MAX_ORDER],
+        next_free,
+        prev_free,
+        flags,
+        refcounts,
+        total_usable_frames: 0,
+        free_frames: 0,
+        max_pfn,
     };
 
     for entry in response.entries() {
@@ -332,13 +391,35 @@ pub fn init(response: &MemmapResponse) -> MemoryStats {
             continue;
         }
 
-        stats.usable_bytes = stats.usable_bytes.saturating_add(entry.length);
-        stats.usable_frames = stats
-            .usable_frames
-            .saturating_add(allocator.add_range(entry.base, entry.length));
+        if entry.base == chosen.base && entry.length == chosen.length {
+            // Carve out the metadata region from this block
+            if meta_phys_base > chosen.base {
+                allocator.add_range(chosen.base, meta_phys_base - chosen.base);
+            }
+            let meta_end = meta_phys_base + (meta_bytes_aligned as u64);
+            let block_end = chosen.base + chosen.length;
+            if block_end > meta_end {
+                allocator.add_range(meta_end, block_end - meta_end);
+            }
+            // Mark the metadata frames as reserved
+            let meta_start_pfn = (meta_phys_base / PAGE_SIZE) as usize;
+            for f in 0..meta_frames {
+                let pfn = meta_start_pfn + f;
+                allocator.flags[pfn] = FLAG_RESERVED | FLAG_ALLOCATED;
+                allocator.refcounts[pfn] = 1;
+            }
+            allocator.total_usable_frames += meta_frames;
+        } else {
+            allocator.add_range(entry.base, entry.length);
+        }
     }
 
-    stats.tracked_frames = allocator.total_usable_frames;
+    let stats = MemoryStats {
+        usable_bytes: total_usable_bytes,
+        usable_frames: allocator.free_frames,
+        tracked_frames: allocator.total_usable_frames,
+        map_entries: response.entries().len(),
+    };
     *MEMORY_STATS.lock() = stats;
     stats
 }

@@ -128,10 +128,17 @@ extern "C" fn bootstrap_main() -> ! {
         serial_println!("[boot] WARNING: no framebuffer response");
     }
 
+    let hhdm_offset = if let Some(hhdm_resp) = HHDM_REQUEST.response() {
+        paging::init(hhdm_resp.offset);
+        hhdm_resp.offset
+    } else {
+        0
+    };
+
     if let Some(memmap_resp) = MEMMAP_REQUEST.response() {
-        let stats = memory::init(memmap_resp);
+        let stats = memory::init(memmap_resp, hhdm_offset);
         serial_println!(
-            "[mm] entries={} usable={} MiB frames={} tracked={}",
+            "[mm] entries={} usable={} MiB frames={} tracked={} (64 GiB tracking enabled)",
             stats.map_entries,
             stats.usable_bytes / (1024 * 1024),
             stats.usable_frames,
@@ -165,8 +172,7 @@ extern "C" fn bootstrap_main() -> ! {
         serial_println!("[mm] WARNING: no Limine memory-map response");
     }
 
-    if let Some(hhdm_resp) = HHDM_REQUEST.response() {
-        paging::init(hhdm_resp.offset);
+    if HHDM_REQUEST.response().is_some() {
         let reserved_page_tables = paging::reserve_active_page_tables();
         let summary = paging::inspect_current();
         serial_println!(
