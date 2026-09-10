@@ -96,6 +96,7 @@ impl Process {
             })
             .collect();
         let child_memory_map = alloc::sync::Arc::new(spin::Mutex::new(self.memory_map.lock().clone()));
+        child_memory_map.lock().dynamic_mappings.clear();
         crate::vma::register_address_space_vmas(new_space, alloc::sync::Arc::clone(&child_memory_map));
         Self {
             space: new_space,
@@ -316,6 +317,17 @@ impl Process {
 
         crate::vma::unregister_address_space_vmas(self.space);
 
+        let dynamic_pages = {
+            let mut mm = self.memory_map.lock();
+            core::mem::take(&mut mm.dynamic_mappings)
+        };
+        for page in dynamic_pages {
+            self.mappings.push(MappedPage {
+                virtual_address: page,
+                physical_address: 0,
+            });
+        }
+
         while let Some(mapping) = self.mappings.pop() {
             if let Ok(Some(unmapped)) = paging::unmap(self.space, mapping.virtual_address) {
                 if !memory::free_frame(PhysFrame(unmapped)) {
@@ -325,6 +337,11 @@ impl Process {
         }
 
         let freed_tables = paging::destroy_address_space(self.space).map_err(ProcessError::Map)?;
+        crate::serial_println!(
+            "[proc] destroy_address_space space={:#x} freed_tables={}",
+            self.space.pml4_phys,
+            freed_tables
+        );
         self.destroyed = true;
         Ok(freed_tables)
     }

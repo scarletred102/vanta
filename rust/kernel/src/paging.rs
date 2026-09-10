@@ -533,7 +533,12 @@ fn destroy_table(table_phys: u64, level: u8) -> Result<usize, MapError> {
             continue;
         }
         if level == 1 || entry & HUGE_PAGE != 0 {
-            return Err(MapError::MappingsRemain);
+            if !write_entry(table_phys, index, 0) {
+                return Err(MapError::NoHhdm);
+            }
+            let _ = memory::free_frame(memory::PhysFrame(entry & ADDRESS_MASK));
+            freed += 1;
+            continue;
         }
         if !write_entry(table_phys, index, 0) {
             return Err(MapError::NoHhdm);

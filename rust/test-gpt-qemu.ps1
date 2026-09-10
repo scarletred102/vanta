@@ -149,6 +149,8 @@ $common = @(
     "[linux-fork] concurrent COW race 50-iteration test verified",
     "[linux-fork] stack auto-expansion verified",
     "[linux-fork] anonymous demand paging verified",
+    "[linux-fork] demand-paged process exit and address space destruction verified",
+    "[proc] destroy_address_space space=",
     "[linux-epoll] epoll and eventfd multiplexing verified",
     "[linux-proc] /proc virtual filesystem verified",
     "desktop: GUI window surface composition verified",
@@ -185,4 +187,4 @@ Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required 
 Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
 
 Write-Host "[test] GPT Gate A, Gate B, Gate C, Gate D, and Gate E acceptance passed"
-$first -split "`n" | Where-Object { $_ -match "SIGSEGV|linux-fork" } | ForEach-Object { Write-Host $_ }
+$first -split "`n" | Where-Object { $_ -match "SIGSEGV|linux-fork|destroy_address_space" } | ForEach-Object { Write-Host $_ }

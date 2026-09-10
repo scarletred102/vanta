@@ -167,5 +167,32 @@ int main(void) {
         free(sparse);
     }
 
+    // Phase 5: Demand-paged child process exit and address space teardown test
+    pid_t demand_child = fork();
+    if (demand_child < 0) {
+        printf("[linux-fork] demand_child fork failed\n");
+        return 50;
+    }
+    if (demand_child == 0) {
+        // Child triggers demand-paged stack expansion (64 frames = 256 KiB)
+        int s = recurse_stack(64, 0);
+        // Child allocates anonymous memory and touches multiple 4 KiB pages
+        char *dmem = malloc(4 * 1024 * 1024);
+        if (dmem) {
+            for (int p = 0; p < 4 * 1024 * 1024; p += 4096) {
+                dmem[p] = (char)(p ^ s);
+            }
+        }
+        _exit(0);
+    }
+    int demand_status = 0;
+    pid_t demand_w = waitpid(demand_child, &demand_status, 0);
+    if (demand_w == demand_child && WIFEXITED(demand_status) && WEXITSTATUS(demand_status) == 0) {
+        printf("[linux-fork] demand-paged process exit and address space destruction verified\n");
+    } else {
+        printf("[linux-fork] demand_child waitpid failed: w=%d status=%d\n", (int)demand_w, WEXITSTATUS(demand_status));
+        return 51;
+    }
+
     return 0;
 }

@@ -113,6 +113,7 @@ pub struct ProcessMemoryMap {
     pub mmap_hint: u64,
     pub stack_bottom: u64,
     pub stack_top: u64,
+    pub dynamic_mappings: Vec<u64>,
 }
 
 impl ProcessMemoryMap {
@@ -124,6 +125,7 @@ impl ProcessMemoryMap {
             mmap_hint: 0x0000_7000_0000_0000,
             stack_bottom,
             stack_top,
+            dynamic_mappings: Vec::new(),
         }
     }
 
@@ -358,6 +360,7 @@ pub fn resolve_demand_page(space: AddressSpace, address: u64) -> Result<bool, ()
             }
             let flags = crate::paging::MAP_USER | crate::paging::MAP_WRITABLE | crate::paging::MAP_NO_EXECUTE;
             if crate::paging::map(space, page_aligned, phys, flags).is_ok() {
+                mem_map.dynamic_mappings.push(page_aligned);
                 return Ok(true);
             } else {
                 let _ = crate::memory::free_frame(frame);
@@ -385,6 +388,7 @@ pub fn resolve_demand_page(space: AddressSpace, address: u64) -> Result<bool, ()
                 pte_flags |= crate::paging::MAP_NO_EXECUTE;
             }
             if crate::paging::map(space, page_aligned, phys, pte_flags).is_ok() {
+                mem_map.dynamic_mappings.push(page_aligned);
                 return Ok(true);
             } else {
                 let _ = crate::memory::free_frame(frame);
