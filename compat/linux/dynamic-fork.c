@@ -64,6 +64,27 @@ int main(void) {
         printf("[linux-fork] COW fork and waitpid verified\n");
     }
 
+    // Phase 2b: Invalid user memory access (null pointer dereference) termination check
+    pid_t bad_child = fork();
+    if (bad_child < 0) {
+        printf("[linux-fork] bad_child fork failed\n");
+        return 30;
+    }
+    if (bad_child == 0) {
+        // Child intentionally writes to null pointer to trigger invalid access
+        volatile int *bad_ptr = (volatile int *)0x0;
+        *bad_ptr = 0xdead;
+        _exit(0);
+    }
+    int bad_status = 0;
+    pid_t bad_w = waitpid(bad_child, &bad_status, 0);
+    if (bad_w == bad_child && WEXITSTATUS(bad_status) == 139) {
+        printf("[linux-fork] invalid memory access SIGSEGV termination verified\n");
+    } else {
+        printf("[linux-fork] invalid memory test unexpected: w=%d status=%d\n", (int)bad_w, WEXITSTATUS(bad_status));
+        return 31;
+    }
+
     // Phase 3: Stack auto-expansion beyond initial 64KB stack limit
     int stack_res = recurse_stack(48, 0);
     if (stack_res != 0) {

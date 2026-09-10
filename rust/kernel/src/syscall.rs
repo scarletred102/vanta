@@ -143,6 +143,7 @@ const EXIT_CODE_OFFSET: usize = core::mem::offset_of!(CpuLocal, exit_code);
 global_asm!(
     r#"
     .global vanta_syscall_entry
+    .global vanta_syscall_restore_context
     .extern vanta_syscall_dispatch
     .extern vanta_syscall_yield
     .extern vanta_syscall_wait
