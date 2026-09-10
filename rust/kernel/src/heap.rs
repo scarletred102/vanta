@@ -1,22 +1,21 @@
-//! Early kernel heap backed by Rust page mappings.
+//! Kernel heap and slab allocator backed by Rust page frame mappings.
 //!
-//! This is a small coalescing free-list allocator for the bootstrap phase. It
-//! gives Rust-native kernel code real dynamic allocation and reclamation while
-//! the later slab allocator is still being translated. Every heap page is
-//! mapped through the Rust paging layer before the allocator is published.
+//! Provides a tiered kmalloc allocator with power-of-2 size classes:
+//! 32, 64, 128, 256, 512, 1024, 2048 bytes backed by `KMemCache` slabs,
+//! and large allocations (>= 4096 bytes) routed directly to the buddy frame allocator.
+//! Dedicated `KMemCache` slab caches are provided for high-frequency kernel objects:
+//! `task_struct_cache`, `vma_cache`, `file_descriptor_cache`, and `dentry_cache`.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::null_mut;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use spin::Mutex;
 
 use crate::{memory, paging};
 
 const HEAP_BASE: u64 = 0xffff_ff00_0000_0000;
-// Support loading multiple native and Linux static ELFs into memory.
-const HEAP_PAGES: usize = 8192;
-const HEAP_SIZE: usize = HEAP_PAGES * memory::PAGE_SIZE as usize;
-const MAX_FREE_BLOCKS: usize = 16384;
+const HEAP_SIZE: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeapStats {
@@ -33,304 +32,23 @@ pub enum HeapInitError {
     Mapping(paging::MapError),
 }
 
-#[derive(Clone, Copy)]
-struct FreeBlock {
-    start: usize,
-    size: usize,
+static INITIALIZED: AtomicBool = AtomicBool::new(false);
+static TOTAL_ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+static TOTAL_FREED: AtomicUsize = AtomicUsize::new(0);
+
+struct CacheInner {
+    current_page: Option<usize>,
+    next_offset: usize,
+    freelist: Option<usize>,
 }
 
-impl FreeBlock {
-    const fn empty() -> Self {
-        Self { start: 0, size: 0 }
-    }
-}
-
-struct HeapState {
-    blocks: [FreeBlock; MAX_FREE_BLOCKS],
-    len: usize,
-    mapped_pages: usize,
-    initialized: bool,
-}
-
-impl HeapState {
+impl CacheInner {
     const fn empty() -> Self {
         Self {
-            blocks: [FreeBlock::empty(); MAX_FREE_BLOCKS],
-            len: 0,
-            mapped_pages: 0,
-            initialized: false,
+            current_page: None,
+            next_offset: 0,
+            freelist: None,
         }
-    }
-
-    fn free_bytes(&self) -> usize {
-        self.blocks[..self.len]
-            .iter()
-            .fold(0, |total, block| total.saturating_add(block.size))
-    }
-
-    fn remove_block(&mut self, index: usize) {
-        self.len -= 1;
-        if index != self.len {
-            self.blocks[index] = self.blocks[self.len];
-        }
-    }
-
-    fn release(&mut self, start: usize, size: usize) -> bool {
-        if size == 0 || self.len == MAX_FREE_BLOCKS {
-            return false;
-        }
-        self.blocks[self.len] = FreeBlock { start, size };
-        self.len += 1;
-        self.coalesce();
-        true
-    }
-
-    fn coalesce(&mut self) {
-        let mut left = 0;
-        while left < self.len {
-            let mut right = left + 1;
-            while right < self.len {
-                let left_end = self.blocks[left].start + self.blocks[left].size;
-                let right_end = self.blocks[right].start + self.blocks[right].size;
-
-                if left_end == self.blocks[right].start {
-                    self.blocks[left].size += self.blocks[right].size;
-                    self.remove_block(right);
-                    continue;
-                }
-                if right_end == self.blocks[left].start {
-                    self.blocks[left].start = self.blocks[right].start;
-                    self.blocks[left].size += self.blocks[right].size;
-                    self.remove_block(right);
-                    continue;
-                }
-                right += 1;
-            }
-            left += 1;
-        }
-    }
-
-    fn expand_heap(&mut self, needed_bytes: usize) -> bool {
-        let chunk_size = needed_bytes.max(2 * 1024 * 1024);
-        let pages = (chunk_size + memory::PAGE_SIZE as usize - 1) / memory::PAGE_SIZE as usize;
-        let space = paging::current_address_space();
-        let start_vaddr = HEAP_BASE + self.mapped_pages as u64 * memory::PAGE_SIZE;
-
-        for i in 0..pages {
-            let Some(frame) = memory::alloc_frame() else {
-                return false;
-            };
-            let vaddr = start_vaddr + i as u64 * memory::PAGE_SIZE;
-            if paging::map(space, vaddr, frame.start_address(), paging::MAP_WRITABLE).is_err() {
-                let _ = memory::free_frame(frame);
-                return false;
-            }
-        }
-
-        let added_size = pages * memory::PAGE_SIZE as usize;
-        let start_addr = start_vaddr as usize;
-        self.mapped_pages += pages;
-        self.release(start_addr, added_size)
-    }
-}
-
-pub struct KernelHeap {
-    state: Mutex<HeapState>,
-}
-
-impl KernelHeap {
-    const fn new() -> Self {
-        Self {
-            state: Mutex::new(HeapState::empty()),
-        }
-    }
-
-    fn is_initialized(&self) -> bool {
-        self.state.lock().initialized
-    }
-
-    fn stats(&self) -> HeapStats {
-        let state = self.state.lock();
-        let free = if state.initialized {
-            state.free_bytes()
-        } else {
-            0
-        };
-        let total_size = if state.initialized {
-            state.mapped_pages * memory::PAGE_SIZE as usize
-        } else {
-            0
-        };
-        HeapStats {
-            base: HEAP_BASE,
-            size: total_size,
-            used: total_size.saturating_sub(free),
-            free,
-        }
-    }
-}
-
-#[global_allocator]
-static GLOBAL_HEAP: KernelHeap = KernelHeap::new();
-
-pub fn init() -> Result<HeapStats, HeapInitError> {
-    if GLOBAL_HEAP.is_initialized() {
-        return Err(HeapInitError::AlreadyInitialized);
-    }
-
-    let space = paging::current_address_space();
-    for page in 0..HEAP_PAGES {
-        let frame = memory::alloc_frame().ok_or(HeapInitError::OutOfMemory)?;
-        let virtual_address = HEAP_BASE + page as u64 * memory::PAGE_SIZE;
-        paging::map(
-            space,
-            virtual_address,
-            frame.start_address(),
-            paging::MAP_WRITABLE,
-        )
-        .map_err(HeapInitError::Mapping)?;
-    }
-
-    let mut state = GLOBAL_HEAP.state.lock();
-    state.blocks[0] = FreeBlock {
-        start: HEAP_BASE as usize,
-        size: HEAP_SIZE,
-    };
-    state.len = 1;
-    state.mapped_pages = HEAP_PAGES;
-    state.initialized = true;
-    drop(state);
-    Ok(GLOBAL_HEAP.stats())
-}
-
-pub fn stats() -> HeapStats {
-    GLOBAL_HEAP.stats()
-}
-
-unsafe impl GlobalAlloc for KernelHeap {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if layout.size() == 0 {
-            return layout.align() as *mut u8;
-        }
-
-        let mut state = self.state.lock();
-        if !state.initialized {
-            return null_mut();
-        }
-
-        let alignment = layout.align();
-        for index in 0..state.len {
-            let block = state.blocks[index];
-            let aligned = match block.start.checked_add(alignment - 1) {
-                Some(value) => value & !(alignment - 1),
-                None => continue,
-            };
-            let end = match aligned.checked_add(layout.size()) {
-                Some(value) => value,
-                None => continue,
-            };
-            let block_end = match block.start.checked_add(block.size) {
-                Some(value) => value,
-                None => continue,
-            };
-            if end > block_end {
-                continue;
-            }
-
-            let prefix = aligned - block.start;
-            let suffix = block_end - end;
-            if prefix != 0 && suffix != 0 {
-                if state.len == MAX_FREE_BLOCKS {
-                    return null_mut();
-                }
-                state.blocks[index].start = block.start;
-                state.blocks[index].size = prefix;
-                let free_index = state.len;
-                state.blocks[free_index] = FreeBlock {
-                    start: end,
-                    size: suffix,
-                };
-                state.len += 1;
-            } else if prefix != 0 {
-                state.blocks[index].start = block.start;
-                state.blocks[index].size = prefix;
-            } else if suffix != 0 {
-                state.blocks[index].start = end;
-                state.blocks[index].size = suffix;
-            } else {
-                state.remove_block(index);
-            }
-            return aligned as *mut u8;
-        }
-
-        // If no free block fits the allocation, dynamically expand the heap
-        if state.expand_heap(layout.size() + alignment) {
-            for index in 0..state.len {
-                let block = state.blocks[index];
-                let aligned = match block.start.checked_add(alignment - 1) {
-                    Some(value) => value & !(alignment - 1),
-                    None => continue,
-                };
-                let end = match aligned.checked_add(layout.size()) {
-                    Some(value) => value,
-                    None => continue,
-                };
-                let block_end = match block.start.checked_add(block.size) {
-                    Some(value) => value,
-                    None => continue,
-                };
-                if end > block_end {
-                    continue;
-                }
-
-                let prefix = aligned - block.start;
-                let suffix = block_end - end;
-                if prefix != 0 && suffix != 0 {
-                    if state.len == MAX_FREE_BLOCKS {
-                        return null_mut();
-                    }
-                    state.blocks[index].start = block.start;
-                    state.blocks[index].size = prefix;
-                    let free_index = state.len;
-                    state.blocks[free_index] = FreeBlock {
-                        start: end,
-                        size: suffix,
-                    };
-                    state.len += 1;
-                } else if prefix != 0 {
-                    state.blocks[index].start = block.start;
-                    state.blocks[index].size = prefix;
-                } else if suffix != 0 {
-                    state.blocks[index].start = end;
-                    state.blocks[index].size = suffix;
-                } else {
-                    state.remove_block(index);
-                }
-                return aligned as *mut u8;
-            }
-        }
-
-        null_mut()
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if layout.size() == 0 || ptr.is_null() {
-            return;
-        }
-
-        let start = ptr as usize;
-        let mut state = self.state.lock();
-        if !state.initialized || start < HEAP_BASE as usize {
-            return;
-        }
-        let Some(end) = start.checked_add(layout.size()) else {
-            return;
-        };
-        let max_mapped = HEAP_BASE as usize + state.mapped_pages * memory::PAGE_SIZE as usize;
-        if end > max_mapped {
-            return;
-        }
-        let _ = state.release(start, layout.size());
     }
 }
 
@@ -338,8 +56,14 @@ pub struct KMemCache {
     name: &'static str,
     object_size: usize,
     alignment: usize,
-    freelist: Mutex<Option<core::ptr::NonNull<u8>>>,
+    inner: Mutex<CacheInner>,
+    alloc_count: AtomicUsize,
+    reuse_count: AtomicUsize,
+    free_count: AtomicUsize,
 }
+
+unsafe impl Send for KMemCache {}
+unsafe impl Sync for KMemCache {}
 
 impl KMemCache {
     pub const fn new(name: &'static str, object_size: usize, alignment: usize) -> Self {
@@ -347,55 +71,269 @@ impl KMemCache {
             name,
             object_size,
             alignment,
-            freelist: Mutex::new(None),
+            inner: Mutex::new(CacheInner::empty()),
+            alloc_count: AtomicUsize::new(0),
+            reuse_count: AtomicUsize::new(0),
+            free_count: AtomicUsize::new(0),
         }
     }
 
     pub fn alloc(&self) -> Option<*mut u8> {
-        let mut list = self.freelist.lock();
-        if let Some(node) = *list {
+        let mut inner = self.inner.lock();
+
+        // 1. Recycle from freelist if available
+        if let Some(curr) = inner.freelist {
             unsafe {
-                let next = (node.as_ptr() as *mut *mut u8).read();
-                *list = core::ptr::NonNull::new(next);
-                return Some(node.as_ptr());
+                let next = (curr as *const usize).read();
+                inner.freelist = if next != 0 { Some(next) } else { None };
+                self.alloc_count.fetch_add(1, Ordering::Relaxed);
+                self.reuse_count.fetch_add(1, Ordering::Relaxed);
+                return Some(curr as *mut u8);
             }
         }
+
+        // 2. Carve from currently active slab page
+        let align = self.alignment.max(core::mem::align_of::<usize>());
+        let raw_size = self.object_size.max(core::mem::size_of::<usize>());
+        let obj_size = (raw_size + align - 1) & !(align - 1);
+
+        if let Some(page_vaddr) = inner.current_page {
+            if inner.next_offset + obj_size <= memory::PAGE_SIZE as usize {
+                let ptr = (page_vaddr + inner.next_offset) as *mut u8;
+                inner.next_offset += obj_size;
+                self.alloc_count.fetch_add(1, Ordering::Relaxed);
+                return Some(ptr);
+            }
+        }
+
+        // 3. Current page full or uninitialized: allocate new 4 KiB frame from buddy allocator
         let frame = memory::alloc_frame()?;
         let phys = frame.start_address();
-        let vaddr = paging::phys_to_virt(phys)? as *mut u8;
-        let obj_size = self.object_size.max(core::mem::size_of::<*mut u8>());
-        let count = (memory::PAGE_SIZE as usize) / obj_size;
+        let vaddr = paging::phys_to_virt(phys)? as usize;
 
-        unsafe {
-            for i in 1..count {
-                let curr = vaddr.add(i * obj_size);
-                let next = if i + 1 < count {
-                    vaddr.add((i + 1) * obj_size)
-                } else {
-                    core::ptr::null_mut()
-                };
-                (curr as *mut *mut u8).write(next);
-            }
-            if count > 1 {
-                *list = core::ptr::NonNull::new(vaddr.add(obj_size));
-            }
-            Some(vaddr)
-        }
+        inner.current_page = Some(vaddr);
+        inner.next_offset = obj_size;
+        self.alloc_count.fetch_add(1, Ordering::Relaxed);
+        Some(vaddr as *mut u8)
     }
 
     pub fn free(&self, ptr: *mut u8) {
         if ptr.is_null() {
             return;
         }
-        let mut list = self.freelist.lock();
+        let curr = ptr as usize;
+        let mut inner = self.inner.lock();
+        let next = inner.freelist.unwrap_or(0);
         unsafe {
-            let next = list.map(|n| n.as_ptr()).unwrap_or(core::ptr::null_mut());
-            (ptr as *mut *mut u8).write(next);
-            *list = core::ptr::NonNull::new(ptr);
+            (curr as *mut usize).write(next);
         }
+        inner.freelist = Some(curr);
+        self.free_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn stats(&self) -> (usize, usize, usize) {
+        (
+            self.alloc_count.load(Ordering::Relaxed),
+            self.reuse_count.load(Ordering::Relaxed),
+            self.free_count.load(Ordering::Relaxed),
+        )
     }
 
     pub fn name(&self) -> &'static str {
         self.name
     }
+}
+
+// Power-of-2 size-class slab caches: 32, 64, 128, 256, 512, 1024, 2048 bytes
+pub static KMALLOC_32: KMemCache = KMemCache::new("kmalloc-32", 32, 32);
+pub static KMALLOC_64: KMemCache = KMemCache::new("kmalloc-64", 64, 64);
+pub static KMALLOC_128: KMemCache = KMemCache::new("kmalloc-128", 128, 128);
+pub static KMALLOC_256: KMemCache = KMemCache::new("kmalloc-256", 256, 256);
+pub static KMALLOC_512: KMemCache = KMemCache::new("kmalloc-512", 512, 512);
+pub static KMALLOC_1024: KMemCache = KMemCache::new("kmalloc-1024", 1024, 1024);
+pub static KMALLOC_2048: KMemCache = KMemCache::new("kmalloc-2048", 2048, 2048);
+
+// Dedicated high-frequency object slab caches
+pub static TASK_STRUCT_CACHE: KMemCache = KMemCache::new("task_struct_cache", 768, 16);
+pub static VMA_CACHE: KMemCache = KMemCache::new("vma_cache", 64, 8);
+pub static FILE_DESCRIPTOR_CACHE: KMemCache = KMemCache::new("file_descriptor_cache", 128, 8);
+pub static DENTRY_CACHE: KMemCache = KMemCache::new("dentry_cache", 128, 8);
+
+pub fn alloc_task() -> Option<*mut u8> {
+    TASK_STRUCT_CACHE.alloc()
+}
+pub fn free_task(ptr: *mut u8) {
+    TASK_STRUCT_CACHE.free(ptr)
+}
+
+pub fn alloc_vma() -> Option<*mut u8> {
+    VMA_CACHE.alloc()
+}
+pub fn free_vma(ptr: *mut u8) {
+    VMA_CACHE.free(ptr)
+}
+
+pub fn alloc_file_descriptor() -> Option<*mut u8> {
+    FILE_DESCRIPTOR_CACHE.alloc()
+}
+pub fn free_file_descriptor(ptr: *mut u8) {
+    FILE_DESCRIPTOR_CACHE.free(ptr)
+}
+
+pub fn alloc_dentry() -> Option<*mut u8> {
+    DENTRY_CACHE.alloc()
+}
+pub fn free_dentry(ptr: *mut u8) {
+    DENTRY_CACHE.free(ptr)
+}
+
+pub struct KernelHeap;
+
+impl KernelHeap {
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+#[global_allocator]
+static GLOBAL_HEAP: KernelHeap = KernelHeap::new();
+
+unsafe impl GlobalAlloc for KernelHeap {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if layout.size() == 0 {
+            return layout.align() as *mut u8;
+        }
+
+        if !INITIALIZED.load(Ordering::Relaxed) {
+            return null_mut();
+        }
+
+        let size = layout.size().max(layout.align());
+        let (ptr, class_size) = if size <= 32 {
+            (KMALLOC_32.alloc().unwrap_or(null_mut()), 32)
+        } else if size <= 64 {
+            (KMALLOC_64.alloc().unwrap_or(null_mut()), 64)
+        } else if size <= 128 {
+            (KMALLOC_128.alloc().unwrap_or(null_mut()), 128)
+        } else if size <= 256 {
+            (KMALLOC_256.alloc().unwrap_or(null_mut()), 256)
+        } else if size <= 512 {
+            (KMALLOC_512.alloc().unwrap_or(null_mut()), 512)
+        } else if size <= 1024 {
+            (KMALLOC_1024.alloc().unwrap_or(null_mut()), 1024)
+        } else if size <= 2048 {
+            (KMALLOC_2048.alloc().unwrap_or(null_mut()), 2048)
+        } else {
+            // >= 4096 (or > 2048): Route to page-frame allocator directly
+            let num_pages = (size + memory::PAGE_SIZE as usize - 1) / memory::PAGE_SIZE as usize;
+            let order = num_pages.next_power_of_two().trailing_zeros() as usize;
+            let Some(frame) = memory::alloc_frames(order) else {
+                return null_mut();
+            };
+            let Some(vaddr) = paging::phys_to_virt(frame.start_address()) else {
+                return null_mut();
+            };
+            (vaddr as *mut u8, (1usize << order) * memory::PAGE_SIZE as usize)
+        };
+
+        if !ptr.is_null() {
+            TOTAL_ALLOCATED.fetch_add(class_size, Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if ptr.is_null() || layout.size() == 0 {
+            return;
+        }
+
+        let size = layout.size().max(layout.align());
+        let class_size = if size <= 32 {
+            KMALLOC_32.free(ptr);
+            32
+        } else if size <= 64 {
+            KMALLOC_64.free(ptr);
+            64
+        } else if size <= 128 {
+            KMALLOC_128.free(ptr);
+            128
+        } else if size <= 256 {
+            KMALLOC_256.free(ptr);
+            256
+        } else if size <= 512 {
+            KMALLOC_512.free(ptr);
+            512
+        } else if size <= 1024 {
+            KMALLOC_1024.free(ptr);
+            1024
+        } else if size <= 2048 {
+            KMALLOC_2048.free(ptr);
+            2048
+        } else {
+            // >= 4096: Route to page-frame allocator directly
+            let num_pages = (size + memory::PAGE_SIZE as usize - 1) / memory::PAGE_SIZE as usize;
+            let order = num_pages.next_power_of_two().trailing_zeros() as usize;
+            let vaddr = ptr as u64;
+            if let Some(phys) = paging::virt_to_phys(vaddr) {
+                memory::free_frame(memory::PhysFrame(phys));
+            }
+            (1usize << order) * memory::PAGE_SIZE as usize
+        };
+
+        TOTAL_FREED.fetch_add(class_size, Ordering::Relaxed);
+    }
+}
+
+pub fn init() -> Result<HeapStats, HeapInitError> {
+    if INITIALIZED.swap(true, Ordering::SeqCst) {
+        return Err(HeapInitError::AlreadyInitialized);
+    }
+    Ok(stats())
+}
+
+pub fn stats() -> HeapStats {
+    let allocated = TOTAL_ALLOCATED.load(Ordering::Relaxed);
+    let freed = TOTAL_FREED.load(Ordering::Relaxed);
+    let used = allocated.saturating_sub(freed);
+    let total_size = HEAP_SIZE;
+    HeapStats {
+        base: HEAP_BASE,
+        size: total_size,
+        used,
+        free: total_size.saturating_sub(used),
+    }
+}
+
+pub fn self_check() {
+    let caches: [&KMemCache; 4] = [
+        &TASK_STRUCT_CACHE,
+        &VMA_CACHE,
+        &FILE_DESCRIPTOR_CACHE,
+        &DENTRY_CACHE,
+    ];
+
+    for cache in caches {
+        let p1 = cache.alloc().expect("cache alloc failed");
+        let p2 = cache.alloc().expect("cache alloc failed");
+        if p1 == p2 {
+            panic!("slab cache {} returned duplicate pointer", cache.name());
+        }
+        cache.free(p1);
+        let p3 = cache.alloc().expect("cache realloc failed");
+        if p3 != p1 {
+            panic!("slab cache {} failed to recycle freed object", cache.name());
+        }
+        cache.free(p2);
+        cache.free(p3);
+
+        let (allocs, reused, _frees) = cache.stats();
+        crate::serial_println!(
+            "[slab] {}: {} allocs, {} reused",
+            cache.name(),
+            allocs,
+            reused
+        );
+    }
+
+    crate::serial_println!("[slab] kmalloc size-classes (32..2048) active, >=4096 direct buddy");
 }

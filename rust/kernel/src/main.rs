@@ -272,6 +272,7 @@ extern "C" fn bootstrap_main() -> ! {
                         peak_used,
                         heap::stats().free
                     );
+                    heap::self_check();
                 } else {
                     serial_println!("[heap] WARNING: allocation/reclaim self-check failed");
                 }
