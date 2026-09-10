@@ -142,11 +142,13 @@ $common = @(
     "[linux-dynamic] signal delivered and handled",
     "[linux-dynamic] rt_sigreturn restored context",
     "[linux-dynamic] thread TLS verified",
+    "[linux-dynamic] futex/mutex TSC spin-barrier contention verified",
     "[linux-dynamic] futex synchronization passed",
     "[linux-dynamic] thread joined successfully",
     "[linux-dynamic] timer subsystem and nanosleep verified",
     "[linux-dynamic] 85-syscall matrix and signals verified",
     "[dynamic-shlib] SUCCESS: cross-boundary call to libcalc.so verified (84, 1337)",
+    "[dynamic-shlib] SUCCESS: cross-boundary data relocation verified",
     "[linux-dynamic] thread spawned",
     "[net] virtio-net adapter initialized",
     "[linux-dynamic] network acceptance passed",
@@ -201,4 +203,4 @@ Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required 
 Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
 
 Write-Host "[test] GPT Gate A, Gate B, Gate C, Gate D, Gate E, and Gate F acceptance passed"
-$first -split "`n" | Where-Object { $_ -match "SIGSEGV|linux-fork|destroy_address_space|Vector|swap" } | ForEach-Object { Write-Host $_ }
+$first -split "`n" | Where-Object { $_ -match "SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=" } | ForEach-Object { Write-Host $_ }

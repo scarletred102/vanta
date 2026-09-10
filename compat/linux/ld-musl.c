@@ -34,6 +34,7 @@
 
 #define R_X86_64_NONE      0
 #define R_X86_64_64        1
+#define R_X86_64_COPY      5
 #define R_X86_64_GLOB_DAT  6
 #define R_X86_64_JUMP_SLOT 7
 #define R_X86_64_RELATIVE  8
@@ -196,6 +197,14 @@ static void my_memset(void *dest, int val, size_t count) {
     unsigned char *d = (unsigned char *)dest;
     for (size_t i = 0; i < count; i++) {
         d[i] = (unsigned char)val;
+    }
+}
+
+static void my_memcpy(void *dest, const void *src, size_t count) {
+    unsigned char *d = (unsigned char *)dest;
+    const unsigned char *s = (const unsigned char *)src;
+    for (size_t i = 0; i < count; i++) {
+        d[i] = s[i];
     }
 }
 
@@ -390,6 +399,9 @@ static void load_shared_library(const char *libname) {
     uint32_t *hash = NULL;
     size_t sym_count = 0;
 
+    Elf64_Rela *lib_rela = NULL;
+    size_t lib_relasz = 0;
+
     for (int i = 0; dyn[i].d_tag != DT_NULL; i++) {
         uint64_t val = dyn[i].d_un.d_val;
         uintptr_t ptr = (val < lib_base) ? (lib_base + val) : val;
@@ -397,12 +409,47 @@ static void load_shared_library(const char *libname) {
             case DT_STRTAB: strtab = (const char *)ptr; break;
             case DT_SYMTAB: symtab = (Elf64_Sym *)ptr; break;
             case DT_HASH:   hash = (uint32_t *)ptr; break;
+            case DT_RELA:   lib_rela = (Elf64_Rela *)ptr; break;
+            case DT_RELASZ: lib_relasz = val; break;
         }
     }
     if (hash) {
         sym_count = hash[1];
     } else {
         sym_count = 64;
+    }
+
+    if (lib_rela && lib_relasz) {
+        size_t count = lib_relasz / sizeof(Elf64_Rela);
+        for (size_t r = 0; r < count; r++) {
+            Elf64_Rela *rela = &lib_rela[r];
+            uintptr_t *target = (uintptr_t *)(lib_base + rela->r_offset);
+            uint32_t type = ELF64_R_TYPE(rela->r_info);
+            uint32_t sym_idx = ELF64_R_SYM(rela->r_info);
+
+            if (type == R_X86_64_RELATIVE) {
+                *target = lib_base + rela->r_addend;
+            } else if (type == R_X86_64_GLOB_DAT || type == R_X86_64_64) {
+                if (sym_idx < sym_count) {
+                    Elf64_Sym *sym = &symtab[sym_idx];
+                    uintptr_t sym_val = 0;
+                    if (sym->st_shndx != 0) {
+                        sym_val = lib_base + sym->st_value;
+                    } else if (sym->st_name) {
+                        const char *sym_name = strtab + sym->st_name;
+                        sym_val = lookup_symbol(sym_name);
+                    }
+                    if (sym_val) {
+                        log_str("[ldso] library GOT relocated (GLOB_DAT): ");
+                        log_str(strtab + sym->st_name);
+                        log_str(" -> ");
+                        log_hex(sym_val);
+                        log_str("\n");
+                        *target = sym_val + (type == R_X86_64_64 ? rela->r_addend : 0);
+                    }
+                }
+            }
+        }
     }
 
     LoadedLib *lib = &loaded_libs[loaded_lib_count++];
@@ -520,9 +567,38 @@ uintptr_t _dl_entry(uintptr_t *sp) {
                 const char *sym_name = main_strtab + main_symtab[sym_idx].st_name;
                 uintptr_t sym_val = lookup_symbol(sym_name);
                 if (sym_val) {
+                    log_str("[ldso] resolved data symbol (GLOB_DAT): ");
+                    log_str(sym_name);
+                    log_str(" -> ");
+                    log_hex(sym_val);
+                    log_str(" (GOT slot ");
+                    log_hex((uintptr_t)target);
+                    log_str(")\n");
                     *target = sym_val + (type == R_X86_64_64 ? rela->r_addend : 0);
                 } else {
-                    *target = 0;
+                    log_str("[ldso] ERROR: unresolved data symbol: ");
+                    log_str(sym_name);
+                    log_str("\n");
+                    sys_exit(127);
+                }
+            } else if (type == R_X86_64_COPY) {
+                const char *sym_name = main_strtab + main_symtab[sym_idx].st_name;
+                uintptr_t sym_val = lookup_symbol(sym_name);
+                size_t sz = main_symtab[sym_idx].st_size;
+                if (sym_val) {
+                    log_str("[ldso] resolved data copy relocation (COPY): ");
+                    log_str(sym_name);
+                    log_str(" size ");
+                    log_hex(sz);
+                    log_str(" (target ");
+                    log_hex((uintptr_t)target);
+                    log_str(")\n");
+                    my_memcpy((void *)target, (const void *)sym_val, sz);
+                } else {
+                    log_str("[ldso] ERROR: unresolved copy symbol: ");
+                    log_str(sym_name);
+                    log_str("\n");
+                    sys_exit(127);
                 }
             }
         }

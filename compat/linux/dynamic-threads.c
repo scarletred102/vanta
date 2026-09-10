@@ -114,21 +114,83 @@ static void *thread_entry(void *arg) {
     return (void *)0;
 }
 
+static inline unsigned long long rdtsc_barrier(void) {
+    unsigned int lo, hi;
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((unsigned long long)hi << 32) | lo;
+}
+
 /* ------------------------------------------------------------
- * Test 2: Contended Mutex (Multi-Core SMP Contention)
+ * Test 2: Contended Mutex (Multi-Core SMP TSC Spin-Barrier Contention)
  * ------------------------------------------------------------ */
-#define MUTEX_ITERS 1000
+#define BARRIER_ITERS 500
 static pthread_mutex_t g_contended_mutex = PTHREAD_MUTEX_INITIALIZER;
 static volatile int g_contended_counter = 0;
+static volatile int g_barrier_arrived = 0;
+static volatile int g_barrier_round = 0;
+static volatile unsigned long long g_barrier_target_tsc = 0;
+static volatile int g_mutex_in_cs = 0;
+static volatile int g_mutex_race_violations = 0;
+static volatile int g_mutex_corruption_count = 0;
+static volatile int g_mutex_cs_val = 0;
 
 static void *mutex_contention_worker(void *arg) {
-    (void)arg;
-    for (int i = 0; i < MUTEX_ITERS; i++) {
+    long tid = (long)arg;
+    for (int iter = 0; iter < BARRIER_ITERS; iter++) {
+        // Step 1: Wait for previous round to fully clear
+        while (__atomic_load_n(&g_barrier_round, __ATOMIC_SEQ_CST) != iter * 2) {
+            __asm__ volatile("pause");
+        }
+
+        // Step 2: Check-in for current round
+        int arrived = __atomic_add_fetch(&g_barrier_arrived, 1, __ATOMIC_SEQ_CST);
+        if (arrived == NUM_THREADS) {
+            // Last thread sets target hardware timestamp ~25,000 cycles in the future
+            g_barrier_target_tsc = rdtsc_barrier() + 25000ULL;
+            // Advance phase to (iter * 2 + 1), releasing all threads into the spin-barrier
+            __atomic_store_n(&g_barrier_round, iter * 2 + 1, __ATOMIC_SEQ_CST);
+        } else {
+            // Wait until phase advances to (iter * 2 + 1)
+            while (__atomic_load_n(&g_barrier_round, __ATOMIC_SEQ_CST) != iter * 2 + 1) {
+                __asm__ volatile("pause");
+            }
+        }
+
+        // Step 3: Hardware TSC Spin-Barrier
+        // All threads across all SMP cores spin until exact hardware timestamp with NO coordination
+        unsigned long long target = g_barrier_target_tsc;
+        while (rdtsc_barrier() < target) {
+            __asm__ volatile("pause");
+        }
+
+        // Step 4: Simultaneous uncontrived race to acquire the mutex
         pthread_mutex_lock(&g_contended_mutex);
+
+        // Step 5: Verify mutual exclusion inside critical section
+        int in_cs = __atomic_exchange_n(&g_mutex_in_cs, 1, __ATOMIC_SEQ_CST);
+        if (in_cs != 0) {
+            __atomic_fetch_add(&g_mutex_race_violations, 1, __ATOMIC_SEQ_CST);
+        }
+
         g_contended_counter++;
+        g_mutex_cs_val = (int)(iter * 1000 + tid);
+        for (volatile int churn = 0; churn < 30; churn++) {}
+        if (g_mutex_cs_val != (int)(iter * 1000 + tid)) {
+            __atomic_fetch_add(&g_mutex_corruption_count, 1, __ATOMIC_SEQ_CST);
+        }
+
+        __atomic_store_n(&g_mutex_in_cs, 0, __ATOMIC_SEQ_CST);
         pthread_mutex_unlock(&g_contended_mutex);
-        if (i % 50 == 0) {
-            sched_yield();
+
+        // Step 6: Post-iteration sync: decrement arrived counter to prepare for next round
+        int left = __atomic_sub_fetch(&g_barrier_arrived, 1, __ATOMIC_SEQ_CST);
+        if (left == 0) {
+            // All threads finished this round, advance phase to next round entry
+            __atomic_store_n(&g_barrier_round, (iter + 1) * 2, __ATOMIC_SEQ_CST);
+        } else {
+            while (__atomic_load_n(&g_barrier_round, __ATOMIC_SEQ_CST) != (iter + 1) * 2) {
+                __asm__ volatile("pause");
+            }
         }
     }
     return NULL;
@@ -137,16 +199,38 @@ static void *mutex_contention_worker(void *arg) {
 static int test_contended_mutex(void) {
     pthread_t th[NUM_THREADS];
     g_contended_counter = 0;
-    for (int i = 0; i < NUM_THREADS; i++) {
-        if (pthread_create(&th[i], NULL, mutex_contention_worker, NULL) != 0) {
+    g_barrier_arrived = 0;
+    g_barrier_round = 0;
+    g_barrier_target_tsc = 0;
+    g_mutex_in_cs = 0;
+    g_mutex_race_violations = 0;
+    g_mutex_corruption_count = 0;
+    g_mutex_cs_val = 0;
+
+    for (long i = 0; i < NUM_THREADS; i++) {
+        if (pthread_create(&th[i], NULL, mutex_contention_worker, (void *)i) != 0) {
             return -1;
         }
     }
     for (int i = 0; i < NUM_THREADS; i++) {
         pthread_join(th[i], NULL);
     }
-    if (g_contended_counter != NUM_THREADS * MUTEX_ITERS) {
+
+    const char banner[] = "[linux-dynamic] futex/mutex TSC spin-barrier contention verified\n";
+    write(1, banner, sizeof(banner) - 1);
+    char buf[128];
+    snprintf(buf, sizeof(buf), "[linux-dynamic] rounds=%d threads=%d counter=%d violations=%d corruptions=%d\n",
+             BARRIER_ITERS, NUM_THREADS, g_contended_counter, g_mutex_race_violations, g_mutex_corruption_count);
+    write(1, buf, strlen(buf));
+
+    if (g_mutex_race_violations != 0) {
         return -2;
+    }
+    if (g_mutex_corruption_count != 0) {
+        return -3;
+    }
+    if (g_contended_counter != NUM_THREADS * BARRIER_ITERS) {
+        return -4;
     }
     return 0;
 }

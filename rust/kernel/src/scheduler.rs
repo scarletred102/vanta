@@ -631,11 +631,11 @@ pub fn yield_current(context: UserContext) -> *const UserContext {
         scheduler.tasks[previous].interrupt_context.rax = context.return_value;
         scheduler.tasks[previous].interrupt_context.flags = context.flags;
         scheduler.tasks[previous].interrupt_context.stack_pointer = context.stack_pointer;
-        if scheduler.tasks[previous].priority > scheduler.tasks[previous].base_priority {
-            scheduler.tasks[previous].priority -= 1;
+        if scheduler.tasks[previous].priority < PRIO_BATCH_MAX {
+            scheduler.tasks[previous].priority += 1;
         }
         scheduler.tasks[previous].time_slice_remaining = slice_for_priority(scheduler.tasks[previous].priority);
-        let next = next_alive(scheduler, previous).unwrap_or(previous);
+        let next = next_runnable_yield(scheduler, previous);
         scheduler.current = next;
         scheduler.slice_ticks = 0;
         let task = &mut scheduler.tasks[next];
@@ -1018,6 +1018,28 @@ fn next_alive(scheduler: &Scheduler, current: usize) -> Option<usize> {
         }
     }
     best_index
+}
+
+fn next_runnable_yield(scheduler: &Scheduler, current: usize) -> usize {
+    let mut best_index = None;
+    let mut best_tier = 255u8;
+    let n = scheduler.tasks.len();
+
+    for offset in 1..n {
+        let index = (current + offset) % n;
+        let task = &scheduler.tasks[index];
+        if task.state == TaskState::Runnable {
+            let tier = priority_tier(task.priority);
+            if tier <= best_tier {
+                best_tier = tier;
+                best_index = Some(index);
+                if best_tier == 0 {
+                    break;
+                }
+            }
+        }
+    }
+    best_index.unwrap_or(current)
 }
 
 fn wait_for_next_runnable(
