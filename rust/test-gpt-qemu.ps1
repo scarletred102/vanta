@@ -146,6 +146,7 @@ $common = @(
     "[linux-dynamic] thread joined successfully",
     "[linux-dynamic] timer subsystem and nanosleep verified",
     "[linux-dynamic] 85-syscall matrix and signals verified",
+    "[dynamic-shlib] SUCCESS: cross-boundary call to libcalc.so verified (84, 1337)",
     "[linux-dynamic] thread spawned",
     "[net] virtio-net adapter initialized",
     "[linux-dynamic] network acceptance passed",
@@ -199,5 +200,5 @@ Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required 
 ) | Out-Null
 Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
 
-Write-Host "[test] GPT Gate A, Gate B, Gate C, Gate D, and Gate E acceptance passed"
+Write-Host "[test] GPT Gate A, Gate B, Gate C, Gate D, Gate E, and Gate F acceptance passed"
 $first -split "`n" | Where-Object { $_ -match "SIGSEGV|linux-fork|destroy_address_space|Vector|swap" } | ForEach-Object { Write-Host $_ }
