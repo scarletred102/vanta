@@ -6,6 +6,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <sys/syscall.h>
+#include <time.h>
+#include <sys/time.h>
+#include <signal.h>
 
 const char __interp[] __attribute__((section(".interp"))) = "/lib/ld-musl-x86_64.so.1";
 
@@ -435,6 +438,135 @@ static int test_direct_futex_requeue(void) {
     return 0;
 }
 
+/* ------------------------------------------------------------
+ * Test 7: Hierarchical Timer Wheel, Nanosleep, Itimers, Clocks
+ * ------------------------------------------------------------ */
+static volatile int g_sigalrm_fired = 0;
+static void sigalrm_handler(int sig) {
+    if (sig == SIGALRM) {
+        g_sigalrm_fired++;
+    }
+}
+
+static int test_timer_subsystem(void) {
+    // 1. clock_getres
+    struct timespec res;
+    if (clock_getres(CLOCK_MONOTONIC, &res) != 0) {
+        return 1;
+    }
+    if (res.tv_sec != 0 || res.tv_nsec != 1000000) { // 1ms resolution
+        return 2;
+    }
+
+    // 2. clock_gettime & nanosleep duration check (must block for real duration)
+    struct timespec t_start, t_end;
+    if (clock_gettime(CLOCK_MONOTONIC, &t_start) != 0) {
+        return 3;
+    }
+    struct timespec req = { .tv_sec = 0, .tv_nsec = 50 * 1000 * 1000 }; // 50 ms
+    if (nanosleep(&req, NULL) != 0) {
+        return 4;
+    }
+    if (clock_gettime(CLOCK_MONOTONIC, &t_end) != 0) {
+        return 5;
+    }
+    long long elapsed_ms = (t_end.tv_sec - t_start.tv_sec) * 1000LL + 
+                           (t_end.tv_nsec - t_start.tv_nsec) / 1000000LL;
+    if (elapsed_ms < 40) {
+        return 6;
+    }
+
+    // 3. clock_nanosleep
+    if (clock_gettime(CLOCK_MONOTONIC, &t_start) != 0) {
+        return 7;
+    }
+    req.tv_sec = 0;
+    req.tv_nsec = 30 * 1000 * 1000; // 30 ms
+    if (clock_nanosleep(CLOCK_MONOTONIC, 0, &req, NULL) != 0) {
+        return 8;
+    }
+    if (clock_gettime(CLOCK_MONOTONIC, &t_end) != 0) {
+        return 9;
+    }
+    elapsed_ms = (t_end.tv_sec - t_start.tv_sec) * 1000LL + 
+                 (t_end.tv_nsec - t_start.tv_nsec) / 1000000LL;
+    if (elapsed_ms < 20) {
+        return 10;
+    }
+
+    // 4. clock_settime and clock_gettime(CLOCK_REALTIME)
+    struct timespec cur_real;
+    if (clock_gettime(CLOCK_REALTIME, &cur_real) != 0) {
+        return 11;
+    }
+    struct timespec new_real = {
+        .tv_sec = cur_real.tv_sec + 5000,
+        .tv_nsec = 123456789,
+    };
+    if (clock_settime(CLOCK_REALTIME, &new_real) != 0) {
+        return 12;
+    }
+    struct timespec check_real;
+    if (clock_gettime(CLOCK_REALTIME, &check_real) != 0) {
+        return 13;
+    }
+    if (check_real.tv_sec < new_real.tv_sec) {
+        return 14;
+    }
+
+    // 5. nanosleep invalid argument test
+    struct timespec bad_req = { .tv_sec = 0, .tv_nsec = 1000000000L }; // >= 1s invalid
+    if (nanosleep(&bad_req, NULL) != -1 || errno != EINVAL) {
+        return 15;
+    }
+    bad_req.tv_sec = -1;
+    bad_req.tv_nsec = 0;
+    if (nanosleep(&bad_req, NULL) != -1 || errno != EINVAL) {
+        return 16;
+    }
+
+    // 6. itimer test
+    signal(SIGALRM, sigalrm_handler);
+    struct itimerval it = {
+        .it_interval = { 0, 0 },
+        .it_value = { 0, 40 * 1000 }, // 40 ms
+    };
+    struct itimerval old_it;
+    if (setitimer(ITIMER_REAL, &it, &old_it) != 0) {
+        return 17;
+    }
+    struct itimerval cur_it;
+    if (getitimer(ITIMER_REAL, &cur_it) != 0) {
+        return 18;
+    }
+    // Sleep for 70ms to let itimer expire and fire SIGALRM
+    struct timespec wait_alrm = { .tv_sec = 0, .tv_nsec = 70 * 1000 * 1000 };
+    nanosleep(&wait_alrm, NULL);
+    if (g_sigalrm_fired == 0) {
+        return 19;
+    }
+
+    // 7. Early signal interruption with rem writeback
+    g_sigalrm_fired = 0;
+    it.it_value.tv_sec = 0;
+    it.it_value.tv_usec = 30 * 1000; // 30 ms
+    setitimer(ITIMER_REAL, &it, NULL);
+    struct timespec long_req = { .tv_sec = 1, .tv_nsec = 0 }; // 1000 ms
+    struct timespec rem = { 0, 0 };
+    int ret = nanosleep(&long_req, &rem);
+    if (ret != -1 || errno != EINTR) {
+        return 20; // Must be interrupted by SIGALRM
+    }
+    if (rem.tv_sec == 0 && rem.tv_nsec == 0) {
+        return 21; // Rem must be written back
+    }
+    if (g_sigalrm_fired == 0) {
+        return 22; // SIGALRM must have fired
+    }
+
+    return 0;
+}
+
 int main(void) {
     t_thread_id = 999;
     t_counter = 0x12345678ULL;
@@ -534,6 +666,18 @@ int main(void) {
 
     const char join_msg[] = "[linux-dynamic] thread joined successfully\n";
     write(1, join_msg, sizeof(join_msg) - 1);
+
+    /* Test 7: Hierarchical Timer Wheel, Nanosleep, Itimers, Clocks */
+    int timer_res = test_timer_subsystem();
+    if (timer_res != 0) {
+        char err_msg[64];
+        snprintf(err_msg, sizeof(err_msg), "[linux-dynamic] timer subsystem failed: %d\n", timer_res);
+        write(1, err_msg, strlen(err_msg));
+        return 95;
+    }
+
+    const char timer_msg[] = "[linux-dynamic] timer subsystem and nanosleep verified\n";
+    write(1, timer_msg, sizeof(timer_msg) - 1);
 
     return 0;
 }

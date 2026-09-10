@@ -171,6 +171,7 @@ enum TaskState {
     Waiting { child_pid: u64, status_ptr: u64 },
     PipeWaiting { pipe_id: u64 },
     FutexWait { uaddr: u64, bitset: u32 },
+    Sleeping { target_tick: u64, rem_ptr: u64 },
     Zombie { exit_code: u64 },
     Reaped,
 }
@@ -643,7 +644,43 @@ pub fn yield_current(context: UserContext) -> *const UserContext {
     crate::syscall::prepare_user_return(next_context, next_space)
 }
 
+fn wake_sleeping_task(tid: u64) {
+    for sched_lock in &SCHEDULERS {
+        let mut scheduler = sched_lock.lock();
+        let Some(scheduler) = scheduler.as_mut() else {
+            continue;
+        };
+        for task in &mut scheduler.tasks {
+            if task.tid == tid {
+                if matches!(task.state, TaskState::Sleeping { .. }) {
+                    task.state = TaskState::Runnable;
+                    task.priority = task.priority.saturating_sub(2).max(PRIO_INTERACTIVE_MIN);
+                    task.time_slice_remaining = slice_for_priority(task.priority);
+                }
+                return;
+            }
+        }
+    }
+}
+
 pub fn timer_tick(context: *mut InterruptContext) -> *const InterruptContext {
+    if !crate::smp::is_application_processor() {
+        let expired = crate::timer::tick();
+        for entry in expired {
+            match entry.kind {
+                crate::timer::TimerKind::Sleep { tid } => {
+                    wake_sleeping_task(tid);
+                }
+                crate::timer::TimerKind::ITimerReal { pid, interval_ticks } => {
+                    let _ = kill_process(pid, 14);
+                    if interval_ticks > 0 {
+                        crate::timer::rearm_itimer(entry.id, interval_ticks);
+                    }
+                }
+            }
+        }
+    }
+
     let interrupted = unsafe { &*context };
     if !interrupted.interrupted_user_mode() {
         return context;
@@ -1372,7 +1409,25 @@ pub fn kill_process(pid: u64, signal: u64) -> Result<(), ()> {
         } else {
             let target = &mut scheduler.tasks[first_idx];
             target.pending_signals |= 1 << (signal - 1);
-            if matches!(target.state, TaskState::PipeWaiting { .. } | TaskState::FutexWait { .. }) {
+            if matches!(target.state, TaskState::PipeWaiting { .. } | TaskState::FutexWait { .. } | TaskState::Sleeping { .. }) {
+                if let TaskState::Sleeping { target_tick, rem_ptr } = target.state {
+                    crate::timer::cancel_sleep_timer(target.tid);
+                    if rem_ptr != 0 {
+                        let current_tick = crate::timer::current_tick();
+                        let rem_ticks = target_tick.saturating_sub(current_tick);
+                        let rem_sec = (rem_ticks / 1000) as i64;
+                        let rem_nsec = ((rem_ticks % 1000) * 1_000_000) as i64;
+                        let mut ts = [0u8; 16];
+                        ts[0..8].copy_from_slice(&rem_sec.to_ne_bytes());
+                        ts[8..16].copy_from_slice(&rem_nsec.to_ne_bytes());
+                        if let Some(ref proc_arc) = target.process {
+                            let space = proc_arc.lock().address_space();
+                            let _ = crate::process::write_user_bytes_in(space, rem_ptr, &ts);
+                        }
+                    }
+                    target.interrupt_context.rax = (-(4 as i64)) as u64;
+                    target.context.return_value = (-(4 as i64)) as u64;
+                }
                 target.state = TaskState::Runnable;
             }
         }
@@ -1483,7 +1538,25 @@ pub fn kill_thread(tid: u64, signal: u64) -> Result<(), ()> {
         }
 
         target.pending_signals |= 1 << (signal - 1);
-        if matches!(target.state, TaskState::PipeWaiting { .. } | TaskState::FutexWait { .. }) {
+        if matches!(target.state, TaskState::PipeWaiting { .. } | TaskState::FutexWait { .. } | TaskState::Sleeping { .. }) {
+            if let TaskState::Sleeping { target_tick, rem_ptr } = target.state {
+                crate::timer::cancel_sleep_timer(target.tid);
+                if rem_ptr != 0 {
+                    let current_tick = crate::timer::current_tick();
+                    let rem_ticks = target_tick.saturating_sub(current_tick);
+                    let rem_sec = (rem_ticks / 1000) as i64;
+                    let rem_nsec = ((rem_ticks % 1000) * 1_000_000) as i64;
+                    let mut ts = [0u8; 16];
+                    ts[0..8].copy_from_slice(&rem_sec.to_ne_bytes());
+                    ts[8..16].copy_from_slice(&rem_nsec.to_ne_bytes());
+                    if let Some(ref proc_arc) = target.process {
+                        let space = proc_arc.lock().address_space();
+                        let _ = crate::process::write_user_bytes_in(space, rem_ptr, &ts);
+                    }
+                }
+                target.interrupt_context.rax = (-(4 as i64)) as u64;
+                target.context.return_value = (-(4 as i64)) as u64;
+            }
             target.state = TaskState::Runnable;
         }
         return Ok(());
@@ -2055,6 +2128,59 @@ pub fn futex_wait_current(uaddr: u64, bitset: u32, context: UserContext) -> *con
         bitset,
         scheduler_tid(next)
     );
+    crate::syscall::prepare_user_return(next_context, next_space)
+}
+
+pub fn block_sleep_current(
+    target_tick: u64,
+    rem_ptr: u64,
+    context: UserContext,
+) -> *const UserContext {
+    let mut context = context;
+    context.return_value = 0;
+    let (next_context, next_space, _previous, _next) = {
+        let mut scheduler_guard = current_scheduler().lock();
+        let previous = {
+            let scheduler = scheduler_guard.as_mut().expect("sleep without scheduler");
+            let previous = scheduler.current;
+            scheduler.tasks[previous].context = context;
+            scheduler.tasks[previous].interrupt_context.rbx = context.rbx;
+            scheduler.tasks[previous].interrupt_context.rbp = context.rbp;
+            scheduler.tasks[previous].interrupt_context.r12 = context.r12;
+            scheduler.tasks[previous].interrupt_context.r13 = context.r13;
+            scheduler.tasks[previous].interrupt_context.r14 = context.r14;
+            scheduler.tasks[previous].interrupt_context.r15 = context.r15;
+            scheduler.tasks[previous].interrupt_context.rdi = context.rdi;
+            scheduler.tasks[previous].interrupt_context.rsi = context.rsi;
+            scheduler.tasks[previous].interrupt_context.rdx = context.rdx;
+            scheduler.tasks[previous].interrupt_context.r8 = context.r8;
+            scheduler.tasks[previous].interrupt_context.r9 = context.r9;
+            scheduler.tasks[previous].interrupt_context.r10 = context.r10;
+            scheduler.tasks[previous].interrupt_context.rcx = context.rcx;
+            scheduler.tasks[previous].interrupt_context.r11 = context.r11;
+            scheduler.tasks[previous].interrupt_context.rax = 0;
+            let (code_segment, stack_segment) = crate::gdt::user_interrupt_selectors();
+            scheduler.tasks[previous].interrupt_context.instruction_pointer = context.instruction_pointer;
+            scheduler.tasks[previous].interrupt_context.flags = context.flags | 0x202;
+            scheduler.tasks[previous].interrupt_context.stack_pointer = context.stack_pointer;
+            scheduler.tasks[previous].interrupt_context.code_segment = code_segment;
+            scheduler.tasks[previous].interrupt_context.stack_segment = stack_segment;
+            scheduler.tasks[previous].state = TaskState::Sleeping { target_tick, rem_ptr };
+            previous
+        };
+
+        let (mut scheduler_guard, next) = wait_for_next_runnable(scheduler_guard, previous);
+        let scheduler = scheduler_guard.as_mut().expect("scheduler lost");
+        scheduler.current = next;
+        scheduler.slice_ticks = 0;
+        let task = &mut scheduler.tasks[next];
+        let process = task
+            .process
+            .as_mut()
+            .expect("scheduler selected an exited task");
+        let space = process.lock().address_space();
+        (task.context, space, previous, next)
+    };
     crate::syscall::prepare_user_return(next_context, next_space)
 }
 

@@ -99,7 +99,7 @@ unsafe extern "C" fn application_processor_entry(cpu: &limine::mp::MpInfo) -> ! 
         halt();
     }
     let apic = crate::apic::initialize();
-    let timer_ready = crate::apic::initialize_timer(100);
+    let timer_ready = crate::apic::initialize_timer(1000);
     crate::serial_println!(
         "[smp] AP slot={} lapic={} apic={:?} local-timer={}",
         slot,

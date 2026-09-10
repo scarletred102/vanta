@@ -37,6 +37,7 @@ mod shell;
 mod smp;
 mod storage;
 mod syscall;
+pub mod timer;
 mod vfs;
 mod virtio;
 mod virtio_net;
@@ -471,8 +472,8 @@ extern "C" fn bootstrap_main() -> ! {
     if matches!(ioapic, Some(Ok(_))) {
         interrupts::use_ioapic();
     }
-    if interrupts::initialize_timer(100) {
-        serial_println!("[boot] PIT configured: 100 Hz");
+    if interrupts::initialize_timer(1000) {
+        serial_println!("[boot] PIT configured: 1000 Hz");
     } else {
         serial_println!("[boot] WARNING: PIT configuration failed");
     }

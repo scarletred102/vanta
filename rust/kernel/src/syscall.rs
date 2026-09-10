@@ -49,13 +49,14 @@ pub const SYS_DISPLAY_BLIT: u64 = Syscall::DisplayBlit.number() as u64;
 pub const SYS_DISPLAY_FLUSH: u64 = Syscall::DisplayFlush.number() as u64;
 pub const SYS_INPUT_POLL: u64 = Syscall::InputPoll.number() as u64;
 pub const SYS_AUDIO_PLAY: u64 = Syscall::AudioPlay.number() as u64;
-const SYSCALL_RETURN_EXIT: u64 = u64::MAX;
-const SYSCALL_RETURN_YIELD: u64 = u64::MAX - 2;
-const SYSCALL_RETURN_WAIT: u64 = u64::MAX - 3;
-const SYSCALL_RETURN_EXEC: u64 = u64::MAX - 4;
-const SYSCALL_RETURN_BLOCK: u64 = u64::MAX - 6;
-const SYSCALL_RETURN_FUTEX_WAIT: u64 = u64::MAX - 7;
-const SYSCALL_RETURN_THREAD_EXIT: u64 = u64::MAX - 8;
+const SYSCALL_RETURN_EXIT: u64 = (-(50001 as i64)) as u64;
+const SYSCALL_RETURN_YIELD: u64 = (-(50002 as i64)) as u64;
+const SYSCALL_RETURN_WAIT: u64 = (-(50003 as i64)) as u64;
+const SYSCALL_RETURN_EXEC: u64 = (-(50004 as i64)) as u64;
+const SYSCALL_RETURN_BLOCK: u64 = (-(50006 as i64)) as u64;
+const SYSCALL_RETURN_FUTEX_WAIT: u64 = (-(50007 as i64)) as u64;
+const SYSCALL_RETURN_THREAD_EXIT: u64 = (-(50008 as i64)) as u64;
+const SYSCALL_RETURN_NANOSLEEP: u64 = (-(50009 as i64)) as u64;
 const SYSCALL_ERROR: u64 = u64::MAX - 1;
 pub(crate) const SYSCALL_WOULD_BLOCK: u64 = u64::MAX - 5;
 const USER_ADDRESS_LIMIT: u64 = 0x0000_8000_0000_0000;
@@ -102,6 +103,8 @@ struct CpuLocal {
     futex_uaddr: u64,
     futex_bitset: u32,
     _pad2: u32,
+    sleep_target_tick: u64,
+    sleep_rem_ptr: u64,
 }
 
 const EMPTY_CPU_LOCAL: CpuLocal = CpuLocal {
@@ -136,6 +139,8 @@ const EMPTY_CPU_LOCAL: CpuLocal = CpuLocal {
     futex_uaddr: 0,
     futex_bitset: 0,
     _pad2: 0,
+    sleep_target_tick: 0,
+    sleep_rem_ptr: 0,
 };
 
 static mut CPU_LOCALS: [CpuLocal; MAX_CPUS] = [EMPTY_CPU_LOCAL; MAX_CPUS];
@@ -154,6 +159,7 @@ global_asm!(
     .extern vanta_syscall_exec
     .extern vanta_syscall_block
     .extern vanta_syscall_futex_wait
+    .extern vanta_syscall_nanosleep
     .extern vanta_syscall_exit
     .extern vanta_syscall_thread_exit
 vanta_syscall_entry:
@@ -184,20 +190,22 @@ vanta_syscall_entry:
     push qword ptr [rsp + 40]
     call vanta_syscall_dispatch
     add rsp, 8
-    cmp rax, -1
+    cmp rax, -50001
     je vanta_syscall_exit_path
-    cmp rax, -3
+    cmp rax, -50002
     je vanta_syscall_yield_path
-    cmp rax, -4
+    cmp rax, -50003
     je vanta_syscall_wait_path
-    cmp rax, -5
+    cmp rax, -50004
     je vanta_syscall_exec_path
-    cmp rax, -7
+    cmp rax, -50006
     je vanta_syscall_block_path
-    cmp rax, -8
+    cmp rax, -50007
     je vanta_syscall_futex_wait_path
-    cmp rax, -9
+    cmp rax, -50008
     je vanta_syscall_thread_exit_path
+    cmp rax, -50009
+    je vanta_syscall_nanosleep_path
 vanta_syscall_raw_return:
     mov [rsp], rax
     pop rax
@@ -243,6 +251,11 @@ vanta_syscall_futex_wait_path:
     mov rdi, rsp
     mov rsi, gs:[{user_rsp_offset}]
     call vanta_syscall_futex_wait
+    jmp vanta_syscall_restore_context
+vanta_syscall_nanosleep_path:
+    mov rdi, rsp
+    mov rsi, gs:[{user_rsp_offset}]
+    call vanta_syscall_nanosleep
     jmp vanta_syscall_restore_context
 vanta_syscall_exec_error:
     mov r11, [rsp + 64]
@@ -367,6 +380,7 @@ extern "C" fn vanta_syscall_dispatch(
         && result != SYSCALL_RETURN_EXEC
         && result != SYSCALL_RETURN_BLOCK
         && result != SYSCALL_RETURN_FUTEX_WAIT
+        && result != SYSCALL_RETURN_NANOSLEEP
     {
         let frame_ptr = (current_cpu_local().syscall_stack_top - 120) as *mut u64;
         let user_rsp = &mut current_cpu_local().user_rsp;
@@ -621,10 +635,20 @@ fn dispatch_linux(
             vanta_linuxd::LinuxOp::ChDir | vanta_linuxd::LinuxOp::FChDir => 0,
             vanta_linuxd::LinuxOp::ReadLink | vanta_linuxd::LinuxOp::ReadLinkAt => SYSCALL_ERROR,
             vanta_linuxd::LinuxOp::ClockGetTime => linux_clock_gettime_user(arg1, arg2),
+            vanta_linuxd::LinuxOp::ClockSetTime => linux_clock_settime_user(arg1, arg2),
+            vanta_linuxd::LinuxOp::ClockGetRes => linux_clock_getres_user(arg1, arg2),
             vanta_linuxd::LinuxOp::GetTimeOfDay => linux_gettimeofday_user(arg1, arg2),
+            vanta_linuxd::LinuxOp::GetITimer => linux_getitimer_user(arg1, arg2),
+            vanta_linuxd::LinuxOp::SetITimer => linux_setitimer_user(arg1, arg2, arg3),
             vanta_linuxd::LinuxOp::Fcntl => linux_fcntl_user(arg1, arg2, arg3),
             vanta_linuxd::LinuxOp::Ioctl => linux_ioctl_user(arg1, arg2, arg3),
-            vanta_linuxd::LinuxOp::Nanosleep => 0,
+            vanta_linuxd::LinuxOp::Nanosleep => {
+                if number == 230 {
+                    linux_clock_nanosleep_user(arg1, arg2, arg3, arg4)
+                } else {
+                    linux_nanosleep_user(arg1, arg2)
+                }
+            }
             vanta_linuxd::LinuxOp::SendTo | vanta_linuxd::LinuxOp::SendMsg => {
                 write_user(arg1, arg2, arg3)
             }
@@ -981,28 +1005,207 @@ fn linux_getcwd_user(pointer: u64, size: u64) -> u64 {
     pointer
 }
 
-fn linux_clock_gettime_user(_clock_id: u64, pointer: u64) -> u64 {
+fn linux_clock_gettime_user(clock_id: u64, pointer: u64) -> u64 {
+    if clock_id > 7 {
+        return (-(22 as i64)) as u64;
+    }
+    if pointer == 0 || pointer >= USER_ADDRESS_LIMIT {
+        return (-(14 as i64)) as u64;
+    }
+    let (sec, nsec) = crate::timer::get_clock_time(clock_id);
     let mut timespec = [0u8; 16];
-    let sec: i64 = 1700000000;
-    let nsec: i64 = 0;
-    timespec[0..8].copy_from_slice(&sec.to_ne_bytes());
-    timespec[8..16].copy_from_slice(&nsec.to_ne_bytes());
+    timespec[0..8].copy_from_slice(&(sec as i64).to_ne_bytes());
+    timespec[8..16].copy_from_slice(&(nsec as i64).to_ne_bytes());
     if copy_to_user(pointer, &timespec).is_err() {
-        return SYSCALL_ERROR;
+        return (-(14 as i64)) as u64;
+    }
+    0
+}
+
+fn linux_clock_settime_user(clock_id: u64, pointer: u64) -> u64 {
+    if pointer == 0 || pointer >= USER_ADDRESS_LIMIT {
+        return (-(14 as i64)) as u64;
+    }
+    let mut timespec = [0u8; 16];
+    if copy_from_user_into(pointer, &mut timespec).is_err() {
+        return (-(14 as i64)) as u64;
+    }
+    let sec = i64::from_ne_bytes(timespec[0..8].try_into().unwrap());
+    let nsec = i64::from_ne_bytes(timespec[8..16].try_into().unwrap());
+    if sec < 0 || nsec < 0 || nsec >= 1_000_000_000 {
+        return (-(22 as i64)) as u64;
+    }
+    if crate::timer::set_clock_time(clock_id, sec as u64, nsec as u64).is_err() {
+        return (-(22 as i64)) as u64;
+    }
+    0
+}
+
+fn linux_clock_getres_user(clock_id: u64, pointer: u64) -> u64 {
+    if clock_id > 7 {
+        return (-(22 as i64)) as u64;
+    }
+    if pointer != 0 {
+        if pointer >= USER_ADDRESS_LIMIT {
+            return (-(14 as i64)) as u64;
+        }
+        let mut timespec = [0u8; 16];
+        let nsec: i64 = 1_000_000;
+        timespec[8..16].copy_from_slice(&nsec.to_ne_bytes());
+        if copy_to_user(pointer, &timespec).is_err() {
+            return (-(14 as i64)) as u64;
+        }
     }
     0
 }
 
 fn linux_gettimeofday_user(tv_pointer: u64, _tz_pointer: u64) -> u64 {
     if tv_pointer != 0 {
-        let mut timeval = [0u8; 16];
-        let sec: i64 = 1700000000;
-        let usec: i64 = 0;
-        timeval[0..8].copy_from_slice(&sec.to_ne_bytes());
-        timeval[8..16].copy_from_slice(&usec.to_ne_bytes());
-        if copy_to_user(tv_pointer, &timeval).is_err() {
-            return SYSCALL_ERROR;
+        if tv_pointer >= USER_ADDRESS_LIMIT {
+            return (-(14 as i64)) as u64;
         }
+        let (sec, nsec) = crate::timer::get_clock_time(0);
+        let mut timeval = [0u8; 16];
+        timeval[0..8].copy_from_slice(&(sec as i64).to_ne_bytes());
+        timeval[8..16].copy_from_slice(&((nsec / 1000) as i64).to_ne_bytes());
+        if copy_to_user(tv_pointer, &timeval).is_err() {
+            return (-(14 as i64)) as u64;
+        }
+    }
+    0
+}
+
+fn linux_nanosleep_user(req_ptr: u64, rem_ptr: u64) -> u64 {
+    if req_ptr == 0 || req_ptr >= USER_ADDRESS_LIMIT {
+        return (-(14 as i64)) as u64;
+    }
+    let mut buf = [0u8; 16];
+    if copy_from_user_into(req_ptr, &mut buf).is_err() {
+        return (-(14 as i64)) as u64;
+    }
+    let sec = i64::from_ne_bytes(buf[0..8].try_into().unwrap());
+    let nsec = i64::from_ne_bytes(buf[8..16].try_into().unwrap());
+    if sec < 0 || nsec < 0 || nsec >= 1_000_000_000 {
+        return (-(22 as i64)) as u64;
+    }
+    if sec == 0 && nsec == 0 {
+        return 0;
+    }
+    let duration_ms = (sec as u64)
+        .saturating_mul(1000)
+        .saturating_add(((nsec + 999_999) / 1_000_000) as u64);
+    let current_tid = crate::scheduler::current_tid();
+    let target_tick = crate::timer::add_sleep_timer(current_tid, duration_ms);
+    current_cpu_local().sleep_target_tick = target_tick;
+    current_cpu_local().sleep_rem_ptr = rem_ptr;
+    SYSCALL_RETURN_NANOSLEEP
+}
+
+fn linux_clock_nanosleep_user(clock_id: u64, flags: u64, req_ptr: u64, rem_ptr: u64) -> u64 {
+    if clock_id != 0 && clock_id != 1 {
+        return (-(22 as i64)) as u64;
+    }
+    if req_ptr == 0 || req_ptr >= USER_ADDRESS_LIMIT {
+        return (-(14 as i64)) as u64;
+    }
+    let mut buf = [0u8; 16];
+    if copy_from_user_into(req_ptr, &mut buf).is_err() {
+        return (-(14 as i64)) as u64;
+    }
+    let sec = i64::from_ne_bytes(buf[0..8].try_into().unwrap());
+    let nsec = i64::from_ne_bytes(buf[8..16].try_into().unwrap());
+    if sec < 0 || nsec < 0 || nsec >= 1_000_000_000 {
+        return (-(22 as i64)) as u64;
+    }
+    if flags & 1 != 0 {
+        let target_ms = (sec as u64)
+            .saturating_mul(1000)
+            .saturating_add(((nsec + 999_999) / 1_000_000) as u64);
+        let now_ms = if clock_id == 0 {
+            let (s, ns) = crate::timer::get_clock_time(0);
+            s * 1000 + ns / 1_000_000
+        } else {
+            crate::timer::current_monotonic_ms()
+        };
+        if target_ms <= now_ms {
+            return 0;
+        }
+        let duration_ms = target_ms - now_ms;
+        let current_tid = crate::scheduler::current_tid();
+        let target_tick = crate::timer::add_sleep_timer(current_tid, duration_ms);
+        current_cpu_local().sleep_target_tick = target_tick;
+        current_cpu_local().sleep_rem_ptr = 0;
+        SYSCALL_RETURN_NANOSLEEP
+    } else {
+        linux_nanosleep_user(req_ptr, rem_ptr)
+    }
+}
+
+fn linux_setitimer_user(which: u64, new_ptr: u64, old_ptr: u64) -> u64 {
+    if which > 2 {
+        return (-(22 as i64)) as u64;
+    }
+    let pid = crate::scheduler::current_pid();
+    if old_ptr != 0 {
+        if old_ptr >= USER_ADDRESS_LIMIT {
+            return (-(14 as i64)) as u64;
+        }
+        let (interval_ms, rem_ms) = crate::timer::get_itimer(pid, which as u32);
+        let mut old_buf = [0u8; 32];
+        let int_sec = (interval_ms / 1000) as i64;
+        let int_usec = ((interval_ms % 1000) * 1000) as i64;
+        let rem_sec = (rem_ms / 1000) as i64;
+        let rem_usec = ((rem_ms % 1000) * 1000) as i64;
+        old_buf[0..8].copy_from_slice(&int_sec.to_ne_bytes());
+        old_buf[8..16].copy_from_slice(&int_usec.to_ne_bytes());
+        old_buf[16..24].copy_from_slice(&rem_sec.to_ne_bytes());
+        old_buf[24..32].copy_from_slice(&rem_usec.to_ne_bytes());
+        if copy_to_user(old_ptr, &old_buf).is_err() {
+            return (-(14 as i64)) as u64;
+        }
+    }
+    if new_ptr != 0 {
+        if new_ptr >= USER_ADDRESS_LIMIT {
+            return (-(14 as i64)) as u64;
+        }
+        let mut new_buf = [0u8; 32];
+        if copy_from_user_into(new_ptr, &mut new_buf).is_err() {
+            return (-(14 as i64)) as u64;
+        }
+        let int_sec = i64::from_ne_bytes(new_buf[0..8].try_into().unwrap());
+        let int_usec = i64::from_ne_bytes(new_buf[8..16].try_into().unwrap());
+        let val_sec = i64::from_ne_bytes(new_buf[16..24].try_into().unwrap());
+        let val_usec = i64::from_ne_bytes(new_buf[24..32].try_into().unwrap());
+        if int_sec < 0 || int_usec < 0 || int_usec >= 1_000_000 || val_sec < 0 || val_usec < 0 || val_usec >= 1_000_000 {
+            return (-(22 as i64)) as u64;
+        }
+        let interval_ms = (int_sec as u64) * 1000 + ((int_usec + 999) / 1000) as u64;
+        let value_ms = (val_sec as u64) * 1000 + ((val_usec + 999) / 1000) as u64;
+        let _ = crate::timer::set_itimer(pid, which as u32, interval_ms, value_ms);
+    }
+    0
+}
+
+fn linux_getitimer_user(which: u64, val_ptr: u64) -> u64 {
+    if which > 2 {
+        return (-(22 as i64)) as u64;
+    }
+    if val_ptr == 0 || val_ptr >= USER_ADDRESS_LIMIT {
+        return (-(14 as i64)) as u64;
+    }
+    let pid = crate::scheduler::current_pid();
+    let (interval_ms, rem_ms) = crate::timer::get_itimer(pid, which as u32);
+    let mut buf = [0u8; 32];
+    let int_sec = (interval_ms / 1000) as i64;
+    let int_usec = ((interval_ms % 1000) * 1000) as i64;
+    let rem_sec = (rem_ms / 1000) as i64;
+    let rem_usec = ((rem_ms % 1000) * 1000) as i64;
+    buf[0..8].copy_from_slice(&int_sec.to_ne_bytes());
+    buf[8..16].copy_from_slice(&int_usec.to_ne_bytes());
+    buf[16..24].copy_from_slice(&rem_sec.to_ne_bytes());
+    buf[24..32].copy_from_slice(&rem_usec.to_ne_bytes());
+    if copy_to_user(val_ptr, &buf).is_err() {
+        return (-(14 as i64)) as u64;
     }
     0
 }
@@ -1615,12 +1818,112 @@ fn dispatch_native(
     }
 }
 
-pub fn prepare_user_return(context: UserContext, space: AddressSpace) -> *const UserContext {
-    current_cpu_local().next_context = context;
-    set_user_fs_base(crate::scheduler::current_fs_base());
+fn inject_signal_frame_context(
+    signo: u64,
+    action: vanta_linuxd::LinuxSigAction,
+    context: &mut UserContext,
+    current_blocked_mask: u64,
+) -> Result<(), ()> {
+    let old_user_sp = context.stack_pointer;
+    let frame_size = core::mem::size_of::<vanta_linuxd::RtSigFrame>() as u64;
+    let new_user_sp = (old_user_sp.saturating_sub(frame_size) & !15) - 8;
+
+    let retcode: [u8; 16] = [
+        0x48, 0xc7, 0xc0, 0x0f, 0x00, 0x00, 0x00, // mov $15, %rax
+        0x0f, 0x05,                               // syscall
+        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // nop
+    ];
+
+    let pretcode = if action.sa_flags & vanta_linuxd::SA_RESTORER != 0 && action.sa_restorer != 0 {
+        action.sa_restorer
+    } else {
+        new_user_sp + core::mem::offset_of!(vanta_linuxd::RtSigFrame, retcode) as u64
+    };
+
+    let mut sigcontext = vanta_linuxd::SigContext::default();
+    sigcontext.rax = context.return_value;
+    sigcontext.rdi = context.rdi;
+    sigcontext.rsi = context.rsi;
+    sigcontext.rdx = context.rdx;
+    sigcontext.r8 = context.r8;
+    sigcontext.r9 = context.r9;
+    sigcontext.r10 = context.r10;
+    sigcontext.rip = context.instruction_pointer;
+    sigcontext.rflags = context.flags;
+    sigcontext.rbx = context.rbx;
+    sigcontext.rbp = context.rbp;
+    sigcontext.r12 = context.r12;
+    sigcontext.r13 = context.r13;
+    sigcontext.r14 = context.r14;
+    sigcontext.r15 = context.r15;
+    sigcontext.rsp = old_user_sp;
+    sigcontext.cs = 0x23;
+    sigcontext.fs = 0x1b;
+    sigcontext.gs = 0x1b;
+    sigcontext.oldmask = current_blocked_mask;
+
+    let ucontext = vanta_linuxd::UContext {
+        uc_flags: 0,
+        uc_link: 0,
+        uc_stack: vanta_linuxd::SigAltStack::default(),
+        uc_mcontext: sigcontext,
+        uc_sigmask: current_blocked_mask,
+        __fpregs_mem: [0; 64],
+    };
+
+    let siginfo = vanta_linuxd::SigInfo {
+        si_signo: signo as i32,
+        si_errno: 0,
+        si_code: vanta_linuxd::SI_USER,
+        _pad: [0; 29],
+    };
+
+    let frame = vanta_linuxd::RtSigFrame {
+        pretcode,
+        uc: ucontext,
+        info: siginfo,
+        retcode,
+    };
+
+    let frame_bytes = unsafe {
+        core::slice::from_raw_parts(
+            core::ptr::addr_of!(frame).cast::<u8>(),
+            core::mem::size_of::<vanta_linuxd::RtSigFrame>(),
+        )
+    };
+    copy_to_user(new_user_sp, frame_bytes)?;
+
+    context.return_value = 0; // rax
+    context.rdi = signo; // rdi = signo
+    context.rsi = new_user_sp + core::mem::offset_of!(vanta_linuxd::RtSigFrame, info) as u64; // rsi = &info
+    context.rdx = new_user_sp + core::mem::offset_of!(vanta_linuxd::RtSigFrame, uc) as u64; // rdx = &uc
+    context.instruction_pointer = action.sa_handler;
+    context.stack_pointer = new_user_sp;
+
+    Ok(())
+}
+
+pub fn prepare_user_return(mut context: UserContext, space: AddressSpace) -> *const UserContext {
     unsafe {
         paging::activate(space);
     }
+    if let Some((signo, action)) = crate::scheduler::check_pending_signal_to_deliver() {
+        if action.sa_handler > 1 {
+            let blocked = crate::scheduler::current_blocked_mask();
+            if inject_signal_frame_context(signo, action, &mut context, blocked).is_ok() {
+                let mut new_mask = blocked | action.sa_mask;
+                if action.sa_flags & vanta_linuxd::SA_NODEFER == 0 {
+                    new_mask |= 1 << (signo - 1);
+                }
+                crate::scheduler::set_current_blocked_mask(new_mask);
+                if action.sa_flags & vanta_linuxd::SA_RESETHAND != 0 {
+                    crate::scheduler::reset_signal_action(signo);
+                }
+            }
+        }
+    }
+    current_cpu_local().next_context = context;
+    set_user_fs_base(crate::scheduler::current_fs_base());
     core::ptr::addr_of!(current_cpu_local().next_context)
 }
 
@@ -2270,6 +2573,15 @@ extern "C" fn vanta_syscall_futex_wait(frame: *const u64, stack_pointer: u64) ->
     current_cpu_local().futex_uaddr = 0;
     current_cpu_local().futex_bitset = 0;
     crate::scheduler::futex_wait_current(uaddr, bitset, user_context(frame, stack_pointer))
+}
+
+#[no_mangle]
+extern "C" fn vanta_syscall_nanosleep(frame: *const u64, stack_pointer: u64) -> *const UserContext {
+    let target_tick = current_cpu_local().sleep_target_tick;
+    let rem_ptr = current_cpu_local().sleep_rem_ptr;
+    current_cpu_local().sleep_target_tick = 0;
+    current_cpu_local().sleep_rem_ptr = 0;
+    crate::scheduler::block_sleep_current(target_tick, rem_ptr, user_context(frame, stack_pointer))
 }
 
 #[no_mangle]

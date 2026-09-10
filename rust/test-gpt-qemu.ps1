@@ -144,6 +144,7 @@ $common = @(
     "[linux-dynamic] thread TLS verified",
     "[linux-dynamic] futex synchronization passed",
     "[linux-dynamic] thread joined successfully",
+    "[linux-dynamic] timer subsystem and nanosleep verified",
     "[linux-dynamic] thread spawned",
     "[net] virtio-net adapter initialized",
     "[linux-dynamic] network acceptance passed",
