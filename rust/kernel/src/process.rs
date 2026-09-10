@@ -276,6 +276,7 @@ impl Process {
         let mut page = addr;
         while page < addr + aligned_length {
             if let Ok(Some(physical)) = paging::unmap(self.space, page) {
+                let _guard = paging::cow_frame_lock(physical);
                 let _ = memory::free_frame(memory::PhysFrame(physical));
                 if let Some(pos) = self.mappings.iter().position(|m| m.virtual_address == page) {
                     self.mappings.remove(pos);
@@ -330,6 +331,7 @@ impl Process {
 
         while let Some(mapping) = self.mappings.pop() {
             if let Ok(Some(unmapped)) = paging::unmap(self.space, mapping.virtual_address) {
+                let _guard = paging::cow_frame_lock(unmapped);
                 if !memory::free_frame(PhysFrame(unmapped)) {
                     return Err(ProcessError::FrameReleaseFailed);
                 }

@@ -248,9 +248,10 @@ pub fn clone_user_address_space(
                         (flags, flags)
                     };
 
+                    let _frame_guard = cow_frame_lock(src_phys);
                     memory::frame_ref_inc(memory::PhysFrame(src_phys));
                     if let Err(e) = map(new_space, vaddr, src_phys, child_flags) {
-                        let _ = memory::frame_ref_dec(memory::PhysFrame(src_phys));
+                        let _ = memory::free_frame(memory::PhysFrame(src_phys));
                         for &(va, _pa) in &mapped_pages {
                             if let Ok(Some(unmapped)) = unmap(new_space, va) {
                                 memory::free_frame(memory::PhysFrame(unmapped));
@@ -273,13 +274,13 @@ pub fn clone_user_address_space(
     Ok((new_space, mapped_pages))
 }
 
-const COW_LOCK_STRIPES: usize = 1024;
+pub(crate) const COW_LOCK_STRIPES: usize = 1024;
 static COW_LOCKS: [Mutex<()>; COW_LOCK_STRIPES] = {
     const INIT: Mutex<()> = Mutex::new(());
     [INIT; COW_LOCK_STRIPES]
 };
 
-fn cow_frame_lock(phys_addr: u64) -> spin::MutexGuard<'static, ()> {
+pub(crate) fn cow_frame_lock(phys_addr: u64) -> spin::MutexGuard<'static, ()> {
     let pfn = (phys_addr / PAGE_SIZE) as usize;
     let index = (pfn ^ (pfn >> 10)) % COW_LOCK_STRIPES;
     COW_LOCKS[index].lock()
@@ -336,8 +337,9 @@ pub fn resolve_cow_page(space: AddressSpace, virtual_address: u64) -> Result<boo
         );
     }
 
-    // Decrement the reference count on the shared frame while holding the frame lock
-    let _ = memory::frame_ref_dec(memory::PhysFrame(old_phys));
+    // Decrement the reference count on the shared frame while holding the frame lock.
+    // Use free_frame so if concurrent unmaps occurred, the frame is freed to buddy allocator.
+    let _ = memory::free_frame(memory::PhysFrame(old_phys));
 
     // Update the PTE to point to the new frame with write permission, clearing COW
     let new_flags = (entry & !ADDRESS_MASK & !MAP_COW) | MAP_WRITABLE;
@@ -536,7 +538,9 @@ fn destroy_table(table_phys: u64, level: u8) -> Result<usize, MapError> {
             if !write_entry(table_phys, index, 0) {
                 return Err(MapError::NoHhdm);
             }
-            let _ = memory::free_frame(memory::PhysFrame(entry & ADDRESS_MASK));
+            let leaf_phys = entry & ADDRESS_MASK;
+            let _guard = cow_frame_lock(leaf_phys);
+            let _ = memory::free_frame(memory::PhysFrame(leaf_phys));
             freed += 1;
             continue;
         }
