@@ -273,6 +273,18 @@ pub fn clone_user_address_space(
     Ok((new_space, mapped_pages))
 }
 
+const COW_LOCK_STRIPES: usize = 1024;
+static COW_LOCKS: [Mutex<()>; COW_LOCK_STRIPES] = {
+    const INIT: Mutex<()> = Mutex::new(());
+    [INIT; COW_LOCK_STRIPES]
+};
+
+fn cow_frame_lock(phys_addr: u64) -> spin::MutexGuard<'static, ()> {
+    let pfn = (phys_addr / PAGE_SIZE) as usize;
+    let index = (pfn ^ (pfn >> 10)) % COW_LOCK_STRIPES;
+    COW_LOCKS[index].lock()
+}
+
 /// Resolve a write fault to a Copy-On-Write page in the specified address space.
 /// Returns Ok(true) if the fault was a valid COW page and was resolved, Ok(false)
 /// if the page was not a COW page, or an error.
@@ -288,6 +300,16 @@ pub fn resolve_cow_page(space: AddressSpace, virtual_address: u64) -> Result<boo
     }
 
     let old_phys = entry & ADDRESS_MASK;
+
+    // Acquire per-frame lock to serialize concurrent COW resolutions on this physical frame.
+    let _guard = cow_frame_lock(old_phys);
+
+    // Re-read PTE under lock: another thread in the same address space may have already resolved it.
+    let entry = read_entry(location.table_phys, location.index).ok_or(MapError::NoHhdm)?;
+    if entry & PRESENT == 0 || entry & MAP_COW == 0 {
+        return Ok(true);
+    }
+
     let refcount = memory::frame_refcount(memory::PhysFrame(old_phys));
 
     if refcount <= 1 {
@@ -314,7 +336,7 @@ pub fn resolve_cow_page(space: AddressSpace, virtual_address: u64) -> Result<boo
         );
     }
 
-    // Decrement the reference count on the shared frame
+    // Decrement the reference count on the shared frame while holding the frame lock
     let _ = memory::frame_ref_dec(memory::PhysFrame(old_phys));
 
     // Update the PTE to point to the new frame with write permission, clearing COW

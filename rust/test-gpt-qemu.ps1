@@ -146,6 +146,7 @@ $common = @(
     "[linux-fork] COW fork and waitpid verified",
     "[fault] user task killed by SIGSEGV",
     "[linux-fork] invalid memory access SIGSEGV termination verified",
+    "[linux-fork] concurrent COW race 50-iteration test verified",
     "[linux-fork] stack auto-expansion verified",
     "[linux-fork] anonymous demand paging verified",
     "[linux-epoll] epoll and eventfd multiplexing verified",

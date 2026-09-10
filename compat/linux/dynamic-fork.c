@@ -6,6 +6,7 @@
 #include <stdlib.h>
 
 static int shared_val = 100;
+static volatile int cow_race_target[1024];
 
 static __attribute__((noinline)) int recurse_stack(int depth, int acc) {
     volatile char frame_buf[4096];
@@ -84,6 +85,69 @@ int main(void) {
         printf("[linux-fork] invalid memory test unexpected: w=%d status=%d\n", (int)bad_w, WEXITSTATUS(bad_status));
         return 31;
     }
+
+    // Phase 2c: Concurrent COW resolution race test (50 iterations)
+    // Synchronizes parent and child to write to the same shared COW page simultaneously
+    for (int iter = 0; iter < 50; iter++) {
+        cow_race_target[0] = 0x12340000 + iter;
+        cow_race_target[1023] = 0x56780000 + iter;
+
+        int sync_pipe[2];
+        if (pipe(sync_pipe) < 0) {
+            printf("[linux-fork] sync pipe failed at iter %d\n", iter);
+            return 40;
+        }
+
+        pid_t p = fork();
+        if (p < 0) {
+            printf("[linux-fork] concurrent fork failed at iter %d\n", iter);
+            return 41;
+        }
+
+        if (p == 0) {
+            // Child: close write end, wait for parent release token
+            close(sync_pipe[1]);
+            char token = 0;
+            if (read(sync_pipe[0], &token, 1) != 1) {
+                _exit(1);
+            }
+            close(sync_pipe[0]);
+
+            // Immediately write to the shared COW page
+            cow_race_target[0] = 0xCCCC0000 + iter;
+            cow_race_target[1023] = 0xDDDD0000 + iter;
+
+            // Verify child view is private and correctly updated
+            if (cow_race_target[0] != (0xCCCC0000 + iter) || cow_race_target[1023] != (0xDDDD0000 + iter)) {
+                _exit(2);
+            }
+            _exit(0);
+        } else {
+            // Parent: close read end
+            close(sync_pipe[0]);
+
+            // Release child and immediately write to the same shared COW page
+            write(sync_pipe[1], "G", 1);
+            close(sync_pipe[1]);
+
+            cow_race_target[0] = 0xAAAA0000 + iter;
+            cow_race_target[1023] = 0xBBBB0000 + iter;
+
+            int status = 0;
+            pid_t w = waitpid(p, &status, 0);
+            if (w != p || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                printf("[linux-fork] concurrent COW race failed at iter %d: w=%d status=%d\n", iter, (int)w, WEXITSTATUS(status));
+                return 42;
+            }
+
+            // Verify parent view was not corrupted by child
+            if (cow_race_target[0] != (0xAAAA0000 + iter) || cow_race_target[1023] != (0xBBBB0000 + iter)) {
+                printf("[linux-fork] concurrent COW race corrupted parent memory at iter %d\n", iter);
+                return 43;
+            }
+        }
+    }
+    printf("[linux-fork] concurrent COW race 50-iteration test verified\n");
 
     // Phase 3: Stack auto-expansion beyond initial 64KB stack limit
     int stack_res = recurse_stack(48, 0);
