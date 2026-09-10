@@ -112,6 +112,28 @@ pub enum LinuxOp {
     GetPriority,
     SetPriority,
     Sysinfo,
+    PRead64,
+    PWrite64,
+    SendFile,
+    Truncate,
+    FTruncate,
+    StatFs,
+    FStatFs,
+    SymLink,
+    SymLinkAt,
+    RtSigSuspend,
+    RtSigPending,
+    SignalFd4,
+    WaitId,
+    Chmod,
+    FChmodAt,
+    Chown,
+    FChownAt,
+    UtimensAt,
+    MkDir,
+    MkDirAt,
+    Unlink,
+    UnlinkAt,
     Unsupported(u64),
 }
 
@@ -243,6 +265,46 @@ pub struct LinuxSigAction {
 #[allow(non_camel_case_types)]
 pub type rt_sigaction = LinuxSigAction;
 
+pub const SS_ONSTACK: i32 = 1;
+pub const SS_DISABLE: i32 = 2;
+pub const MINSIGSTKSZ: u64 = 2048;
+
+pub const SFD_CLOEXEC: u32 = 0x00080000;
+pub const SFD_NONBLOCK: u32 = 0x00000800;
+
+pub const P_ALL: u64 = 0;
+pub const P_PID: u64 = 1;
+pub const P_PGID: u64 = 2;
+
+pub const WNOHANG: u64 = 1;
+pub const WSTOPPED: u64 = 2;
+pub const WEXITED: u64 = 4;
+pub const WCONTINUED: u64 = 8;
+pub const WNOWAIT: u64 = 0x01000000;
+
+pub const CLD_EXITED: i32 = 1;
+pub const CLD_KILLED: i32 = 2;
+pub const CLD_DUMPED: i32 = 3;
+pub const CLD_TRAPPED: i32 = 4;
+pub const CLD_STOPPED: i32 = 5;
+pub const CLD_CONTINUED: i32 = 6;
+
+pub const PR_SET_PDEATHSIG: u64 = 1;
+pub const PR_GET_PDEATHSIG: u64 = 2;
+pub const PR_SET_NAME: u64 = 15;
+pub const PR_GET_NAME: u64 = 16;
+
+pub const RLIMIT_CPU: u64 = 0;
+pub const RLIMIT_FSIZE: u64 = 1;
+pub const RLIMIT_DATA: u64 = 2;
+pub const RLIMIT_STACK: u64 = 3;
+pub const RLIMIT_CORE: u64 = 4;
+pub const RLIMIT_RSS: u64 = 5;
+pub const RLIMIT_NPROC: u64 = 6;
+pub const RLIMIT_NOFILE: u64 = 7;
+pub const RLIMIT_MEMLOCK: u64 = 8;
+pub const RLIMIT_AS: u64 = 9;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SigAltStack {
@@ -250,6 +312,50 @@ pub struct SigAltStack {
     pub ss_flags: i32,
     pub _pad: i32,
     pub ss_size: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct signalfd_siginfo {
+    pub ssi_signo: u32,
+    pub ssi_errno: i32,
+    pub ssi_code: i32,
+    pub ssi_pid: u32,
+    pub ssi_uid: u32,
+    pub ssi_fd: i32,
+    pub ssi_tid: u32,
+    pub ssi_band: u32,
+    pub ssi_overrun: u32,
+    pub ssi_trapno: u32,
+    pub ssi_status: i32,
+    pub ssi_int: i32,
+    pub ssi_ptr: u64,
+    pub ssi_utime: u64,
+    pub ssi_stime: u64,
+    pub ssi_addr: u64,
+    pub ssi_addr_lsb: u16,
+    pub _pad2: u16,
+    pub ssi_syscall: i32,
+    pub ssi_call_addr: u64,
+    pub ssi_arch: u32,
+    pub _pad: [u8; 28],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct statfs {
+    pub f_type: u64,
+    pub f_bsize: u64,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    pub f_bavail: u64,
+    pub f_files: u64,
+    pub f_ffree: u64,
+    pub f_fsid: [i32; 2],
+    pub f_namelen: u64,
+    pub f_frsize: u64,
+    pub f_flags: u64,
+    pub f_spare: [u64; 4],
 }
 
 #[repr(C, packed)]
@@ -408,6 +514,8 @@ pub fn translate(number: u64) -> Result<Translation, UnsupportedSyscall> {
         14 => (LinuxOp::RtSigProcMask, None),
         15 => (LinuxOp::RtSigReturn, None),
         16 => (LinuxOp::Ioctl, Some(Syscall::TtyIoctl)),
+        17 => (LinuxOp::PRead64, None),
+        18 => (LinuxOp::PWrite64, None),
         19 => (LinuxOp::Readv, None),
         20 => (LinuxOp::Writev, None),
         21 | 269 | 439 => (LinuxOp::Access, None),
@@ -422,6 +530,7 @@ pub fn translate(number: u64) -> Result<Translation, UnsupportedSyscall> {
         36 => (LinuxOp::GetITimer, None),
         38 => (LinuxOp::SetITimer, None),
         39 => (LinuxOp::GetPid, Some(Syscall::GetPid)),
+        40 => (LinuxOp::SendFile, None),
         41 => (LinuxOp::Socket, Some(Syscall::Socket)),
         42 => (LinuxOp::Connect, Some(Syscall::Connect)),
         43 | 288 => (LinuxOp::Accept, None),
@@ -442,12 +551,19 @@ pub fn translate(number: u64) -> Result<Translation, UnsupportedSyscall> {
         62 => (LinuxOp::Kill, Some(Syscall::Kill)),
         63 => (LinuxOp::Uname, None),
         72 => (LinuxOp::Fcntl, None),
+        76 => (LinuxOp::Truncate, None),
+        77 => (LinuxOp::FTruncate, None),
         78 => (LinuxOp::GetDents, Some(Syscall::GetDents)),
         213 => (LinuxOp::EPollCreate, None),
         217 => (LinuxOp::GetDents64, Some(Syscall::GetDents)),
         79 => (LinuxOp::GetCwd, None),
         80 | 81 => (LinuxOp::ChDir, None),
-        89 | 267 => (LinuxOp::ReadLink, None),
+        83 => (LinuxOp::MkDir, None),
+        87 => (LinuxOp::Unlink, None),
+        88 => (LinuxOp::SymLink, None),
+        89 => (LinuxOp::ReadLink, None),
+        90 => (LinuxOp::Chmod, None),
+        92 => (LinuxOp::Chown, None),
         96 => (LinuxOp::GetTimeOfDay, None),
         97 => (LinuxOp::Prlimit64, None),
         99 => (LinuxOp::Sysinfo, None),
@@ -464,9 +580,12 @@ pub fn translate(number: u64) -> Result<Translation, UnsupportedSyscall> {
         124 => (LinuxOp::GetSid, None),
         125 => (LinuxOp::GetUid, None),
         126 => (LinuxOp::SetUid, None),
-        130 => (LinuxOp::Nanosleep, None),
+        127 => (LinuxOp::RtSigPending, None),
+        130 => (LinuxOp::RtSigSuspend, None),
         131 => (LinuxOp::SigAltStack, None),
         135 => (LinuxOp::Personality, None),
+        137 => (LinuxOp::StatFs, None),
+        138 => (LinuxOp::FStatFs, None),
         140 => (LinuxOp::GetPriority, None),
         141 => (LinuxOp::SetPriority, None),
         157 => (LinuxOp::Prctl, None),
@@ -484,11 +603,20 @@ pub fn translate(number: u64) -> Result<Translation, UnsupportedSyscall> {
         232 => (LinuxOp::EPollWait, None),
         233 => (LinuxOp::EPollCtl, None),
         234 => (LinuxOp::TgKill, None),
+        247 => (LinuxOp::WaitId, None),
+        258 => (LinuxOp::MkDirAt, None),
+        260 => (LinuxOp::FChownAt, None),
+        263 => (LinuxOp::UnlinkAt, None),
+        266 => (LinuxOp::SymLinkAt, None),
+        267 => (LinuxOp::ReadLinkAt, None),
+        268 => (LinuxOp::FChmodAt, None),
         270 => (LinuxOp::PSelect6, None),
         271 => (LinuxOp::PPoll, None),
         273 => (LinuxOp::SetRobustList, None),
+        280 => (LinuxOp::UtimensAt, None),
         281 => (LinuxOp::EPollPWait, None),
         284 => (LinuxOp::EventFd, None),
+        289 => (LinuxOp::SignalFd4, None),
         290 => (LinuxOp::EventFd2, None),
         291 => (LinuxOp::EPollCreate1, None),
         318 => (LinuxOp::GetRandom, None),

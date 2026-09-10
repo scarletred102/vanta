@@ -675,6 +675,19 @@ pub fn list_dir_root(path: &str) -> Result<Vec<String>, VfsError> {
 }
 
 pub fn list_dir_root_as(path: &str, credentials: &Credentials) -> Result<Vec<String>, VfsError> {
+    if path == "/tmp" || path == "/tmp/" {
+        let mut tmp = TMP.lock();
+        return tmp.as_mut().ok_or(VfsError::NotMounted)?.list_files();
+    }
+    if let Some(sub) = tmp_path(path) {
+        let mut tmp = TMP.lock();
+        let tmp = tmp.as_mut().ok_or(VfsError::NotMounted)?;
+        let info = tmp.file_info(sub)?;
+        if !info.is_directory {
+            return Err(VfsError::InvalidFormat);
+        }
+        return tmp.list_files();
+    }
     if let Some(root) = REDOX_ROOT.lock().as_mut() {
         return root
             .list_dir_as(path, credentials)

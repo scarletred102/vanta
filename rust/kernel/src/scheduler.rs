@@ -163,6 +163,11 @@ struct Task {
     clear_child_tid: u64,
     pgid: u64,
     sid: u64,
+    cwd: Arc<Mutex<alloc::string::String>>,
+    sigaltstack: vanta_linuxd::SigAltStack,
+    comm: [u8; 16],
+    pdeath_signal: u64,
+    rlimits: [u64; 32],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -195,6 +200,7 @@ enum DescriptorResource {
     Ipc(Arc<Mutex<IpcEndpoint>>),
     Epoll(Arc<Mutex<EpollInstance>>),
     EventFd(Arc<Mutex<EventFdInstance>>),
+    SignalFd(Arc<Mutex<SignalFdState>>),
     PtyMaster(Arc<Mutex<PtyState>>),
     PtySlave(Arc<Mutex<PtyState>>),
 }
@@ -211,6 +217,11 @@ pub struct EpollInstance {
 
 pub struct EventFdInstance {
     pub counter: u64,
+    pub flags: u32,
+}
+
+pub struct SignalFdState {
+    pub mask: u64,
     pub flags: u32,
 }
 
@@ -233,6 +244,7 @@ struct OpenFile {
 }
 
 struct OpenDirectory {
+    path: String,
     entries: Vec<String>,
     offset: usize,
 }
@@ -1249,6 +1261,14 @@ pub fn current_blocked_mask() -> u64 {
     scheduler.tasks[scheduler.current].blocked_mask
 }
 
+pub fn current_pending_signals() -> u64 {
+    let scheduler = current_scheduler().lock();
+    let Some(scheduler) = scheduler.as_ref() else {
+        return 0;
+    };
+    scheduler.tasks[scheduler.current].pending_signals
+}
+
 pub fn set_current_blocked_mask(mask: u64) {
     let mut scheduler = current_scheduler().lock();
     let Some(scheduler) = scheduler.as_mut() else {
@@ -1257,14 +1277,6 @@ pub fn set_current_blocked_mask(mask: u64) {
     scheduler.tasks[scheduler.current].blocked_mask = mask & !UNBLOCKABLE_SIGNALS_MASK;
 }
 
-#[allow(dead_code)]
-pub fn current_pending_signals() -> u64 {
-    let scheduler = current_scheduler().lock();
-    let Some(scheduler) = scheduler.as_ref() else {
-        return 0;
-    };
-    scheduler.tasks[scheduler.current].pending_signals
-}
 
 pub fn signal_action(signal: u64) -> Option<LinuxSigAction> {
     let scheduler = current_scheduler().lock();
@@ -1373,8 +1385,10 @@ pub fn kill_process(pid: u64, signal: u64) -> Result<(), ()> {
         let default_act = default_signal_action(signal);
         let first_idx = matching_indices[0];
         let action = scheduler.tasks[first_idx].signal_actions.lock()[signal as usize];
+        let sig_bit = 1u64 << (signal - 1);
+        let is_blocked = (scheduler.tasks[first_idx].blocked_mask & sig_bit != 0) && (signal != 9 && signal != 19);
 
-        if signal == 9 || (action.sa_handler == 0 && (default_act == SignalDefaultAction::Terminate || default_act == SignalDefaultAction::CoreDump)) {
+        if (signal == 9 || (action.sa_handler == 0 && (default_act == SignalDefaultAction::Terminate || default_act == SignalDefaultAction::CoreDump))) && !is_blocked {
             let parent_pid = scheduler.tasks[first_idx].parent_pid;
             if parent_to_wake.is_none() {
                 parent_to_wake = parent_pid;
@@ -1404,12 +1418,12 @@ pub fn kill_process(pid: u64, signal: u64) -> Result<(), ()> {
             if FOREGROUND_PID.load(AtomicOrdering::Relaxed) == target_tgid {
                 FOREGROUND_PID.store(0, AtomicOrdering::Relaxed);
             }
-        } else if action.sa_handler == 1 || (action.sa_handler == 0 && default_act == SignalDefaultAction::Ignore) {
+        } else if (action.sa_handler == 1 || (action.sa_handler == 0 && default_act == SignalDefaultAction::Ignore)) && !is_blocked {
             // Signal ignored
         } else {
             let target = &mut scheduler.tasks[first_idx];
-            target.pending_signals |= 1 << (signal - 1);
-            if matches!(target.state, TaskState::PipeWaiting { .. } | TaskState::FutexWait { .. } | TaskState::Sleeping { .. }) {
+            target.pending_signals |= sig_bit;
+            if !is_blocked && matches!(target.state, TaskState::PipeWaiting { .. } | TaskState::FutexWait { .. } | TaskState::Sleeping { .. }) {
                 if let TaskState::Sleeping { target_tick, rem_ptr } = target.state {
                     crate::timer::cancel_sleep_timer(target.tid);
                     if rem_ptr != 0 {
@@ -1766,6 +1780,12 @@ pub fn clone_task_current(
     let child_credentials = parent_task.credentials;
     let blocked_mask = parent_task.blocked_mask;
 
+    let child_cwd = if flags & vanta_linuxd::CLONE_FS != 0 {
+        Arc::clone(&parent_task.cwd)
+    } else {
+        Arc::new(Mutex::new(parent_task.cwd.lock().clone()))
+    };
+
     let child_task = Task {
         tid: child_tid,
         tgid: child_tgid,
@@ -1786,6 +1806,11 @@ pub fn clone_task_current(
         clear_child_tid: child_clear_child_tid,
         pgid: parent_task.pgid,
         sid: parent_task.sid,
+        cwd: child_cwd,
+        sigaltstack: parent_task.sigaltstack,
+        comm: parent_task.comm,
+        pdeath_signal: 0,
+        rlimits: parent_task.rlimits,
     };
 
     let space = parent_process_arc.lock().address_space();
@@ -2248,6 +2273,11 @@ fn new_task(
     let entry = process.entry();
     let stack_top = process.user_stack_top();
     let priority = if tgid <= 2 { PRIO_INTERACTIVE_MIN } else { PRIO_NORMAL_MIN };
+    let mut rlimits = [u64::MAX; 32];
+    rlimits[vanta_linuxd::RLIMIT_NOFILE as usize * 2] = 1024;
+    rlimits[vanta_linuxd::RLIMIT_NOFILE as usize * 2 + 1] = 4096;
+    rlimits[vanta_linuxd::RLIMIT_STACK as usize * 2] = 8 * 1024 * 1024;
+    rlimits[vanta_linuxd::RLIMIT_STACK as usize * 2 + 1] = 8 * 1024 * 1024;
     Task {
         tid,
         tgid,
@@ -2287,6 +2317,11 @@ fn new_task(
         clear_child_tid: 0,
         pgid: tgid,
         sid: tgid,
+        cwd: Arc::new(Mutex::new(alloc::string::String::from("/home/vanta"))),
+        sigaltstack: vanta_linuxd::SigAltStack { ss_sp: 0, ss_flags: vanta_linuxd::SS_DISABLE, _pad: 0, ss_size: 0 },
+        comm: *b"vanta-app\0\0\0\0\0\0\0",
+        pdeath_signal: 0,
+        rlimits,
     }
 }
 
@@ -2348,7 +2383,7 @@ pub fn open_native_current(
     )
 }
 
-pub fn open_directory_current(entries: Vec<String>) -> Result<u64, ()> {
+pub fn open_directory_current(path: String, entries: Vec<String>) -> Result<u64, ()> {
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
     let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
@@ -2358,6 +2393,7 @@ pub fn open_directory_current(entries: Vec<String>) -> Result<u64, ()> {
             capability: allocate_capability(),
             rights: Rights::READ | Rights::TRANSFER,
             resource: DescriptorResource::Directory(Arc::new(Mutex::new(OpenDirectory {
+                path,
                 entries,
                 offset: 0,
             }))),
@@ -2456,6 +2492,7 @@ pub fn stat_linux_current(descriptor: u64) -> Result<[u8; 144], ()> {
             (0o010600u32, 0i64, false)
         }
         DescriptorResource::PtyMaster(_) | DescriptorResource::PtySlave(_) => (0o020666u32, 0i64, true),
+        DescriptorResource::SignalFd(_) => (0o010600u32, 0i64, false),
     };
     let dev = 1u64;
     let ino = 1u64;
@@ -2795,6 +2832,19 @@ pub fn read_current(descriptor: u64, length: usize) -> Result<Vec<u8>, ()> {
             };
             Ok(val.to_ne_bytes().to_vec())
         }
+        DescriptorResource::SignalFd(sfd) => {
+            let sfd = sfd.lock();
+            let mask = sfd.mask;
+            drop(sfd);
+            if let Some(info) = pop_matching_signal_current(mask) {
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(&info as *const _ as *const u8, core::mem::size_of::<vanta_linuxd::signalfd_siginfo>())
+                };
+                Ok(bytes.to_vec())
+            } else {
+                Err(())
+            }
+        }
         DescriptorResource::PtyMaster(pty) => {
             let mut pty = pty.lock();
             let count = pty.slave_to_master.len().min(length);
@@ -2863,7 +2913,8 @@ pub fn close_current(descriptor: u64) -> Result<(), ()> {
         | DescriptorResource::Epoll(_)
         | DescriptorResource::EventFd(_)
         | DescriptorResource::PtyMaster(_)
-        | DescriptorResource::PtySlave(_) => {}
+        | DescriptorResource::PtySlave(_)
+        | DescriptorResource::SignalFd(_) => {}
     }
     Ok(())
 }
@@ -2896,7 +2947,10 @@ pub fn write_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
                 return Err(());
             }
             let offset = file.offset;
-            let end = offset.checked_add(bytes.len()).ok_or(())?;
+            if offset > file.contents.len() {
+                file.contents.resize(offset, 0);
+            }
+            let end = offset.saturating_add(bytes.len());
             if end > file.contents.len() {
                 file.contents.resize(end, 0);
             }
@@ -2905,15 +2959,19 @@ pub fn write_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
             let credentials = current_credentials();
             crate::vfs::write_root_as(&file.path, &file.contents, &credentials).map_err(|_| ())
         }
-        DescriptorResource::EventFd(efd) => {
+        DescriptorResource::EventFd(eventfd) => {
             if bytes.len() < 8 {
                 return Err(());
             }
-            let mut val_bytes = [0u8; 8];
-            val_bytes.copy_from_slice(&bytes[..8]);
-            let val = u64::from_ne_bytes(val_bytes);
-            let mut efd = efd.lock();
-            efd.counter = efd.counter.saturating_add(val);
+            let val = u64::from_ne_bytes(bytes[0..8].try_into().map_err(|_| ())?);
+            if val == u64::MAX {
+                return Err(());
+            }
+            let mut state = eventfd.lock();
+            if u64::MAX - 1 - state.counter < val {
+                return Err(());
+            }
+            state.counter += val;
             Ok(())
         }
         DescriptorResource::PtyMaster(pty) => {
@@ -2926,8 +2984,11 @@ pub fn write_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
             pty.slave_to_master.extend_from_slice(bytes);
             Ok(())
         }
-        DescriptorResource::Directory(_) | DescriptorResource::PipeRead(_) | DescriptorResource::Epoll(_) => Err(()),
-        DescriptorResource::Ipc(_) => Err(()),
+        DescriptorResource::Directory(_)
+        | DescriptorResource::PipeRead(_)
+        | DescriptorResource::Epoll(_)
+        | DescriptorResource::SignalFd(_)
+        | DescriptorResource::Ipc(_) => Err(()),
     }
 }
 
@@ -3125,5 +3186,282 @@ fn task_count() -> usize {
         .as_ref()
         .map(|scheduler| scheduler.tasks.len())
         .unwrap_or(0)
+}
+
+pub fn pop_matching_signal_current(mask: u64) -> Option<vanta_linuxd::signalfd_siginfo> {
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut()?;
+    let task = &mut scheduler.tasks[scheduler.current];
+    let matching = task.pending_signals & mask;
+    if matching == 0 {
+        return None;
+    }
+    let sig = matching.trailing_zeros() as u32 + 1;
+    task.pending_signals &= !(1 << (sig - 1));
+    let mut info = vanta_linuxd::signalfd_siginfo::default();
+    info.ssi_signo = sig;
+    info.ssi_pid = task.tgid as u32;
+    info.ssi_uid = task.credentials.uid;
+    Some(info)
+}
+
+pub fn open_signalfd_current(mask: u64, flags: u32) -> Result<u64, ()> {
+    let sfd = Arc::new(Mutex::new(SignalFdState { mask, flags }));
+    let descriptor = FileDescriptor {
+        capability: allocate_capability(),
+        rights: Rights::READ | Rights::TRANSFER,
+        resource: DescriptorResource::SignalFd(sfd),
+    };
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
+    install_descriptor(&mut descriptors, descriptor)
+}
+
+pub fn descriptor_dir_path(descriptor: u64) -> Result<String, ()> {
+    let desc = current_descriptor(descriptor)?;
+    match desc.resource {
+        DescriptorResource::Directory(ref d) => Ok(d.lock().path.clone()),
+        DescriptorResource::File(ref f) => Ok(f.lock().path.clone()),
+        _ => Err(()),
+    }
+}
+
+pub const AT_FDCWD: u64 = 0xffff_ffff_ffff_ff9c;
+
+pub fn current_cwd() -> alloc::string::String {
+    let scheduler = current_scheduler().lock();
+    let Some(scheduler) = scheduler.as_ref() else {
+        return alloc::string::String::from("/home/vanta");
+    };
+    let path = scheduler.tasks[scheduler.current].cwd.lock().clone();
+    path
+}
+
+pub fn set_current_cwd(new_cwd: alloc::string::String) {
+    let scheduler = current_scheduler().lock();
+    if let Some(scheduler) = scheduler.as_ref() {
+        *scheduler.tasks[scheduler.current].cwd.lock() = new_cwd;
+    }
+}
+
+pub fn canonicalize_path(base: &str, relative: &str) -> alloc::string::String {
+    let mut full = alloc::string::String::new();
+    if relative.starts_with('/') {
+        full.push_str(relative);
+    } else {
+        full.push_str(base);
+        if !full.ends_with('/') {
+            full.push('/');
+        }
+        full.push_str(relative);
+    }
+    let mut parts: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+    for part in full.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        } else if part == ".." {
+            parts.pop();
+        } else {
+            parts.push(part);
+        }
+    }
+    if parts.is_empty() {
+        return alloc::string::String::from("/");
+    }
+    let mut res = alloc::string::String::new();
+    for part in parts {
+        res.push('/');
+        res.push_str(part);
+    }
+    res
+}
+
+pub fn chdir_current(path: &str) -> Result<(), ()> {
+    let cur = current_cwd();
+    let target = canonicalize_path(&cur, path);
+    if target == "/" || target == "/tmp" || target.starts_with("/tmp/") || crate::vfs::list_dir_root(&target).is_ok() {
+        set_current_cwd(target);
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+pub fn fchdir_current(descriptor: u64) -> Result<(), ()> {
+    let desc = current_descriptor(descriptor)?;
+    match desc.resource {
+        DescriptorResource::Directory(ref dir) => {
+            let path = dir.lock().path.clone();
+            set_current_cwd(path);
+            Ok(())
+        }
+        DescriptorResource::File(ref file) => {
+            let path = file.lock().path.clone();
+            if crate::vfs::list_dir_root(&path).is_ok() {
+                set_current_cwd(path);
+                Ok(())
+            } else {
+                Err(())
+            }
+        }
+        _ => Err(()),
+    }
+}
+
+pub fn current_sigaltstack() -> vanta_linuxd::SigAltStack {
+    let scheduler = current_scheduler().lock();
+    let Some(scheduler) = scheduler.as_ref() else {
+        return vanta_linuxd::SigAltStack::default();
+    };
+    scheduler.tasks[scheduler.current].sigaltstack
+}
+
+pub fn set_current_sigaltstack(ss: vanta_linuxd::SigAltStack) {
+    let mut scheduler = current_scheduler().lock();
+    if let Some(scheduler) = scheduler.as_mut() {
+        scheduler.tasks[scheduler.current].sigaltstack = ss;
+    }
+}
+
+pub fn current_comm() -> [u8; 16] {
+    let scheduler = current_scheduler().lock();
+    let Some(scheduler) = scheduler.as_ref() else {
+        return [0; 16];
+    };
+    scheduler.tasks[scheduler.current].comm
+}
+
+pub fn set_current_comm(comm: [u8; 16]) {
+    let mut scheduler = current_scheduler().lock();
+    if let Some(scheduler) = scheduler.as_mut() {
+        scheduler.tasks[scheduler.current].comm = comm;
+    }
+}
+
+pub fn current_pdeath_signal() -> u64 {
+    let scheduler = current_scheduler().lock();
+    let Some(scheduler) = scheduler.as_ref() else {
+        return 0;
+    };
+    scheduler.tasks[scheduler.current].pdeath_signal
+}
+
+pub fn set_current_pdeath_signal(sig: u64) {
+    let mut scheduler = current_scheduler().lock();
+    if let Some(scheduler) = scheduler.as_mut() {
+        scheduler.tasks[scheduler.current].pdeath_signal = sig;
+    }
+}
+
+pub fn current_rlimits(resource: usize) -> (u64, u64) {
+    let scheduler = current_scheduler().lock();
+    let Some(scheduler) = scheduler.as_ref() else {
+        return (u64::MAX, u64::MAX);
+    };
+    if resource < 16 {
+        (
+            scheduler.tasks[scheduler.current].rlimits[resource * 2],
+            scheduler.tasks[scheduler.current].rlimits[resource * 2 + 1],
+        )
+    } else {
+        (u64::MAX, u64::MAX)
+    }
+}
+
+pub fn set_current_rlimits(resource: usize, soft: u64, hard: u64) -> Result<(), ()> {
+    let mut scheduler = current_scheduler().lock();
+    let Some(scheduler) = scheduler.as_mut() else {
+        return Err(());
+    };
+    if resource < 16 {
+        scheduler.tasks[scheduler.current].rlimits[resource * 2] = soft;
+        scheduler.tasks[scheduler.current].rlimits[resource * 2 + 1] = hard;
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+pub fn pread_current(descriptor: u64, length: usize, offset: u64) -> Result<Vec<u8>, ()> {
+    let desc = current_descriptor(descriptor)?;
+    if !desc.rights.contains(Rights::READ) {
+        return Err(());
+    }
+    match desc.resource {
+        DescriptorResource::File(file) => {
+            let file = file.lock();
+            let start = (offset as usize).min(file.contents.len());
+            let end = start.saturating_add(length).min(file.contents.len());
+            Ok(file.contents[start..end].to_vec())
+        }
+        _ => Err(()),
+    }
+}
+
+pub fn pwrite_current(descriptor: u64, bytes: &[u8], offset: u64) -> Result<usize, ()> {
+    let desc = current_descriptor(descriptor)?;
+    if !desc.rights.contains(Rights::WRITE) {
+        return Err(());
+    }
+    match desc.resource {
+        DescriptorResource::File(file) => {
+            let mut file = file.lock();
+            if !file.writable {
+                return Err(());
+            }
+            let start = offset as usize;
+            let end = start.checked_add(bytes.len()).ok_or(())?;
+            if end > file.contents.len() {
+                file.contents.resize(end, 0);
+            }
+            file.contents[start..end].copy_from_slice(bytes);
+            let credentials = current_credentials();
+            let _ = crate::vfs::write_root_as(&file.path, &file.contents, &credentials);
+            Ok(bytes.len())
+        }
+        _ => Err(()),
+    }
+}
+
+pub fn truncate_current(descriptor: u64, length: u64) -> Result<(), ()> {
+    let desc = current_descriptor(descriptor)?;
+    if !desc.rights.contains(Rights::WRITE) {
+        return Err(());
+    }
+    match desc.resource {
+        DescriptorResource::File(file) => {
+            let mut file = file.lock();
+            if !file.writable {
+                return Err(());
+            }
+            file.contents.resize(length as usize, 0);
+            let credentials = current_credentials();
+            crate::vfs::write_root_as(&file.path, &file.contents, &credentials).map_err(|_| ())
+        }
+        _ => Err(()),
+    }
+}
+
+pub fn set_current_uid(uid: u32) -> Result<(), ()> {
+    let mut scheduler = current_scheduler().lock();
+    let Some(scheduler) = scheduler.as_mut() else { return Err(()); };
+    scheduler.tasks[scheduler.current].credentials.uid = uid;
+    Ok(())
+}
+
+pub fn set_current_gid(gid: u32) -> Result<(), ()> {
+    let mut scheduler = current_scheduler().lock();
+    let Some(scheduler) = scheduler.as_mut() else { return Err(()); };
+    scheduler.tasks[scheduler.current].credentials.gid = gid;
+    Ok(())
+}
+
+pub fn yield_current_no_context() -> Result<(), ()> {
+    // A quick cooperative yield
+    let mut scheduler = current_scheduler().lock();
+    let Some(scheduler) = scheduler.as_mut() else { return Err(()); };
+    scheduler.slice_ticks = u64::MAX; // expire current slice
+    Ok(())
 }
 

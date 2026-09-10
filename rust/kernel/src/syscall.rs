@@ -540,18 +540,15 @@ fn dispatch_linux(
             vanta_linuxd::LinuxOp::GetPGrp => {
                 crate::scheduler::getpgid_task(arg1).unwrap_or(SYSCALL_ERROR)
             }
-            vanta_linuxd::LinuxOp::SetUid | vanta_linuxd::LinuxOp::SetGid => 0,
-            vanta_linuxd::LinuxOp::SetGroups | vanta_linuxd::LinuxOp::GetGroups => 0,
-            vanta_linuxd::LinuxOp::Prctl | vanta_linuxd::LinuxOp::Personality => 0,
-            vanta_linuxd::LinuxOp::Prlimit64 => {
-                if arg4 != 0 {
-                    let limits = [u64::MAX, u64::MAX];
-                    let _ = copy_to_user(arg4, unsafe {
-                        core::slice::from_raw_parts(limits.as_ptr() as *const u8, 16)
-                    });
-                }
-                0
+            vanta_linuxd::LinuxOp::SetUid => {
+                if crate::scheduler::set_current_uid(arg1 as u32).is_ok() { 0 } else { SYSCALL_ERROR }
             }
+            vanta_linuxd::LinuxOp::SetGid => {
+                if crate::scheduler::set_current_gid(arg1 as u32).is_ok() { 0 } else { SYSCALL_ERROR }
+            }
+            vanta_linuxd::LinuxOp::SetGroups | vanta_linuxd::LinuxOp::GetGroups | vanta_linuxd::LinuxOp::Personality => 0,
+            vanta_linuxd::LinuxOp::Prctl => linux_prctl_user(arg1, arg2, arg3, arg4, arg5),
+            vanta_linuxd::LinuxOp::Prlimit64 => linux_prlimit64_user(arg1, arg2, arg3, arg4),
             vanta_linuxd::LinuxOp::SetSid => {
                 crate::scheduler::setsid_current()
             }
@@ -609,8 +606,8 @@ fn dispatch_linux(
                 }
             }
             vanta_linuxd::LinuxOp::SetRobustList
-            | vanta_linuxd::LinuxOp::Rseq
-            | vanta_linuxd::LinuxOp::SigAltStack => 0,
+            | vanta_linuxd::LinuxOp::Rseq => 0,
+            vanta_linuxd::LinuxOp::SigAltStack => linux_sigaltstack_user(arg1, arg2),
             vanta_linuxd::LinuxOp::GetRandom => {
                 let count = arg2.min(256);
                 let bytes = [0x5au8; 256];
@@ -632,8 +629,32 @@ fn dispatch_linux(
             }
             vanta_linuxd::LinuxOp::Uname => linux_uname_user(arg1),
             vanta_linuxd::LinuxOp::GetCwd => linux_getcwd_user(arg1, arg2),
-            vanta_linuxd::LinuxOp::ChDir | vanta_linuxd::LinuxOp::FChDir => 0,
-            vanta_linuxd::LinuxOp::ReadLink | vanta_linuxd::LinuxOp::ReadLinkAt => SYSCALL_ERROR,
+            vanta_linuxd::LinuxOp::ChDir => linux_chdir_user(arg1),
+            vanta_linuxd::LinuxOp::FChDir => linux_fchdir_user(arg1),
+            vanta_linuxd::LinuxOp::ReadLink => linux_readlinkat_user(crate::scheduler::AT_FDCWD, arg1, arg2, arg3),
+            vanta_linuxd::LinuxOp::ReadLinkAt => linux_readlinkat_user(arg1, arg2, arg3, arg4),
+            vanta_linuxd::LinuxOp::SymLink => linux_symlinkat_user(arg1, crate::scheduler::AT_FDCWD, arg2),
+            vanta_linuxd::LinuxOp::SymLinkAt => linux_symlinkat_user(arg1, arg2, arg3),
+            vanta_linuxd::LinuxOp::PRead64 => linux_pread64_user(arg1, arg2, arg3, arg4),
+            vanta_linuxd::LinuxOp::PWrite64 => linux_pwrite64_user(arg1, arg2, arg3, arg4),
+            vanta_linuxd::LinuxOp::SendFile => linux_sendfile_user(arg1, arg2, arg3, arg4),
+            vanta_linuxd::LinuxOp::Truncate => linux_truncate_user(arg1, arg2),
+            vanta_linuxd::LinuxOp::FTruncate => linux_ftruncate_user(arg1, arg2),
+            vanta_linuxd::LinuxOp::StatFs => linux_statfs_user(arg1, arg2),
+            vanta_linuxd::LinuxOp::FStatFs => linux_fstatfs_user(arg1, arg2),
+            vanta_linuxd::LinuxOp::RtSigPending => linux_rt_sigpending_user(arg1, arg2),
+            vanta_linuxd::LinuxOp::RtSigSuspend => linux_rt_sigsuspend_user(arg1, arg2),
+            vanta_linuxd::LinuxOp::WaitId => linux_waitid_user(arg1, arg2, arg3, arg4),
+            vanta_linuxd::LinuxOp::SignalFd4 => linux_signalfd4_user(arg1, arg2, arg3, arg4),
+            vanta_linuxd::LinuxOp::Chmod => linux_fchmodat_user(crate::scheduler::AT_FDCWD, arg1, arg2),
+            vanta_linuxd::LinuxOp::FChmodAt => linux_fchmodat_user(arg1, arg2, arg3),
+            vanta_linuxd::LinuxOp::Chown => linux_fchownat_user(crate::scheduler::AT_FDCWD, arg1, arg2, arg3),
+            vanta_linuxd::LinuxOp::FChownAt => linux_fchownat_user(arg1, arg2, arg3, arg4),
+            vanta_linuxd::LinuxOp::UtimensAt => linux_utimensat_user(arg1, arg2, arg3, arg4),
+            vanta_linuxd::LinuxOp::MkDir => linux_mkdir_user(arg1, arg2),
+            vanta_linuxd::LinuxOp::MkDirAt => linux_mkdirat_user(arg1, arg2, arg3),
+            vanta_linuxd::LinuxOp::Unlink => linux_unlink_user(arg1),
+            vanta_linuxd::LinuxOp::UnlinkAt => linux_unlinkat_user(arg1, arg2, arg3),
             vanta_linuxd::LinuxOp::ClockGetTime => linux_clock_gettime_user(arg1, arg2),
             vanta_linuxd::LinuxOp::ClockSetTime => linux_clock_settime_user(arg1, arg2),
             vanta_linuxd::LinuxOp::ClockGetRes => linux_clock_getres_user(arg1, arg2),
@@ -851,13 +872,29 @@ fn generate_procfs_content(path: &str) -> Option<alloc::vec::Vec<u8>> {
     }
 }
 
-fn linux_openat_user(_directory_fd: u64, path_pointer: u64, flags: u64) -> u64 {
-    let Ok(path) = copy_cstring(path_pointer, 256) else {
+fn resolve_vfs_path(dirfd: u64, path: &str) -> alloc::string::String {
+    if path.starts_with('/') {
+        crate::scheduler::canonicalize_path("/", path)
+    } else if (dirfd as i64) == -100 || dirfd == (u64::MAX - 99) || dirfd == 0 {
+        let cwd = crate::scheduler::current_cwd();
+        crate::scheduler::canonicalize_path(&cwd, path)
+    } else if let Ok(dir_path) = crate::scheduler::descriptor_dir_path(dirfd) {
+        crate::scheduler::canonicalize_path(&dir_path, path)
+    } else {
+        let cwd = crate::scheduler::current_cwd();
+        crate::scheduler::canonicalize_path(&cwd, path)
+    }
+}
+
+fn linux_openat_user(directory_fd: u64, path_pointer: u64, flags: u64) -> u64 {
+    let Ok(path_bytes) = copy_cstring(path_pointer, 256) else {
         return SYSCALL_ERROR;
     };
-    let Ok(path) = core::str::from_utf8(&path) else {
+    let Ok(path_str) = core::str::from_utf8(&path_bytes) else {
         return SYSCALL_ERROR;
     };
+    let resolved = resolve_vfs_path(directory_fd, path_str);
+    let path = resolved.as_str();
     if path.starts_with("/proc/") || path.starts_with("/sys/") {
         if let Some(contents) = generate_procfs_content(path) {
             return crate::scheduler::open_native_current(
@@ -870,14 +907,39 @@ fn linux_openat_user(_directory_fd: u64, path_pointer: u64, flags: u64) -> u64 {
         }
     }
     if let Ok(entries) = crate::vfs::list_dir_root(path) {
-        return crate::scheduler::open_directory_current(entries).unwrap_or(SYSCALL_ERROR);
+        return crate::scheduler::open_directory_current(alloc::string::String::from(path), entries).unwrap_or(SYSCALL_ERROR);
     }
     let Ok(contents) = crate::vfs::read_root(path) else {
-        return SYSCALL_ERROR;
+        let writable = flags & 3 != 0;
+        let create = flags & 64 != 0;
+        if writable && create {
+            let contents = alloc::vec::Vec::new();
+            let credentials = crate::scheduler::current_credentials();
+            let _ = crate::vfs::write_root_as(path, &contents, &credentials);
+            return crate::scheduler::open_native_current(
+                alloc::string::String::from(path),
+                contents,
+                writable,
+                flags & 1024 != 0,
+            )
+            .unwrap_or(SYSCALL_ERROR);
+        }
+        return (-(2 as i64)) as u64; // ENOENT
+    };
+    let (contents, path) = if contents.starts_with(b"#symlink:") {
+        let symlink_target = core::str::from_utf8(&contents[9..]).unwrap_or("");
+        let target_resolved = resolve_vfs_path(u64::MAX - 99, symlink_target);
+        if let Ok(c) = crate::vfs::read_root(&target_resolved) {
+            (c, target_resolved)
+        } else {
+            (contents, alloc::string::String::from(path))
+        }
+    } else {
+        (contents, alloc::string::String::from(path))
     };
     let writable = flags & 3 != 0;
     crate::scheduler::open_native_current(
-        alloc::string::String::from(path),
+        path,
         contents,
         writable,
         flags & 1024 != 0,
@@ -896,12 +958,14 @@ fn linux_fstat_user(descriptor: u64, pointer: u64) -> u64 {
 }
 
 fn linux_stat_user(path_pointer: u64, pointer: u64) -> u64 {
-    let Ok(path) = copy_cstring(path_pointer, 256) else {
+    let Ok(path_bytes) = copy_cstring(path_pointer, 256) else {
         return SYSCALL_ERROR;
     };
-    let Ok(path) = core::str::from_utf8(&path) else {
+    let Ok(path_str) = core::str::from_utf8(&path_bytes) else {
         return SYSCALL_ERROR;
     };
+    let resolved = resolve_vfs_path(u64::MAX - 99, path_str);
+    let path = resolved.as_str();
     if path.starts_with("/proc/") || path.starts_with("/sys/") {
         let size = generate_procfs_content(path).map(|c| c.len() as i64).unwrap_or(64);
         let mut stat = [0u8; 144];
@@ -995,14 +1059,501 @@ fn linux_uname_user(pointer: u64) -> u64 {
 }
 
 fn linux_getcwd_user(pointer: u64, size: u64) -> u64 {
-    let cwd = b"/home/vanta\0";
-    if size < cwd.len() as u64 {
-        return SYSCALL_ERROR;
+    if pointer == 0 || pointer >= USER_ADDRESS_LIMIT {
+        return (-(14 as i64)) as u64; // EFAULT
     }
-    if copy_to_user(pointer, cwd).is_err() {
-        return SYSCALL_ERROR;
+    let cwd = crate::scheduler::current_cwd();
+    let bytes = cwd.as_bytes();
+    if size < (bytes.len() + 1) as u64 {
+        return (-(34 as i64)) as u64; // ERANGE
+    }
+    let mut buf = alloc::vec::Vec::with_capacity(bytes.len() + 1);
+    buf.extend_from_slice(bytes);
+    buf.push(0);
+    if copy_to_user(pointer, &buf).is_err() {
+        return (-(14 as i64)) as u64;
     }
     pointer
+}
+
+fn linux_chdir_user(path_pointer: u64) -> u64 {
+    let Ok(path_bytes) = copy_cstring(path_pointer, 256) else {
+        return (-(14 as i64)) as u64;
+    };
+    let Ok(path) = core::str::from_utf8(&path_bytes) else {
+        return (-(14 as i64)) as u64;
+    };
+    if crate::scheduler::chdir_current(path).is_ok() {
+        0
+    } else {
+        (-(2 as i64)) as u64 // ENOENT
+    }
+}
+
+fn linux_fchdir_user(descriptor: u64) -> u64 {
+    if crate::scheduler::fchdir_current(descriptor).is_ok() {
+        0
+    } else {
+        (-(9 as i64)) as u64 // EBADF
+    }
+}
+
+fn linux_sigaltstack_user(ss_ptr: u64, old_ss_ptr: u64) -> u64 {
+    let current_sp = current_cpu_local().user_rsp;
+    let current_alt = crate::scheduler::current_sigaltstack();
+    let on_alt = current_alt.ss_flags & vanta_linuxd::SS_DISABLE == 0
+        && current_alt.ss_size > 0
+        && current_sp >= current_alt.ss_sp
+        && current_sp < current_alt.ss_sp.saturating_add(current_alt.ss_size);
+
+    if old_ss_ptr != 0 {
+        if old_ss_ptr >= USER_ADDRESS_LIMIT {
+            return (-(14 as i64)) as u64; // EFAULT
+        }
+        let mut reported = current_alt;
+        if on_alt {
+            reported.ss_flags = vanta_linuxd::SS_ONSTACK;
+        }
+        let slice = unsafe {
+            core::slice::from_raw_parts(&reported as *const _ as *const u8, core::mem::size_of::<vanta_linuxd::SigAltStack>())
+        };
+        if copy_to_user(old_ss_ptr, slice).is_err() {
+            return (-(14 as i64)) as u64;
+        }
+    }
+
+    if ss_ptr != 0 {
+        if ss_ptr >= USER_ADDRESS_LIMIT {
+            return (-(14 as i64)) as u64; // EFAULT
+        }
+        if on_alt {
+            return (-(1 as i64)) as u64; // EPERM
+        }
+        let mut new_ss = vanta_linuxd::SigAltStack::default();
+        let slice = unsafe {
+            core::slice::from_raw_parts_mut(&mut new_ss as *mut _ as *mut u8, core::mem::size_of::<vanta_linuxd::SigAltStack>())
+        };
+        if copy_from_user_into(ss_ptr, slice).is_err() {
+            return (-(14 as i64)) as u64;
+        }
+        if new_ss.ss_flags & !vanta_linuxd::SS_DISABLE != 0 {
+            return (-(22 as i64)) as u64; // EINVAL
+        }
+        if new_ss.ss_flags & vanta_linuxd::SS_DISABLE == 0 {
+            if new_ss.ss_size < vanta_linuxd::MINSIGSTKSZ {
+                return (-(12 as i64)) as u64; // ENOMEM
+            }
+        }
+        crate::scheduler::set_current_sigaltstack(new_ss);
+    }
+    0
+}
+
+fn linux_pread64_user(fd: u64, buf_ptr: u64, count: u64, offset: u64) -> u64 {
+    if buf_ptr == 0 || buf_ptr >= USER_ADDRESS_LIMIT {
+        return (-(14 as i64)) as u64;
+    }
+    let Ok(bytes) = crate::scheduler::pread_current(fd, count as usize, offset) else {
+        return (-(9 as i64)) as u64; // EBADF
+    };
+    if bytes.is_empty() {
+        return 0;
+    }
+    if copy_to_user(buf_ptr, &bytes).is_err() {
+        return (-(14 as i64)) as u64;
+    }
+    bytes.len() as u64
+}
+
+fn linux_pwrite64_user(fd: u64, buf_ptr: u64, count: u64, offset: u64) -> u64 {
+    if buf_ptr == 0 || buf_ptr >= USER_ADDRESS_LIMIT {
+        return (-(14 as i64)) as u64;
+    }
+    let Ok(bytes) = copy_from_user(buf_ptr, count, false) else {
+        return (-(14 as i64)) as u64;
+    };
+    match crate::scheduler::pwrite_current(fd, &bytes, offset) {
+        Ok(written) => written as u64,
+        Err(_) => (-(9 as i64)) as u64,
+    }
+}
+
+fn linux_sendfile_user(out_fd: u64, in_fd: u64, offset_ptr: u64, count: u64) -> u64 {
+    let mut off = if offset_ptr != 0 {
+        if offset_ptr >= USER_ADDRESS_LIMIT {
+            return (-(14 as i64)) as u64;
+        }
+        let Ok(bytes) = copy_from_user(offset_ptr, 8, false) else {
+            return (-(14 as i64)) as u64;
+        };
+        u64::from_ne_bytes(bytes.try_into().unwrap())
+    } else {
+        0
+    };
+    let chunk_size = count.min(65536) as usize;
+    let bytes = if offset_ptr != 0 {
+        match crate::scheduler::pread_current(in_fd, chunk_size, off) {
+            Ok(b) => b,
+            Err(_) => return (-(9 as i64)) as u64,
+        }
+    } else {
+        match crate::scheduler::read_current(in_fd, chunk_size) {
+            Ok(b) => b,
+            Err(_) => return (-(9 as i64)) as u64,
+        }
+    };
+    if bytes.is_empty() {
+        return 0;
+    }
+    if crate::scheduler::write_current(out_fd, &bytes).is_err() {
+        return (-(9 as i64)) as u64;
+    }
+    let transferred = bytes.len() as u64;
+    if offset_ptr != 0 {
+        off += transferred;
+        let _ = copy_to_user(offset_ptr, &off.to_ne_bytes());
+    }
+    transferred
+}
+
+fn linux_truncate_user(path_ptr: u64, length: u64) -> u64 {
+    let Ok(path_bytes) = copy_cstring(path_ptr, 256) else {
+        return (-(14 as i64)) as u64;
+    };
+    let Ok(path_str) = core::str::from_utf8(&path_bytes) else {
+        return (-(14 as i64)) as u64;
+    };
+    let full_path = resolve_vfs_path(u64::MAX - 99, path_str);
+    let credentials = crate::scheduler::current_credentials();
+    let mut contents = crate::vfs::read_root_as(&full_path, &credentials).unwrap_or_default();
+    contents.resize(length as usize, 0);
+    if crate::vfs::write_root_as(&full_path, &contents, &credentials).is_ok() {
+        0
+    } else {
+        (-(2 as i64)) as u64
+    }
+}
+
+fn linux_ftruncate_user(fd: u64, length: u64) -> u64 {
+    if crate::scheduler::truncate_current(fd, length).is_ok() {
+        0
+    } else {
+        (-(9 as i64)) as u64
+    }
+}
+
+fn linux_statfs_user(_path_ptr: u64, buf_ptr: u64) -> u64 {
+    if buf_ptr == 0 || buf_ptr >= USER_ADDRESS_LIMIT {
+        return (-(14 as i64)) as u64;
+    }
+    let stats = crate::memory::stats();
+    let total_frames = stats.tracked_frames as u64;
+    let free_frames = crate::memory::free_frames_count() as u64;
+    let st = vanta_linuxd::statfs {
+        f_type: 0x52454446, // "REDF" RedoxFS magic
+        f_bsize: 4096,
+        f_blocks: total_frames,
+        f_bfree: free_frames,
+        f_bavail: free_frames,
+        f_files: 65536,
+        f_ffree: 65000,
+        f_fsid: [0x5641, 0x4e54],
+        f_namelen: 255,
+        f_frsize: 4096,
+        f_flags: 0,
+        f_spare: [0; 4],
+    };
+    let slice = unsafe {
+        core::slice::from_raw_parts(&st as *const _ as *const u8, core::mem::size_of::<vanta_linuxd::statfs>())
+    };
+    if copy_to_user(buf_ptr, slice).is_err() {
+        return (-(14 as i64)) as u64;
+    }
+    0
+}
+
+fn linux_fstatfs_user(_fd: u64, buf_ptr: u64) -> u64 {
+    linux_statfs_user(0, buf_ptr)
+}
+
+fn linux_mkdirat_user(dirfd: u64, path_ptr: u64, _mode: u64) -> u64 {
+    let Ok(path_bytes) = copy_cstring(path_ptr, 256) else {
+        return (-(14 as i64)) as u64;
+    };
+    let Ok(path_str) = core::str::from_utf8(&path_bytes) else {
+        return (-(14 as i64)) as u64;
+    };
+    let resolved = resolve_vfs_path(dirfd, path_str);
+    let credentials = crate::scheduler::current_credentials();
+    match crate::vfs::create_dir_root_as(&resolved, &credentials) {
+        Ok(()) => 0,
+        Err(_) => (-(17 as i64)) as u64,
+    }
+}
+
+fn linux_mkdir_user(path_ptr: u64, mode: u64) -> u64 {
+    linux_mkdirat_user(crate::scheduler::AT_FDCWD, path_ptr, mode)
+}
+
+fn linux_unlinkat_user(dirfd: u64, path_ptr: u64, _flags: u64) -> u64 {
+    let Ok(path_bytes) = copy_cstring(path_ptr, 256) else {
+        return (-(14 as i64)) as u64;
+    };
+    let Ok(path_str) = core::str::from_utf8(&path_bytes) else {
+        return (-(14 as i64)) as u64;
+    };
+    let resolved = resolve_vfs_path(dirfd, path_str);
+    let credentials = crate::scheduler::current_credentials();
+    match crate::vfs::remove_root_as(&resolved, &credentials) {
+        Ok(()) => 0,
+        Err(_) => (-(2 as i64)) as u64,
+    }
+}
+
+fn linux_unlink_user(path_ptr: u64) -> u64 {
+    linux_unlinkat_user(crate::scheduler::AT_FDCWD, path_ptr, 0)
+}
+
+fn linux_symlinkat_user(target_ptr: u64, newdirfd: u64, linkpath_ptr: u64) -> u64 {
+    let Ok(target_bytes) = copy_cstring(target_ptr, 512) else {
+        return (-(14 as i64)) as u64;
+    };
+    let Ok(link_bytes) = copy_cstring(linkpath_ptr, 256) else {
+        return (-(14 as i64)) as u64;
+    };
+    let Ok(link_str) = core::str::from_utf8(&link_bytes) else {
+        return (-(14 as i64)) as u64;
+    };
+    let full_link = resolve_vfs_path(newdirfd, link_str);
+    let credentials = crate::scheduler::current_credentials();
+    let mut payload = alloc::vec::Vec::from(b"#symlink:".as_slice());
+    payload.extend_from_slice(&target_bytes);
+    if crate::vfs::write_root_as(&full_link, &payload, &credentials).is_ok() {
+        0
+    } else {
+        (-(13 as i64)) as u64 // EACCES
+    }
+}
+
+fn linux_readlinkat_user(dirfd: u64, path_ptr: u64, buf_ptr: u64, bufsiz: u64) -> u64 {
+    if buf_ptr == 0 || buf_ptr >= USER_ADDRESS_LIMIT {
+        return (-(14 as i64)) as u64;
+    }
+    let Ok(path_bytes) = copy_cstring(path_ptr, 256) else {
+        return (-(14 as i64)) as u64;
+    };
+    let Ok(path_str) = core::str::from_utf8(&path_bytes) else {
+        return (-(14 as i64)) as u64;
+    };
+    let full_path = resolve_vfs_path(dirfd, path_str);
+    let credentials = crate::scheduler::current_credentials();
+    let Ok(contents) = crate::vfs::read_root_as(&full_path, &credentials) else {
+        return (-(2 as i64)) as u64; // ENOENT
+    };
+    let target = if contents.starts_with(b"#symlink:") {
+        &contents[9..]
+    } else {
+        return (-(22 as i64)) as u64; // EINVAL
+    };
+    let count = (target.len() as u64).min(bufsiz);
+    if copy_to_user(buf_ptr, &target[..count as usize]).is_err() {
+        return (-(14 as i64)) as u64;
+    }
+    count
+}
+
+fn linux_rt_sigpending_user(set_ptr: u64, sigsetsize: u64) -> u64 {
+    if sigsetsize != 0 && sigsetsize != 8 {
+        return (-(22 as i64)) as u64;
+    }
+    if set_ptr == 0 || set_ptr >= USER_ADDRESS_LIMIT {
+        return (-(14 as i64)) as u64;
+    }
+    let pending = crate::scheduler::current_pending_signals();
+    let blocked = crate::scheduler::current_blocked_mask();
+    let reported = pending & blocked;
+    if copy_to_user(set_ptr, &reported.to_ne_bytes()).is_err() {
+        return (-(14 as i64)) as u64;
+    }
+    0
+}
+
+fn linux_rt_sigsuspend_user(mask_ptr: u64, sigsetsize: u64) -> u64 {
+    if sigsetsize != 0 && sigsetsize != 8 {
+        return (-(22 as i64)) as u64;
+    }
+    if mask_ptr == 0 || mask_ptr >= USER_ADDRESS_LIMIT {
+        return (-(14 as i64)) as u64;
+    }
+    let mut mask_bytes = [0u8; 8];
+    if copy_from_user_into(mask_ptr, &mut mask_bytes).is_err() {
+        return (-(14 as i64)) as u64;
+    }
+    let mask = u64::from_ne_bytes(mask_bytes) & !crate::scheduler::UNBLOCKABLE_SIGNALS_MASK;
+    let old_mask = crate::scheduler::current_blocked_mask();
+    crate::scheduler::set_current_blocked_mask(mask);
+    let _ = crate::scheduler::yield_current_no_context();
+    crate::scheduler::set_current_blocked_mask(old_mask);
+    (-(4 as i64)) as u64 // -EINTR
+}
+
+fn linux_waitid_user(which: u64, id: u64, infoptr: u64, options: u64) -> u64 {
+    if infoptr != 0 && infoptr >= USER_ADDRESS_LIMIT {
+        return (-(14 as i64)) as u64;
+    }
+    let target = match which {
+        vanta_linuxd::P_ALL => u64::MAX,
+        vanta_linuxd::P_PID => id,
+        vanta_linuxd::P_PGID => if id == 0 { crate::scheduler::current_pgid() } else { id },
+        _ => return (-(22 as i64)) as u64,
+    };
+    match crate::scheduler::wait_child_current(target) {
+        Ok(Some((child_tgid, exit_code))) => {
+            if infoptr != 0 {
+                let mut bytes = [0u8; 128];
+                bytes[0..4].copy_from_slice(&(vanta_linuxd::SIGCHLD as i32).to_ne_bytes());
+                bytes[8..12].copy_from_slice(&vanta_linuxd::CLD_EXITED.to_ne_bytes());
+                bytes[16..20].copy_from_slice(&(child_tgid as i32).to_ne_bytes());
+                bytes[20..24].copy_from_slice(&(exit_code as i32).to_ne_bytes());
+                let _ = copy_to_user(infoptr, &bytes);
+            }
+            0
+        }
+        Ok(None) => {
+            if options & vanta_linuxd::WNOHANG != 0 {
+                0
+            } else {
+                SYSCALL_RETURN_WAIT
+            }
+        }
+        Err(()) => (-(10 as i64)) as u64, // ECHILD
+    }
+}
+
+fn linux_prctl_user(option: u64, arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64) -> u64 {
+    match option {
+        vanta_linuxd::PR_SET_NAME => {
+            if arg2 == 0 || arg2 >= USER_ADDRESS_LIMIT {
+                return (-(14 as i64)) as u64;
+            }
+            let mut comm = [0u8; 16];
+            let _ = copy_from_user_into(arg2, &mut comm);
+            comm[15] = 0;
+            crate::scheduler::set_current_comm(comm);
+            0
+        }
+        vanta_linuxd::PR_GET_NAME => {
+            if arg2 == 0 || arg2 >= USER_ADDRESS_LIMIT {
+                return (-(14 as i64)) as u64;
+            }
+            let comm = crate::scheduler::current_comm();
+            if copy_to_user(arg2, &comm).is_err() {
+                (-(14 as i64)) as u64
+            } else {
+                0
+            }
+        }
+        vanta_linuxd::PR_SET_PDEATHSIG => {
+            if arg2 > 64 {
+                return (-(22 as i64)) as u64;
+            }
+            crate::scheduler::set_current_pdeath_signal(arg2);
+            0
+        }
+        vanta_linuxd::PR_GET_PDEATHSIG => {
+            if arg2 == 0 || arg2 >= USER_ADDRESS_LIMIT {
+                return (-(14 as i64)) as u64;
+            }
+            let sig = crate::scheduler::current_pdeath_signal();
+            if copy_to_user(arg2, &sig.to_ne_bytes()).is_err() {
+                (-(14 as i64)) as u64
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    }
+}
+
+fn linux_prlimit64_user(_pid: u64, resource: u64, new_limit_ptr: u64, old_limit_ptr: u64) -> u64 {
+    if resource >= 16 {
+        return (-(22 as i64)) as u64;
+    }
+    let (cur_soft, cur_hard) = crate::scheduler::current_rlimits(resource as usize);
+    if old_limit_ptr != 0 {
+        if old_limit_ptr >= USER_ADDRESS_LIMIT {
+            return (-(14 as i64)) as u64;
+        }
+        let limits = [cur_soft, cur_hard];
+        let slice = unsafe {
+            core::slice::from_raw_parts(limits.as_ptr() as *const u8, 16)
+        };
+        if copy_to_user(old_limit_ptr, slice).is_err() {
+            return (-(14 as i64)) as u64;
+        }
+    }
+    if new_limit_ptr != 0 {
+        if new_limit_ptr >= USER_ADDRESS_LIMIT {
+            return (-(14 as i64)) as u64;
+        }
+        let mut limits = [0u64; 2];
+        let slice = unsafe {
+            core::slice::from_raw_parts_mut(limits.as_mut_ptr() as *mut u8, 16)
+        };
+        if copy_from_user_into(new_limit_ptr, slice).is_err() {
+            return (-(14 as i64)) as u64;
+        }
+        let _ = crate::scheduler::set_current_rlimits(resource as usize, limits[0], limits[1]);
+    }
+    0
+}
+
+fn linux_signalfd4_user(_ufd: u64, mask_ptr: u64, sizemask: u64, flags: u64) -> u64 {
+    if sizemask != 8 {
+        return (-(22 as i64)) as u64;
+    }
+    if mask_ptr == 0 || mask_ptr >= USER_ADDRESS_LIMIT {
+        return (-(14 as i64)) as u64;
+    }
+    let mut mask_bytes = [0u8; 8];
+    if copy_from_user_into(mask_ptr, &mut mask_bytes).is_err() {
+        return (-(14 as i64)) as u64;
+    }
+    let mask = u64::from_ne_bytes(mask_bytes);
+    crate::scheduler::open_signalfd_current(mask, flags as u32).unwrap_or((-(22 as i64)) as u64)
+}
+
+fn linux_fchmodat_user(dirfd: u64, path_ptr: u64, _mode: u64) -> u64 {
+    let Ok(path_bytes) = copy_cstring(path_ptr, 256) else {
+        return (-(14 as i64)) as u64;
+    };
+    let Ok(path_str) = core::str::from_utf8(&path_bytes) else {
+        return (-(14 as i64)) as u64;
+    };
+    let _full = resolve_vfs_path(dirfd, path_str);
+    0
+}
+
+fn linux_fchownat_user(dirfd: u64, path_ptr: u64, _uid: u64, _gid: u64) -> u64 {
+    let Ok(path_bytes) = copy_cstring(path_ptr, 256) else {
+        return (-(14 as i64)) as u64;
+    };
+    let Ok(path_str) = core::str::from_utf8(&path_bytes) else {
+        return (-(14 as i64)) as u64;
+    };
+    let _full = resolve_vfs_path(dirfd, path_str);
+    0
+}
+
+fn linux_utimensat_user(dirfd: u64, path_ptr: u64, _times_ptr: u64, _flags: u64) -> u64 {
+    let Ok(path_bytes) = copy_cstring(path_ptr, 256) else {
+        return (-(14 as i64)) as u64;
+    };
+    let Ok(path_str) = core::str::from_utf8(&path_bytes) else {
+        return (-(14 as i64)) as u64;
+    };
+    let _full = resolve_vfs_path(dirfd, path_str);
+    0
 }
 
 fn linux_clock_gettime_user(clock_id: u64, pointer: u64) -> u64 {
@@ -1656,7 +2207,26 @@ fn inject_signal_frame(
 ) -> Result<(), ()> {
     let old_user_sp = *user_rsp;
     let frame_size = core::mem::size_of::<vanta_linuxd::RtSigFrame>() as u64;
-    let new_user_sp = (old_user_sp.saturating_sub(frame_size) & !15) - 8;
+
+    let altstack = crate::scheduler::current_sigaltstack();
+    let mut on_alt = false;
+    let base_sp = if action.sa_flags & vanta_linuxd::SA_ONSTACK != 0
+        && (altstack.ss_flags & vanta_linuxd::SS_DISABLE == 0)
+        && altstack.ss_size >= vanta_linuxd::MINSIGSTKSZ
+    {
+        let alt_start = altstack.ss_sp;
+        let alt_end = altstack.ss_sp.saturating_add(altstack.ss_size);
+        if old_user_sp >= alt_start && old_user_sp <= alt_end {
+            on_alt = true;
+            old_user_sp
+        } else {
+            on_alt = true;
+            alt_end
+        }
+    } else {
+        old_user_sp
+    };
+    let new_user_sp = (base_sp.saturating_sub(frame_size) & !15) - 8;
 
     let retcode: [u8; 16] = [
         0x48, 0xc7, 0xc0, 0x0f, 0x00, 0x00, 0x00, // mov $15, %rax
@@ -1694,10 +2264,15 @@ fn inject_signal_frame(
         sigcontext.oldmask = current_blocked_mask;
     }
 
+    let mut reported_alt = altstack;
+    if on_alt {
+        reported_alt.ss_flags = vanta_linuxd::SS_ONSTACK;
+    }
+
     let ucontext = vanta_linuxd::UContext {
         uc_flags: 0,
         uc_link: 0,
-        uc_stack: vanta_linuxd::SigAltStack::default(),
+        uc_stack: reported_alt,
         uc_mcontext: sigcontext,
         uc_sigmask: current_blocked_mask,
         __fpregs_mem: [0; 64],
@@ -1826,7 +2401,26 @@ fn inject_signal_frame_context(
 ) -> Result<(), ()> {
     let old_user_sp = context.stack_pointer;
     let frame_size = core::mem::size_of::<vanta_linuxd::RtSigFrame>() as u64;
-    let new_user_sp = (old_user_sp.saturating_sub(frame_size) & !15) - 8;
+
+    let altstack = crate::scheduler::current_sigaltstack();
+    let mut on_alt = false;
+    let base_sp = if action.sa_flags & vanta_linuxd::SA_ONSTACK != 0
+        && (altstack.ss_flags & vanta_linuxd::SS_DISABLE == 0)
+        && altstack.ss_size >= vanta_linuxd::MINSIGSTKSZ
+    {
+        let alt_start = altstack.ss_sp;
+        let alt_end = altstack.ss_sp.saturating_add(altstack.ss_size);
+        if old_user_sp >= alt_start && old_user_sp <= alt_end {
+            on_alt = true;
+            old_user_sp
+        } else {
+            on_alt = true;
+            alt_end
+        }
+    } else {
+        old_user_sp
+    };
+    let new_user_sp = (base_sp.saturating_sub(frame_size) & !15) - 8;
 
     let retcode: [u8; 16] = [
         0x48, 0xc7, 0xc0, 0x0f, 0x00, 0x00, 0x00, // mov $15, %rax
@@ -1862,10 +2456,15 @@ fn inject_signal_frame_context(
     sigcontext.gs = 0x1b;
     sigcontext.oldmask = current_blocked_mask;
 
+    let mut reported_alt = altstack;
+    if on_alt {
+        reported_alt.ss_flags = vanta_linuxd::SS_ONSTACK;
+    }
+
     let ucontext = vanta_linuxd::UContext {
         uc_flags: 0,
         uc_link: 0,
-        uc_stack: vanta_linuxd::SigAltStack::default(),
+        uc_stack: reported_alt,
         uc_mcontext: sigcontext,
         uc_sigmask: current_blocked_mask,
         __fpregs_mem: [0; 64],
@@ -1985,7 +2584,7 @@ fn open_native_user(pointer: u64, length: u64, flags: u64) -> u64 {
             let Ok(entries) = crate::vfs::list_dir_root_as(path, &credentials) else {
                 return SYSCALL_ERROR;
             };
-            return crate::scheduler::open_directory_current(entries).unwrap_or(SYSCALL_ERROR);
+            return crate::scheduler::open_directory_current(alloc::string::String::from(path), entries).unwrap_or(SYSCALL_ERROR);
         }
     }
     let writable = flags & 1 != 0;

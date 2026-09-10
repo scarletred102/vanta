@@ -9,6 +9,10 @@
 #include <time.h>
 #include <sys/time.h>
 #include <signal.h>
+#include <sys/stat.h>
+#include <sys/statfs.h>
+#include <sys/resource.h>
+#include <sys/prctl.h>
 
 const char __interp[] __attribute__((section(".interp"))) = "/lib/ld-musl-x86_64.so.1";
 
@@ -567,6 +571,192 @@ static int test_timer_subsystem(void) {
     return 0;
 }
 
+static volatile int g_sigusr1_received = 0;
+static void sigusr1_handler(int sig) {
+    (void)sig;
+    g_sigusr1_received = 1;
+}
+
+/* ------------------------------------------------------------
+ * Test 8: Remaining 85-Syscall Matrix & Signals Completion
+ * ------------------------------------------------------------ */
+static int test_85_syscall_matrix_and_signals(void) {
+    /* 1. Working Directory & Path Traversal (getcwd, chdir, mkdir, unlink) */
+    char cwd_buf[256] = {0};
+    if (getcwd(cwd_buf, sizeof(cwd_buf)) == NULL || strlen(cwd_buf) == 0) {
+        return 1;
+    }
+    if (mkdir("/tmp/testdir_posix", 0755) != 0 && errno != EEXIST) {
+        return 2;
+    }
+    if (chdir("/tmp/testdir_posix") != 0) {
+        return 3;
+    }
+    char new_cwd[256] = {0};
+    if (getcwd(new_cwd, sizeof(new_cwd)) == NULL || strstr(new_cwd, "testdir_posix") == NULL) {
+        return 4;
+    }
+    if (chdir("/") != 0) {
+        return 5;
+    }
+    unlink("/tmp/testdir_posix");
+
+    /* 2. Signal Alternative Stack (sigaltstack) */
+    stack_t old_ss;
+    memset(&old_ss, 0, sizeof(old_ss));
+    if (sigaltstack(NULL, &old_ss) != 0) {
+        return 6;
+    }
+    static char alt_stack[4096];
+    stack_t new_ss;
+    new_ss.ss_sp = alt_stack;
+    new_ss.ss_size = sizeof(alt_stack);
+    new_ss.ss_flags = 0;
+    if (sigaltstack(&new_ss, &old_ss) != 0) {
+        return 7;
+    }
+    stack_t cur_ss;
+    memset(&cur_ss, 0, sizeof(cur_ss));
+    if (sigaltstack(NULL, &cur_ss) != 0) {
+        return 8;
+    }
+    if (cur_ss.ss_sp != alt_stack || cur_ss.ss_size != sizeof(alt_stack) || cur_ss.ss_flags != 0) {
+        return 9;
+    }
+    // Test rejection of ss_size < MINSIGSTKSZ (2048)
+    stack_t bad_ss;
+    bad_ss.ss_sp = alt_stack;
+    bad_ss.ss_size = 512;
+    bad_ss.ss_flags = 0;
+    if (sigaltstack(&bad_ss, NULL) == 0) {
+        return 10; // Must fail
+    }
+
+    /* 3. Positioned I/O & File Truncation (pread64, pwrite64, ftruncate) */
+    int fd = open("/tmp/test_io_posix.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (fd < 0) {
+        return 11;
+    }
+    const char init_data[] = "0123456789ABCDEF";
+    if (write(fd, init_data, sizeof(init_data) - 1) != (ssize_t)(sizeof(init_data) - 1)) {
+        close(fd);
+        return 12;
+    }
+    off_t pos_before = lseek(fd, 0, SEEK_CUR);
+    // Write at offset 5 without updating descriptor offset
+    if (pwrite(fd, "XYZ", 3, 5) != 3) {
+        close(fd);
+        return 13;
+    }
+    off_t pos_after = lseek(fd, 0, SEEK_CUR);
+    if (pos_before != pos_after) {
+        close(fd);
+        return 14; // pwrite must preserve descriptor offset
+    }
+    char read_buf[32] = {0};
+    // Read from offset 0
+    if (pread(fd, read_buf, 16, 0) != 16) {
+        close(fd);
+        return 15;
+    }
+    if (memcmp(read_buf, "01234XYZ89ABCDEF", 16) != 0) {
+        close(fd);
+        return 16;
+    }
+    // Truncate to 8 bytes
+    if (ftruncate(fd, 8) != 0) {
+        close(fd);
+        return 17;
+    }
+    memset(read_buf, 0, sizeof(read_buf));
+    ssize_t truncated_len = pread(fd, read_buf, sizeof(read_buf), 0);
+    if (truncated_len != 8 || memcmp(read_buf, "01234XYZ", 8) != 0) {
+        close(fd);
+        return 18;
+    }
+    close(fd);
+    unlink("/tmp/test_io_posix.txt");
+
+    /* 4. Filesystem Statistics (statfs) */
+    struct statfs sf;
+    memset(&sf, 0, sizeof(sf));
+    if (statfs("/", &sf) != 0) {
+        return 19;
+    }
+    if (sf.f_bsize != 4096 || sf.f_blocks == 0) {
+        return 20;
+    }
+
+    /* 5. Process Metadata & Limits (prctl, prlimit64) */
+    char orig_comm[16] = {0};
+    syscall(SYS_prctl, PR_GET_NAME, orig_comm, 0, 0, 0);
+    if (syscall(SYS_prctl, PR_SET_NAME, "vanta_test_comm", 0, 0, 0) != 0) {
+        return 21;
+    }
+    char set_comm[16] = {0};
+    if (syscall(SYS_prctl, PR_GET_NAME, set_comm, 0, 0, 0) != 0 || strcmp(set_comm, "vanta_test_comm") != 0) {
+        return 22;
+    }
+    struct rlimit rlim;
+    memset(&rlim, 0, sizeof(rlim));
+    if (syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, NULL, &rlim) != 0) {
+        return 23;
+    }
+    if (rlim.rlim_cur == 0 || rlim.rlim_max == 0) {
+        return 24;
+    }
+
+    /* 6. Symbolic Links (symlink, readlink) */
+    if (symlink("/target_path_vanta", "/tmp/test_symlink_vanta") != 0) {
+        return 25;
+    }
+    char link_target[64] = {0};
+    ssize_t link_len = readlink("/tmp/test_symlink_vanta", link_target, sizeof(link_target) - 1);
+    if (link_len <= 0 || strcmp(link_target, "/target_path_vanta") != 0) {
+        unlink("/tmp/test_symlink_vanta");
+        return 26;
+    }
+    unlink("/tmp/test_symlink_vanta");
+
+    /* 7. Signals Inspection & Masking (rt_sigpending & delivery on unmask) */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sigusr1_handler;
+    if (sigaction(SIGUSR1, &sa, NULL) != 0) {
+        return 27;
+    }
+
+    sigset_t block_set, old_mask, pend_set;
+    sigemptyset(&block_set);
+    sigaddset(&block_set, SIGUSR1);
+    if (sigprocmask(SIG_BLOCK, &block_set, &old_mask) != 0) {
+        return 28;
+    }
+    g_sigusr1_received = 0;
+    kill(getpid(), SIGUSR1);
+    // While blocked, signal MUST NOT have been delivered
+    if (g_sigusr1_received != 0) {
+        return 29;
+    }
+    sigemptyset(&pend_set);
+    if (sigpending(&pend_set) != 0) {
+        return 30;
+    }
+    if (!sigismember(&pend_set, SIGUSR1)) {
+        return 31;
+    }
+    // Restore signal mask: unblocking SIGUSR1 must trigger delivery!
+    if (sigprocmask(SIG_SETMASK, &old_mask, NULL) != 0) {
+        return 32;
+    }
+    // Handler MUST have executed!
+    if (g_sigusr1_received != 1) {
+        return 33;
+    }
+
+    return 0;
+}
+
 int main(void) {
     t_thread_id = 999;
     t_counter = 0x12345678ULL;
@@ -678,6 +868,18 @@ int main(void) {
 
     const char timer_msg[] = "[linux-dynamic] timer subsystem and nanosleep verified\n";
     write(1, timer_msg, sizeof(timer_msg) - 1);
+
+    /* Test 8: Remaining 85-Syscall Matrix & Signals */
+    int matrix_res = test_85_syscall_matrix_and_signals();
+    if (matrix_res != 0) {
+        char err_msg[64];
+        snprintf(err_msg, sizeof(err_msg), "[linux-dynamic] 85-syscall matrix failed: %d\n", matrix_res);
+        write(1, err_msg, strlen(err_msg));
+        return 96;
+    }
+
+    const char matrix_msg[] = "[linux-dynamic] 85-syscall matrix and signals verified\n";
+    write(1, matrix_msg, sizeof(matrix_msg) - 1);
 
     return 0;
 }
