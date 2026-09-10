@@ -17,6 +17,12 @@ pub const VANTA_ROOT_TYPE_GUID: [u8; TYPE_GUID_SIZE] = [
     0x4e, 0x0d, 0x2f, 0x5d, 0xff, 0x9c, 0x2f, 0x4b, 0xa9, 0xb6, 0x6b, 0xf9, 0xea, 0xa4, 0xd2, 0x01,
 ];
 
+/// The little-endian GPT representation of Linux/Vanta Swap
+/// `0657fd6d-a4ab-43c4-84e5-0933c84b4f4f`.
+pub const VANTA_SWAP_TYPE_GUID: [u8; TYPE_GUID_SIZE] = [
+    0x6d, 0xfd, 0x57, 0x06, 0xab, 0xa4, 0xc4, 0x43, 0x84, 0xe5, 0x09, 0x33, 0xc8, 0x4b, 0x4f, 0x4f,
+];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RootPartition {
     pub start_lba: u64,
@@ -78,7 +84,33 @@ where
     find_vanta_root(&header, &entries)
 }
 
-pub fn find_vanta_root(header: &[u8], entries: &[u8]) -> Result<RootPartition, GptError> {
+pub fn discover_vanta_swap<F>(mut read_sector: F) -> Result<RootPartition, GptError>
+where
+    F: FnMut(u64, &mut [u8; SECTOR_SIZE]) -> Result<(), ()>,
+{
+    let mut header = [0_u8; SECTOR_SIZE];
+    read_sector(1, &mut header).map_err(|_| GptError::InvalidHeader)?;
+    let layout = parse_header(&header)?;
+    let sector_count = layout.entry_bytes.div_ceil(SECTOR_SIZE);
+    let mut entries = vec![0_u8; layout.entry_bytes];
+
+    for index in 0..sector_count {
+        let mut sector = [0_u8; SECTOR_SIZE];
+        read_sector(layout.entry_lba + index as u64, &mut sector)
+            .map_err(|_| GptError::InvalidHeader)?;
+        let start = index * SECTOR_SIZE;
+        let length = (layout.entry_bytes - start).min(SECTOR_SIZE);
+        entries[start..start + length].copy_from_slice(&sector[..length]);
+    }
+
+    find_vanta_swap(&header, &entries)
+}
+
+pub fn find_vanta_partition(
+    header: &[u8],
+    entries: &[u8],
+    target_guid: [u8; TYPE_GUID_SIZE],
+) -> Result<RootPartition, GptError> {
     let layout = parse_header(header)?;
     if entries.len() < layout.entry_bytes {
         return Err(GptError::InvalidHeader);
@@ -90,7 +122,7 @@ pub fn find_vanta_root(header: &[u8], entries: &[u8]) -> Result<RootPartition, G
     for index in 0..layout.entry_count {
         let offset = index * layout.entry_size;
         let entry = &entries[offset..offset + layout.entry_size];
-        if entry[..TYPE_GUID_SIZE] != VANTA_ROOT_TYPE_GUID {
+        if entry[..TYPE_GUID_SIZE] != target_guid {
             continue;
         }
         let start_lba = read_u64(entry, PARTITION_START_OFFSET)?;
@@ -105,6 +137,14 @@ pub fn find_vanta_root(header: &[u8], entries: &[u8]) -> Result<RootPartition, G
     }
 
     Err(GptError::MissingRoot)
+}
+
+pub fn find_vanta_root(header: &[u8], entries: &[u8]) -> Result<RootPartition, GptError> {
+    find_vanta_partition(header, entries, VANTA_ROOT_TYPE_GUID)
+}
+
+pub fn find_vanta_swap(header: &[u8], entries: &[u8]) -> Result<RootPartition, GptError> {
+    find_vanta_partition(header, entries, VANTA_SWAP_TYPE_GUID)
 }
 
 fn parse_header(header: &[u8]) -> Result<HeaderLayout, GptError> {

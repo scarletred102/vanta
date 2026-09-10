@@ -588,6 +588,24 @@ pub fn remount_root() -> Result<(), VfsError> {
     root.mount_root(VantaFs::mount(filesystem.into_device())?)
 }
 
+pub fn read_block_sector(sector: u64, buffer: &mut [u8; 512]) -> Result<(), StorageError> {
+    if let Some(root) = REDOX_ROOT.lock().as_mut() {
+        root.read_raw_sector(sector, buffer)
+            .map_err(|_| StorageError::IoFailed)
+    } else {
+        Err(StorageError::DeviceUnavailable)
+    }
+}
+
+pub fn write_block_sector(sector: u64, buffer: &[u8; 512]) -> Result<(), StorageError> {
+    if let Some(root) = REDOX_ROOT.lock().as_mut() {
+        root.write_raw_sector(sector, buffer)
+            .map_err(|_| StorageError::IoFailed)
+    } else {
+        Err(StorageError::DeviceUnavailable)
+    }
+}
+
 pub fn read_root(path: &str) -> Result<Vec<u8>, VfsError> {
     read_root_as(path, &Credentials::root())
 }

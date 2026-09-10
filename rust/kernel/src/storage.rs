@@ -33,6 +33,16 @@ pub fn discover_vanta_root<D: BlockDevice>(device: &D) -> Result<RootPartition, 
     })
 }
 
+pub fn discover_vanta_swap<D: BlockDevice>(device: &D) -> Result<RootPartition, StorageError> {
+    vanta_gpt::discover_vanta_swap(|sector, buffer| {
+        device.read_sector(sector, buffer).map_err(|_| ())
+    })
+    .map_err(|error| match error {
+        vanta_gpt::GptError::MissingRoot => StorageError::GptMissingRoot,
+        _ => StorageError::GptInvalid,
+    })
+}
+
 pub fn has_gpt_signature<D: BlockDevice>(device: &D) -> bool {
     let mut sector = [0_u8; SECTOR_SIZE];
     device.read_sector(1, &mut sector).is_ok() && sector[..8] == *b"EFI PART"

@@ -29,8 +29,8 @@ pub trait SectorIo {
 }
 
 pub struct RedoxDisk<D> {
-    device: D,
-    partition: RootPartition,
+    pub device: D,
+    pub partition: RootPartition,
 }
 
 impl<D: SectorIo> RedoxDisk<D> {
@@ -131,6 +131,14 @@ impl<D: SectorIo> RedoxFsBackend<D> {
 
     pub fn into_inner(self) -> D {
         self.filesystem.disk.into_inner()
+    }
+
+    pub fn read_raw_sector(&mut self, sector: u64, buffer: &mut [u8; SECTOR_SIZE]) -> Result<()> {
+        self.filesystem.disk.device.read_sector(sector, buffer).map_err(|_| Error::new(EIO))
+    }
+
+    pub fn write_raw_sector(&mut self, sector: u64, buffer: &[u8; SECTOR_SIZE]) -> Result<()> {
+        self.filesystem.disk.device.write_sector(sector, buffer).map_err(|_| Error::new(EIO))
     }
 
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>> {

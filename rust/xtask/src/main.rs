@@ -9,6 +9,7 @@ const REDOXFS_REVISION: &str = "99bc185bf8ad8bd6f4d2562c424d800c2a3d310b";
 const RUST_TOOLCHAIN: &str = "nightly-2026-07-10";
 const ESP_SECTORS: u64 = 65_536;
 const ROOT_SECTORS: u64 = 262_144;
+const SWAP_SECTORS: u64 = 32_768;
 
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
@@ -709,6 +710,7 @@ fn build_default_image() -> Result<(), String> {
         ImageOptions {
             esp_sectors: ESP_SECTORS,
             root_sectors: ROOT_SECTORS,
+            swap_sectors: SWAP_SECTORS,
         },
         ImageContents {
             boot_efi: &boot_efi,

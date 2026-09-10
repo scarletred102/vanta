@@ -50,6 +50,7 @@ pub enum MapError {
 pub const MAP_WRITABLE: u64 = 1 << 1;
 pub const MAP_USER: u64 = 1 << 2;
 pub const MAP_CACHE_DISABLE: u64 = 1 << 4;
+pub const ACCESSED: u64 = 1 << 5;
 pub const MAP_COW: u64 = 1 << 9;
 pub const MAP_SWAPPED: u64 = 1 << 10;
 pub const MAP_NO_EXECUTE: u64 = 1 << 63;
@@ -353,7 +354,7 @@ pub fn resolve_cow_page(space: AddressSpace, virtual_address: u64) -> Result<boo
 }
 
 /// Resolve a swapped-out page fault by allocating a fresh physical frame,
-/// restoring its contents, and pointing the leaf PTE back to the frame with PRESENT set.
+/// restoring its contents from swap disk, and pointing the leaf PTE back to the frame with PRESENT set.
 pub fn resolve_swapped_page(space: AddressSpace, virtual_address: u64) -> Result<bool, MapError> {
     let page_vaddr = virtual_address & !(PAGE_SIZE - 1);
     let Some(location) = pte_location(space, page_vaddr, false, false)? else {
@@ -371,13 +372,12 @@ pub fn resolve_swapped_page(space: AddressSpace, virtual_address: u64) -> Result
     let frame = memory::alloc_frame().ok_or(MapError::OutOfMemory)?;
     let phys = frame.start_address();
 
-    if let Some(virt) = phys_to_virt(phys) {
-        unsafe {
-            core::ptr::write_bytes(virt as *mut u8, 0, PAGE_SIZE as usize);
-        }
+    if crate::swap::read_page_from_disk(slot, phys).is_err() {
+        let _ = memory::free_frame(frame);
+        return Err(MapError::NoHhdm);
     }
 
-    let original_flags = (entry & 0x0eff) & !MAP_SWAPPED;
+    let original_flags = entry & (MAP_WRITABLE | MAP_USER | MAP_NO_EXECUTE);
     let new_entry = phys | original_flags | PRESENT;
 
     if !write_entry(location.table_phys, location.index, new_entry) {
@@ -389,6 +389,60 @@ pub fn resolve_swapped_page(space: AddressSpace, virtual_address: u64) -> Result
     flush_if_active(space, page_vaddr);
 
     Ok(true)
+}
+
+/// Evict a page to the swap partition on the VirtIO block device.
+pub fn swap_page_out(space: AddressSpace, virtual_address: u64, slot: u32) -> Result<u64, MapError> {
+    let page_vaddr = virtual_address & !(PAGE_SIZE - 1);
+    let location = pte_location(space, page_vaddr, false, false)?
+        .ok_or(MapError::NoHhdm)?;
+    let entry = read_entry(location.table_phys, location.index).ok_or(MapError::NoHhdm)?;
+    if entry & PRESENT == 0 {
+        return Err(MapError::NoHhdm);
+    }
+
+    let phys = entry & ADDRESS_MASK;
+
+    // 1. Write 4 KiB physical page to swap disk at slot
+    crate::swap::write_page_to_disk(slot, phys)
+        .map_err(|_| MapError::NoHhdm)?;
+
+    // 2. Update PTE: clear PRESENT, set MAP_SWAPPED, encode slot
+    let perm_flags = entry & (MAP_WRITABLE | MAP_USER | MAP_NO_EXECUTE);
+    let slot_encoded = ((slot as u64) & 0x000f_ffff) << 12;
+    let new_entry = slot_encoded | perm_flags | MAP_SWAPPED;
+
+    if !write_entry(location.table_phys, location.index, new_entry) {
+        return Err(MapError::NoHhdm);
+    }
+
+    // 3. Invalidate TLB
+    flush_if_active(space, page_vaddr);
+
+    // 4. Free physical frame to buddy allocator
+    memory::free_frame(memory::PhysFrame(phys));
+
+    Ok(phys)
+}
+
+/// Check and clear the ACCESSED bit for Clock / Second-Chance algorithm.
+pub fn check_and_clear_accessed(space: AddressSpace, virtual_address: u64) -> Result<Option<bool>, MapError> {
+    let page_vaddr = virtual_address & !(PAGE_SIZE - 1);
+    let Some(location) = pte_location(space, page_vaddr, false, false)? else {
+        return Ok(None);
+    };
+    let entry = read_entry(location.table_phys, location.index).ok_or(MapError::NoHhdm)?;
+    if entry & PRESENT == 0 {
+        return Ok(None);
+    }
+
+    let was_accessed = (entry & ACCESSED) != 0;
+    if was_accessed {
+        let cleared = entry & !ACCESSED;
+        write_entry(location.table_phys, location.index, cleared);
+        flush_if_active(space, page_vaddr);
+    }
+    Ok(Some(was_accessed))
 }
 
 /// Map one 4 KiB page into an address space.

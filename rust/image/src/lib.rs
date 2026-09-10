@@ -22,6 +22,7 @@ const ESP_TYPE_GUID: [u8; 16] = [
 pub struct ImageOptions {
     pub esp_sectors: u64,
     pub root_sectors: u64,
+    pub swap_sectors: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -65,6 +66,7 @@ pub struct BuiltImage {
     bytes: Vec<u8>,
     esp: RootPartition,
     root: RootPartition,
+    swap: Option<RootPartition>,
 }
 
 impl BuiltImage {
@@ -82,6 +84,10 @@ impl BuiltImage {
 
     pub const fn root_partition(&self) -> RootPartition {
         self.root
+    }
+
+    pub const fn swap_partition(&self) -> Option<RootPartition> {
+        self.swap
     }
 }
 
@@ -112,8 +118,22 @@ pub fn build_image(
             .checked_add(options.root_sectors)
             .ok_or(ImageError::InvalidLayout)?,
     };
-    let total_sectors = root
-        .end_lba
+    let swap = if options.swap_sectors > 0 {
+        Some(RootPartition {
+            start_lba: root
+                .end_lba
+                .checked_add(1)
+                .ok_or(ImageError::InvalidLayout)?,
+            end_lba: root
+                .end_lba
+                .checked_add(options.swap_sectors)
+                .ok_or(ImageError::InvalidLayout)?,
+        })
+    } else {
+        None
+    };
+    let last_end = swap.map(|s| s.end_lba).unwrap_or(root.end_lba);
+    let total_sectors = last_end
         .checked_add(34)
         .ok_or(ImageError::InvalidLayout)?;
     let image_len = usize::try_from(
@@ -128,9 +148,9 @@ pub fn build_image(
     let root_bytes = build_redoxfs(options.root_sectors, contents.root_files, contents.root_links)?;
     copy_partition(&mut bytes, esp, &esp_bytes)?;
     copy_partition(&mut bytes, root, &root_bytes)?;
-    write_gpt(&mut bytes, esp, root, total_sectors)?;
+    write_gpt(&mut bytes, esp, root, swap, total_sectors)?;
 
-    Ok(BuiltImage { bytes, esp, root })
+    Ok(BuiltImage { bytes, esp, root, swap })
 }
 
 fn build_esp(sectors: u64, contents: ImageContents<'_>) -> Result<Vec<u8>, ImageError> {
@@ -296,6 +316,7 @@ fn write_gpt(
     image: &mut [u8],
     esp: RootPartition,
     root: RootPartition,
+    swap: Option<RootPartition>,
     total_sectors: u64,
 ) -> Result<(), ImageError> {
     let entries_len = GPT_ENTRY_SIZE * GPT_ENTRY_COUNT;
@@ -307,6 +328,14 @@ fn write_gpt(
         root,
         2,
     );
+    if let Some(swap) = swap {
+        write_entry(
+            &mut entries[GPT_ENTRY_SIZE * 2..GPT_ENTRY_SIZE * 3],
+            vanta_gpt::VANTA_SWAP_TYPE_GUID,
+            swap,
+            3,
+        );
+    }
     let entries_crc = crc32(&entries);
     let entries_sectors = (entries_len / SECTOR_SIZE) as u64;
     write_at_lba(image, GPT_ENTRIES_LBA, &entries)?;
@@ -513,6 +542,7 @@ mod tests {
             ImageOptions {
                 esp_sectors: 8_192,
                 root_sectors: 8_192,
+                swap_sectors: 0,
             },
             ImageContents {
                 boot_efi: b"boot",

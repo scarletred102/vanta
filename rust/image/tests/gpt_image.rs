@@ -9,6 +9,7 @@ fn builds_a_gpt_disk_with_bootable_esp_and_redoxfs_root() {
         ImageOptions {
             esp_sectors: 8_192,
             root_sectors: 32_768,
+            swap_sectors: 0,
         },
         ImageContents {
             boot_efi: b"limine-efi",

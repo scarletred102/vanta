@@ -649,6 +649,24 @@ fn run_virtio_self_check() -> (bool, bool) {
                         root.start_lba,
                         root.sector_count()
                     );
+                    if root.end_lba >= sectors {
+                        serial_println!("[storage] GPT root truncated; recovery required");
+                        return (false, true);
+                    }
+                    if let Ok(swap_part) = storage::discover_vanta_swap(&device) {
+                        serial_println!(
+                            "[storage] Vanta GPT swap: start={} sectors={}",
+                            swap_part.start_lba,
+                            swap_part.sector_count()
+                        );
+                        if swap_part.end_lba >= sectors {
+                            serial_println!("[storage] GPT swap truncated; recovery required");
+                            return (false, true);
+                        }
+                        swap::init(swap_part.start_lba, swap_part.sector_count());
+                    } else {
+                        swap::init(34, 2014);
+                    }
                     let mounted = match vfs::mount_virtio_redox_root(device, root) {
                         Ok(()) => {
                             serial_println!("[storage] RedoxFS root mounted");
@@ -664,6 +682,7 @@ fn run_virtio_self_check() -> (bool, bool) {
                                 reboot_persisted
                             );
                             serial_println!("[storage] RedoxFS persistence check: {}", persistence);
+                            swap::self_check();
                             (true, false)
                         }
                         Err(error) => {

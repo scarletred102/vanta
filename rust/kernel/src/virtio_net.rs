@@ -305,21 +305,18 @@ fn allocate_contiguous_frames(
     reservations: &mut Vec<PhysFrame>,
 ) -> Result<Vec<PhysFrame>, VirtioNetError> {
     let count = bytes.div_ceil(PAGE_SIZE as usize);
-    let mut frames: Vec<PhysFrame> = Vec::with_capacity(count);
-    for _ in 0..count {
-        let frame = allocate_dma_frame(reservations)?;
-        if let Some(previous) = frames.last() {
-            if frame.start_address() != previous.start_address() + PAGE_SIZE {
-                frames.push(frame);
-                for frame in frames.drain(..) {
-                    let _ = memory::free_frame(frame);
-                }
-                return Err(VirtioNetError::AllocationFailed);
+    let order = count.next_power_of_two().trailing_zeros() as usize;
+    loop {
+        let base_frame = memory::alloc_frames(order).ok_or(VirtioNetError::AllocationFailed)?;
+        if base_frame.start_address() >= DMA_MIN_PHYSICAL {
+            let mut frames = Vec::with_capacity(count);
+            for i in 0..count {
+                frames.push(PhysFrame(base_frame.start_address() + (i as u64) * PAGE_SIZE));
             }
+            return Ok(frames);
         }
-        frames.push(frame);
+        reservations.push(base_frame);
     }
-    Ok(frames)
 }
 
 fn allocate_dma_frame(reservations: &mut Vec<PhysFrame>) -> Result<PhysFrame, VirtioNetError> {
