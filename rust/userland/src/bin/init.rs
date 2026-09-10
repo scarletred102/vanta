@@ -303,6 +303,15 @@ fn gate_d_acceptance() -> bool {
     print_val(b"[linux] dynamic-proc", dyn_proc, dyn_proc_exit);
     let dyn_proc_ok = dyn_proc != u64::MAX && dyn_proc_exit == 0;
 
+    let dyn_shlib = vanta_userland::spawn_linux(b"/compat/linux/dynamic-shlib");
+    let dyn_shlib_exit = if dyn_shlib != u64::MAX {
+        vanta_userland::wait(dyn_shlib)
+    } else {
+        999
+    };
+    print_val(b"[linux] dynamic-shlib", dyn_shlib, dyn_shlib_exit);
+    let dyn_shlib_ok = dyn_shlib != u64::MAX && dyn_shlib_exit == 0;
+
     let displayd_pid = vanta_userland::spawn_with_args(b"/bin/displayd", &[b"displayd", b"--test"], 0, 1, 2);
     let displayd_exit = if displayd_pid != u64::MAX {
         vanta_userland::wait(displayd_pid)
@@ -395,6 +404,7 @@ fn gate_d_acceptance() -> bool {
         && dyn_fork_ok
         && dyn_epoll_ok
         && dyn_proc_ok
+        && dyn_shlib_ok
         && displayd_ok
         && desktop_ok
         && audiod_ok

@@ -83,6 +83,8 @@ pub struct UserContext {
     pub instruction_pointer: u64,
     pub flags: u64,
     pub stack_pointer: u64,
+    pub rcx: u64,
+    pub r11: u64,
 }
 
 #[repr(C, align(16))]
@@ -126,6 +128,8 @@ const EMPTY_CPU_LOCAL: CpuLocal = CpuLocal {
         instruction_pointer: 0,
         flags: 0,
         stack_pointer: 0,
+        rcx: 0,
+        r11: 0,
     },
     cpu_index: 0,
     block_descriptor: 0,
@@ -258,6 +262,13 @@ vanta_syscall_thread_exit_path:
     jmp vanta_syscall_restore_context
 vanta_syscall_restore_context:
     mov r10, rax
+    push 0x2b
+    push qword ptr [r10 + 120]
+    mov rax, [r10 + 112]
+    or rax, 0x202
+    push rax
+    push 0x33
+    push qword ptr [r10 + 104]
     mov rbx, [r10 + 8]
     mov rbp, [r10 + 16]
     mov r12, [r10 + 24]
@@ -269,13 +280,12 @@ vanta_syscall_restore_context:
     mov rdx, [r10 + 72]
     mov r8,  [r10 + 80]
     mov r9,  [r10 + 88]
-    mov rcx, [r10 + 104]
-    mov r11, [r10 + 112]
-    mov rsp, [r10 + 120]
+    mov rcx, [r10 + 128]
+    mov r11, [r10 + 136]
     mov rax, [r10]
     mov r10, [r10 + 96]
     swapgs
-    sysretq
+    iretq
 "#,
     syscall_stack_top_offset = const SYSCALL_STACK_TOP_OFFSET,
     user_rsp_offset = const USER_RSP_OFFSET,
@@ -2318,6 +2328,8 @@ fn user_context(frame: *const u64, stack_pointer: u64) -> UserContext {
             instruction_pointer: *frame.add(7),
             flags: *frame.add(8),
             stack_pointer,
+            rcx: *frame.add(7),
+            r11: *frame.add(8),
         }
     }
 }

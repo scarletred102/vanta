@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 
 static int shared_val = 100;
 static volatile int cow_race_target[1024];
@@ -18,6 +19,22 @@ static inline unsigned long long rdtsc_barrier(void) {
     unsigned int lo, hi;
     __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
     return ((unsigned long long)hi << 32) | lo;
+}
+
+static int safe_read_byte(int fd, char *byte) {
+    long r;
+    do {
+        __asm__ volatile ("syscall" : "=a"(r) : "a"(0), "D"(fd), "S"(byte), "d"(1UL) : "rcx", "r11", "memory");
+    } while (r < 0 && (r == -4 || r == -11));
+    return (int)r;
+}
+
+static int safe_write_byte(int fd, char byte) {
+    long r;
+    do {
+        __asm__ volatile ("syscall" : "=a"(r) : "a"(1), "D"(fd), "S"(&byte), "d"(1UL) : "rcx", "r11", "memory");
+    } while (r < 0 && (r == -4 || r == -11));
+    return (int)r;
 }
 
 static __attribute__((noinline)) int recurse_stack(int depth, int acc) {
@@ -180,7 +197,7 @@ int main(void) {
 
             // Handshake with parent to ensure both cores are actively executing
             char tok = 0;
-            if (read(p2c[0], &tok, 1) != 1 || write(c2p[1], "K", 1) != 1) {
+            if (safe_read_byte(p2c[0], &tok) != 1 || safe_write_byte(c2p[1], 'K') != 1) {
                 _exit(10);
             }
             close(p2c[0]);
@@ -207,7 +224,8 @@ int main(void) {
 
             // Handshake with child
             char ack = 0;
-            if (write(p2c[1], "G", 1) != 1 || read(c2p[0], &ack, 1) != 1) {
+            if (safe_write_byte(p2c[1], 'G') != 1 || safe_read_byte(c2p[0], &ack) != 1) {
+                printf("[linux-fork] handshake failure at iter %d\n", iter);
                 race_failures++;
             }
             close(p2c[1]);
@@ -226,6 +244,7 @@ int main(void) {
             int status = 0;
             pid_t w = waitpid(p, &status, 0);
             if (w != p || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                printf("[linux-fork] waitpid failure at iter %d (status=%d exit=%d)\n", iter, status, WEXITSTATUS(status));
                 race_failures++;
             }
             if (cow_race_target[0] != (0xAAAA0000 + iter) || cow_race_target[1023] != (0xBBBB0000 + iter)) {

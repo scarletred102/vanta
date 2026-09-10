@@ -248,6 +248,8 @@ fn build_default_image() -> Result<(), String> {
     let linux_musl_script = read_file(root.join("target/compat/linux/musl-script"))?;
     let linux_musl_server = read_file(root.join("target/compat/linux/musl-server"))?;
     let linux_ld_musl = read_file(root.join("target/compat/linux/ld-musl-x86_64.so.1"))?;
+    let linux_libcalc = read_file(root.join("target/compat/linux/libcalc.so"))?;
+    let linux_dynamic_shlib = read_file(root.join("target/compat/linux/dynamic-shlib"))?;
     let linux_dynamic_hello = read_file(root.join("target/compat/linux/dynamic-hello"))?;
     let linux_dynamic_signal = read_file(root.join("target/compat/linux/dynamic-signal"))?;
     let linux_dynamic_threads = read_file(root.join("target/compat/linux/dynamic-threads"))?;
@@ -535,6 +537,20 @@ fn build_default_image() -> Result<(), String> {
         RootFile {
             path: "/lib/ld-musl-x86_64.so.1",
             contents: &linux_ld_musl,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/lib/libcalc.so",
+            contents: &linux_libcalc,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/dynamic-shlib",
+            contents: &linux_dynamic_shlib,
             mode: 0o755,
             uid: 0,
             gid: 0,
@@ -922,8 +938,14 @@ fn build_linux_samples(root: &Path) -> Result<(), String> {
             "x86_64-linux-musl",
             "-shared",
             "-fPIC",
+            "-fvisibility=hidden",
+            "-fno-sanitize=all",
+            "-fno-stack-protector",
+            "-fno-builtin",
+            "-mno-sse",
             "-nostdlib",
             "-Wl,-e,_start",
+            "-O2",
             "../compat/linux/ld-musl.c",
             "-o",
             &ld_output.to_string_lossy(),
@@ -932,6 +954,49 @@ fn build_linux_samples(root: &Path) -> Result<(), String> {
         .map_err(|error| format!("failed to start ld-musl compiler: {error}"))?;
     if !status.success() {
         return Err(format!("ld-musl compilation exited with {status}"));
+    }
+    let libcalc_output = output.join("libcalc.so");
+    let status = Command::new("zig")
+        .current_dir(root)
+        .args([
+            "cc",
+            "-target",
+            "x86_64-linux-musl",
+            "-shared",
+            "-fPIC",
+            "-O2",
+            "-Wl,-soname,libcalc.so",
+            "../compat/linux/libcalc.c",
+            "-o",
+            &libcalc_output.to_string_lossy(),
+        ])
+        .status()
+        .map_err(|error| format!("failed to start libcalc compiler: {error}"))?;
+    if !status.success() {
+        return Err(format!("libcalc compilation exited with {status}"));
+    }
+    let dynamic_shlib_output = output.join("dynamic-shlib");
+    let status = Command::new("zig")
+        .current_dir(root)
+        .args([
+            "cc",
+            "-target",
+            "x86_64-linux-musl",
+            "-nostdlib",
+            "-Wl,-dynamic-linker,/lib/ld-musl-x86_64.so.1",
+            "-Wl,-rpath,/lib",
+            "-fPIC",
+            "-O2",
+            "../compat/linux/dynamic-shlib.c",
+            &format!("-L{}", output.to_string_lossy()),
+            "-lcalc",
+            "-o",
+            &dynamic_shlib_output.to_string_lossy(),
+        ])
+        .status()
+        .map_err(|error| format!("failed to start dynamic-shlib compiler: {error}"))?;
+    if !status.success() {
+        return Err(format!("dynamic-shlib compilation exited with {status}"));
     }
     for (source, executable) in [
         ("dynamic-hello.c", "dynamic-hello"),

@@ -520,6 +520,14 @@ pub fn yield_current(context: UserContext) -> *const UserContext {
         scheduler.tasks[previous].interrupt_context.r13 = context.r13;
         scheduler.tasks[previous].interrupt_context.r14 = context.r14;
         scheduler.tasks[previous].interrupt_context.r15 = context.r15;
+        scheduler.tasks[previous].interrupt_context.rdi = context.rdi;
+        scheduler.tasks[previous].interrupt_context.rsi = context.rsi;
+        scheduler.tasks[previous].interrupt_context.rdx = context.rdx;
+        scheduler.tasks[previous].interrupt_context.r8 = context.r8;
+        scheduler.tasks[previous].interrupt_context.r9 = context.r9;
+        scheduler.tasks[previous].interrupt_context.r10 = context.r10;
+        scheduler.tasks[previous].interrupt_context.rcx = context.rcx;
+        scheduler.tasks[previous].interrupt_context.r11 = context.r11;
         scheduler.tasks[previous].interrupt_context.rax = context.return_value;
         scheduler.tasks[previous].interrupt_context.flags = context.flags;
         scheduler.tasks[previous].interrupt_context.stack_pointer = context.stack_pointer;
@@ -600,6 +608,8 @@ pub fn timer_tick(context: *mut InterruptContext) -> *const InterruptContext {
                 .instruction_pointer,
             flags: scheduler.tasks[previous].interrupt_context.flags | 0x202,
             stack_pointer: scheduler.tasks[previous].interrupt_context.stack_pointer,
+            rcx: scheduler.tasks[previous].interrupt_context.rcx,
+            r11: scheduler.tasks[previous].interrupt_context.r11,
         };
         scheduler.current = next;
         let previous_tid = scheduler.tasks[previous].tid;
@@ -1652,6 +1662,8 @@ pub fn exec_current(process: Box<Process>) -> *const UserContext {
             instruction_pointer: process.entry(),
             flags: 0x202,
             stack_pointer: process.user_stack_top(),
+            rcx: 0,
+            r11: 0x202,
         };
         let interrupt_context =
             InterruptContext::initial(process.entry(), process.user_stack_top());
@@ -1851,6 +1863,8 @@ pub fn block_pipe_current(descriptor: u64, context: UserContext) -> *const UserC
             scheduler.tasks[previous].interrupt_context.r9 = context.r9;
             scheduler.tasks[previous].interrupt_context.r10 = context.r10;
             scheduler.tasks[previous].interrupt_context.rax = context.return_value;
+            scheduler.tasks[previous].interrupt_context.rcx = context.rcx;
+            scheduler.tasks[previous].interrupt_context.r11 = context.r11;
             let (code_segment, stack_segment) = crate::gdt::user_interrupt_selectors();
             scheduler.tasks[previous].interrupt_context.instruction_pointer = context.instruction_pointer;
             scheduler.tasks[previous].interrupt_context.flags = context.flags | 0x202;
@@ -1897,6 +1911,14 @@ pub fn futex_wait_current(uaddr: u64, bitset: u32, context: UserContext) -> *con
             scheduler.tasks[previous].interrupt_context.r13 = context.r13;
             scheduler.tasks[previous].interrupt_context.r14 = context.r14;
             scheduler.tasks[previous].interrupt_context.r15 = context.r15;
+            scheduler.tasks[previous].interrupt_context.rdi = context.rdi;
+            scheduler.tasks[previous].interrupt_context.rsi = context.rsi;
+            scheduler.tasks[previous].interrupt_context.rdx = context.rdx;
+            scheduler.tasks[previous].interrupt_context.r8 = context.r8;
+            scheduler.tasks[previous].interrupt_context.r9 = context.r9;
+            scheduler.tasks[previous].interrupt_context.r10 = context.r10;
+            scheduler.tasks[previous].interrupt_context.rcx = context.rcx;
+            scheduler.tasks[previous].interrupt_context.r11 = context.r11;
             scheduler.tasks[previous].interrupt_context.rax = 0;
             let (code_segment, stack_segment) = crate::gdt::user_interrupt_selectors();
             scheduler.tasks[previous].interrupt_context.instruction_pointer = context.instruction_pointer;
@@ -1943,6 +1965,14 @@ pub fn wait_current(pid: u64, status_ptr: u64, context: UserContext) -> *const U
             scheduler.tasks[previous].interrupt_context.r13 = context.r13;
             scheduler.tasks[previous].interrupt_context.r14 = context.r14;
             scheduler.tasks[previous].interrupt_context.r15 = context.r15;
+            scheduler.tasks[previous].interrupt_context.rdi = context.rdi;
+            scheduler.tasks[previous].interrupt_context.rsi = context.rsi;
+            scheduler.tasks[previous].interrupt_context.rdx = context.rdx;
+            scheduler.tasks[previous].interrupt_context.r8 = context.r8;
+            scheduler.tasks[previous].interrupt_context.r9 = context.r9;
+            scheduler.tasks[previous].interrupt_context.r10 = context.r10;
+            scheduler.tasks[previous].interrupt_context.rcx = context.rcx;
+            scheduler.tasks[previous].interrupt_context.r11 = context.r11;
             scheduler.tasks[previous].interrupt_context.rax = context.return_value;
             let (code_segment, stack_segment) = crate::gdt::user_interrupt_selectors();
             scheduler.tasks[previous].interrupt_context.instruction_pointer = context.instruction_pointer;
@@ -2011,6 +2041,8 @@ fn new_task(
             instruction_pointer: entry,
             flags: 0x202,
             stack_pointer: stack_top,
+            rcx: 0,
+            r11: 0x202,
         },
         interrupt_context: InterruptContext::initial(entry, stack_top),
         process: Some(Arc::new(Mutex::new(*process))),
