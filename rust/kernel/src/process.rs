@@ -187,48 +187,19 @@ impl Process {
             self.mmap_next = self.mmap_next.checked_add(aligned_length).ok_or(())?;
             base
         };
-        let mut pte_flags = paging::MAP_USER;
-        if prot & 2 != 0 {
-            pte_flags |= paging::MAP_WRITABLE;
-        }
-        if prot & 4 == 0 {
-            pte_flags |= paging::MAP_NO_EXECUTE;
-        }
-        let mut allocated = Vec::new();
-        let mut page = base_address;
-        while page < base_address + aligned_length {
-            if map_fixed {
+        if map_fixed {
+            let mut page = base_address;
+            while page < base_address + aligned_length {
                 if let Ok(Some(physical)) = paging::unmap(self.space, page) {
                     let _ = memory::free_frame(memory::PhysFrame(physical));
                     if let Some(pos) = self.mappings.iter().position(|m| m.virtual_address == page) {
                         self.mappings.remove(pos);
                     }
                 }
+                page += PAGE_SIZE;
             }
-            let frame = memory::alloc_frame().ok_or(())?;
-            let physical = frame.start_address();
-            if let Some(virt) = paging::phys_to_virt(physical) {
-                unsafe {
-                    ptr::write_bytes(virt as *mut u8, 0, PAGE_SIZE as usize);
-                }
-            }
-            if paging::map(self.space, page, physical, pte_flags).is_err() {
-                let _ = memory::free_frame(frame);
-                for (unmap_page, unmap_phys) in allocated {
-                    let _ = paging::unmap(self.space, unmap_page);
-                    let _ = memory::free_frame(memory::PhysFrame(unmap_phys));
-                }
-                return Err(());
-            }
-            allocated.push((page, physical));
-            page += PAGE_SIZE;
         }
-        for (mapped_page, physical) in allocated {
-            self.mappings.push(MappedPage {
-                virtual_address: mapped_page,
-                physical_address: physical,
-            });
-        }
+
         let mut vma_flags = crate::vma::VmaFlags::ANONYMOUS;
         if prot & 1 != 0 {
             vma_flags |= crate::vma::VmaFlags::READ;
@@ -239,12 +210,12 @@ impl Process {
         if prot & 4 != 0 {
             vma_flags |= crate::vma::VmaFlags::EXEC;
         }
-        let _ = self.memory_map.lock().insert_vma(
+        self.memory_map.lock().insert_vma(
             base_address,
             base_address + aligned_length,
             vma_flags,
             crate::vma::VmaBacking::Anonymous,
-        );
+        )?;
         Ok(base_address)
     }
 
@@ -481,7 +452,7 @@ fn load_elf_with_personality(
 
     let memory_map = alloc::sync::Arc::new(spin::Mutex::new(crate::vma::ProcessMemoryMap::new(
         USER_STACK_TOP,
-        USER_STACK_TOP - 8 * 1024 * 1024,
+        USER_STACK_TOP - 16 * 1024 * 1024,
     )));
     crate::vma::register_address_space_vmas(space, alloc::sync::Arc::clone(&memory_map));
 

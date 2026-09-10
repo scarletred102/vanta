@@ -466,3 +466,8 @@ pub fn frame_ref_dec(frame: PhysFrame) -> u16 {
 pub fn free_frames_count() -> usize {
     FRAME_ALLOCATOR.lock().free_frames
 }
+
+/// Query recorded memory statistics.
+pub fn stats() -> MemoryStats {
+    *MEMORY_STATS.lock()
+}

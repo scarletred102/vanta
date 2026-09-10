@@ -509,11 +509,16 @@ pub fn protect(
         let page_vaddr = virtual_address
             .checked_add((index as u64) * PAGE_SIZE)
             .ok_or(MapError::UnalignedAddress)?;
-        let location = pte_location(space, page_vaddr, false, false)?
-            .ok_or(MapError::NoHhdm)?;
-        let entry = read_entry(location.table_phys, location.index).ok_or(MapError::NoHhdm)?;
+        let location = match pte_location(space, page_vaddr, false, false)? {
+            Some(loc) => loc,
+            None => continue,
+        };
+        let entry = match read_entry(location.table_phys, location.index) {
+            Some(e) => e,
+            None => continue,
+        };
         if entry & PRESENT == 0 {
-            return Err(MapError::NoHhdm);
+            continue;
         }
         let physical = entry & ADDRESS_MASK;
         let new_entry = physical | flags | PRESENT;

@@ -105,6 +105,9 @@ pub enum LinuxOp {
     EPollPWait,
     EventFd,
     EventFd2,
+    GetPriority,
+    SetPriority,
+    Sysinfo,
     Unsupported(u64),
 }
 
@@ -441,6 +444,7 @@ pub fn translate(number: u64) -> Result<Translation, UnsupportedSyscall> {
         89 | 267 => (LinuxOp::ReadLink, None),
         96 => (LinuxOp::GetTimeOfDay, None),
         97 => (LinuxOp::Prlimit64, None),
+        99 => (LinuxOp::Sysinfo, None),
         102 | 107 => (LinuxOp::GetUid, None),
         104 | 108 => (LinuxOp::GetGid, None),
         105 | 113 | 117 | 122 => (LinuxOp::SetUid, None),
@@ -457,6 +461,8 @@ pub fn translate(number: u64) -> Result<Translation, UnsupportedSyscall> {
         130 => (LinuxOp::Nanosleep, None),
         131 => (LinuxOp::SigAltStack, None),
         135 => (LinuxOp::Personality, None),
+        140 => (LinuxOp::GetPriority, None),
+        141 => (LinuxOp::SetPriority, None),
         157 => (LinuxOp::Prctl, None),
         158 => (LinuxOp::ArchPrctl, None),
         160 | 302 => (LinuxOp::Prlimit64, None),

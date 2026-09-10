@@ -132,6 +132,7 @@ pub const PRIO_NORMAL_MAX: u8 = 15;
 #[allow(dead_code)]
 pub const PRIO_BATCH_MIN: u8 = 16;
 pub const PRIO_BATCH_MAX: u8 = 19;
+pub const MAX_TASKS: usize = 4096;
 
 pub fn slice_for_priority(priority: u8) -> u8 {
     match priority {
@@ -695,6 +696,7 @@ pub fn exit_current(code: u64) -> *const UserContext {
                 parent.state = TaskState::Runnable;
                 parent.context.return_value = return_val;
                 parent.interrupt_context.rax = return_val;
+                scheduler.tasks[current].state = TaskState::Reaped;
             }
         }
 
@@ -746,6 +748,10 @@ pub fn exit_current(code: u64) -> *const UserContext {
                 parent.state = TaskState::Runnable;
                 parent.context.return_value = return_val;
                 parent.interrupt_context.rax = return_val;
+                if let Some(ref mut cur_sched) = *current_scheduler().lock() {
+                    let cur = cur_sched.current;
+                    cur_sched.tasks[cur].state = TaskState::Reaped;
+                }
                 break;
             }
         }
@@ -1001,6 +1007,51 @@ pub fn getsid_task(pid: u64) -> Option<u64> {
     for task in scheduler.tasks.iter() {
         if task.tgid == target_pid {
             return Some(task.sid);
+        }
+    }
+    None
+}
+
+pub fn set_priority(pid: u64, priority: u8) -> Result<(), ()> {
+    let clamped = priority.min(PRIO_BATCH_MAX);
+    if pid == 0 {
+        let mut scheduler = current_scheduler().lock();
+        let Some(scheduler) = scheduler.as_mut() else { return Err(()); };
+        let current = scheduler.current;
+        let task = &mut scheduler.tasks[current];
+        task.priority = clamped;
+        task.base_priority = clamped;
+        task.time_slice_remaining = slice_for_priority(clamped);
+        return Ok(());
+    }
+    for sched_lock in &SCHEDULERS {
+        let mut scheduler = sched_lock.lock();
+        let Some(scheduler) = scheduler.as_mut() else { continue; };
+        for task in scheduler.tasks.iter_mut() {
+            if task.tgid == pid {
+                task.priority = clamped;
+                task.base_priority = clamped;
+                task.time_slice_remaining = slice_for_priority(clamped);
+                return Ok(());
+            }
+        }
+    }
+    Err(())
+}
+
+pub fn get_priority(pid: u64) -> Option<u8> {
+    if pid == 0 {
+        let scheduler = current_scheduler().lock();
+        let scheduler = scheduler.as_ref()?;
+        return Some(scheduler.tasks[scheduler.current].priority);
+    }
+    for sched_lock in &SCHEDULERS {
+        let scheduler = sched_lock.lock();
+        let Some(scheduler) = scheduler.as_ref() else { continue; };
+        for task in scheduler.tasks.iter() {
+            if task.tgid == pid {
+                return Some(task.priority);
+            }
         }
     }
     None
@@ -1352,7 +1403,6 @@ pub fn can_mutate_path(path: &str) -> bool {
 }
 
 pub fn spawn_current(process: Box<Process>) -> Result<u64, ()> {
-    const MAX_TASKS: usize = 256;
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
     let parent_tgid = scheduler.tasks[scheduler.current].tgid;
@@ -1393,7 +1443,6 @@ pub fn spawn_with_stdio_current(
     stdout: u64,
     stderr: u64,
 ) -> Result<u64, ()> {
-    const MAX_TASKS: usize = 256;
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
     let parent_tgid = scheduler.tasks[scheduler.current].tgid;
@@ -1452,7 +1501,6 @@ pub fn clone_task_current(
     context: UserContext,
     interrupt_context: InterruptContext,
 ) -> Result<u64, ()> {
-    const MAX_TASKS: usize = 256;
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
     let current = scheduler.current;

@@ -133,6 +133,10 @@ pub fn swap_start_lba() -> u64 {
     SWAP_START_LBA.load(Ordering::Relaxed)
 }
 
+pub fn swap_total_sectors() -> u64 {
+    SWAP_TOTAL_SECTORS.load(Ordering::Relaxed)
+}
+
 pub fn write_page_to_disk(slot: u32, page_phys: u64) -> Result<(), ()> {
     let start_lba = swap_start_lba();
     let sector_base = start_lba + (slot as u64) * 8;

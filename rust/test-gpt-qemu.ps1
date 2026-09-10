@@ -143,6 +143,7 @@ $common = @(
     "[net] virtio-net adapter initialized",
     "[linux-dynamic] network acceptance passed",
     "[linux-fork] 50-iteration fork loop verified",
+    "[linux-fork] Vector 1: 1000-fork 10MB COW stress verified",
     "[linux-fork] COW fork and waitpid verified",
     "[fault] user task killed by SIGSEGV",
     "[linux-fork] unmapped read fault SIGSEGV verified",
@@ -150,7 +151,10 @@ $common = @(
     "[linux-fork] read-only mapped page write SIGSEGV verified",
     "[linux-fork] concurrent COW race 2000-iteration test verified",
     "[linux-fork] stack auto-expansion verified",
+    "[linux-fork] Vector 3: 8MB stack auto-expansion verified",
     "[linux-fork] anonymous demand paging verified",
+    "[linux-fork] Vector 2: 128MB demand paging verified",
+    "[linux-fork] Vector 4: interactive preemption vs 4 CPU thrashers at priority 16 verified",
     "[linux-fork] demand-paged process exit and address space destruction verified",
     "[proc] destroy_address_space space=",
     "[linux-epoll] epoll and eventfd multiplexing verified",
@@ -189,4 +193,4 @@ Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required 
 Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
 
 Write-Host "[test] GPT Gate A, Gate B, Gate C, Gate D, and Gate E acceptance passed"
-$first -split "`n" | Where-Object { $_ -match "SIGSEGV|linux-fork|destroy_address_space" } | ForEach-Object { Write-Host $_ }
+$first -split "`n" | Where-Object { $_ -match "SIGSEGV|linux-fork|destroy_address_space|Vector" } | ForEach-Object { Write-Host $_ }

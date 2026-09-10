@@ -221,6 +221,39 @@ impl ProcessMemoryMap {
         affected
     }
 
+    pub fn protect_vma_range(&mut self, start: u64, end: u64, new_flags: VmaFlags) {
+        let keys: Vec<u64> = self
+            .vmas
+            .range(..end)
+            .filter_map(|(&v_start, vma)| if vma.end > start { Some(v_start) } else { None })
+            .collect();
+
+        let mut to_reinsert = Vec::new();
+        for k in keys {
+            if let Some(vma) = self.vmas.remove(&k) {
+                // Left surviving portion
+                if vma.start < start {
+                    to_reinsert.push(Vma::new(vma.start, start, vma.flags, vma.backing));
+                }
+                // Middle protected portion
+                let mid_start = vma.start.max(start);
+                let mid_end = vma.end.min(end);
+                if mid_start < mid_end {
+                    let flags = (vma.flags.0 & !(VmaFlags::READ.0 | VmaFlags::WRITE.0 | VmaFlags::EXEC.0)) | new_flags.0;
+                    to_reinsert.push(Vma::new(mid_start, mid_end, VmaFlags(flags), vma.backing));
+                }
+                // Right surviving portion
+                if vma.end > end {
+                    to_reinsert.push(Vma::new(end, vma.end, vma.flags, vma.backing));
+                }
+            }
+        }
+
+        for vma in to_reinsert {
+            self.vmas.insert(vma.start, vma);
+        }
+    }
+
     pub fn find_stack_vma(&self) -> Option<&Vma> {
         self.vmas.values().find(|vma| vma.flags.contains(VmaFlags::STACK))
     }
@@ -338,7 +371,7 @@ pub fn get_address_space_vmas(space: AddressSpace) -> Option<Arc<Mutex<ProcessMe
     ADDRESS_SPACE_VMAS.lock().get(&space.pml4_phys).cloned()
 }
 
-pub fn resolve_demand_page(space: AddressSpace, address: u64) -> Result<bool, ()> {
+pub fn resolve_demand_page(space: AddressSpace, address: u64, is_write: bool) -> Result<bool, ()> {
     if address >= 0x0000_8000_0000_0000 {
         return Ok(false);
     }
@@ -371,6 +404,9 @@ pub fn resolve_demand_page(space: AddressSpace, address: u64) -> Result<bool, ()
 
     // Check VMA range
     if let Some(vma) = mem_map.find_vma(address) {
+        if is_write && !vma.flags.contains(VmaFlags::WRITE) {
+            return Ok(false);
+        }
         if vma.backing == VmaBacking::Anonymous {
             let page_aligned = address & !(PAGE_SIZE - 1);
             let frame = crate::memory::alloc_frame().ok_or(())?;

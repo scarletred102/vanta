@@ -648,6 +648,34 @@ fn dispatch_linux(
                 linux_poll_user(arg1, arg2 as usize, arg3)
             }
             vanta_linuxd::LinuxOp::Select | vanta_linuxd::LinuxOp::PSelect6 => 0,
+            vanta_linuxd::LinuxOp::SchedYield => SYSCALL_RETURN_YIELD,
+            vanta_linuxd::LinuxOp::SetPriority => {
+                let res = crate::scheduler::set_priority(arg2, arg3 as u8);
+                if res.is_ok() { 0 } else { SYSCALL_ERROR }
+            }
+            vanta_linuxd::LinuxOp::GetPriority => {
+                crate::scheduler::get_priority(arg2).map(|p| p as u64).unwrap_or(SYSCALL_ERROR)
+            }
+            vanta_linuxd::LinuxOp::Sysinfo => {
+                let stats = crate::memory::stats();
+                let free_frames = crate::memory::free_frames_count() as u64;
+                let total_frames = stats.tracked_frames as u64;
+                let mut buf = [0u8; 112];
+                buf[0..8].copy_from_slice(&10u64.to_ne_bytes()); // uptime
+                buf[32..40].copy_from_slice(&(total_frames * 4096).to_ne_bytes()); // totalram
+                buf[40..48].copy_from_slice(&(free_frames * 4096).to_ne_bytes()); // freeram
+                buf[56..64].copy_from_slice(&(1024u64 * 1024).to_ne_bytes()); // bufferram
+                let swap_total = crate::swap::swap_total_sectors() * 512;
+                buf[64..72].copy_from_slice(&swap_total.to_ne_bytes()); // totalswap
+                buf[72..80].copy_from_slice(&swap_total.to_ne_bytes()); // freeswap
+                buf[80..82].copy_from_slice(&1u16.to_ne_bytes()); // procs
+                buf[104..108].copy_from_slice(&1u32.to_ne_bytes()); // mem_unit
+                if copy_to_user(arg1, &buf).is_ok() {
+                    0
+                } else {
+                    SYSCALL_ERROR
+                }
+            }
             _ => SYSCALL_ERROR,
         },
         vanta_linuxd::BrokerDecision::Unsupported { number } => {
@@ -670,6 +698,20 @@ fn linux_mprotect_user(addr: u64, length: u64, prot: u64) -> u64 {
     if addr.checked_add(aligned_len).is_none() || addr + aligned_len >= USER_ADDRESS_LIMIT {
         return SYSCALL_ERROR;
     }
+    let mut vma_flags = crate::vma::VmaFlags::empty();
+    if prot & 1 != 0 {
+        vma_flags |= crate::vma::VmaFlags::READ;
+    }
+    if prot & 2 != 0 {
+        vma_flags |= crate::vma::VmaFlags::WRITE;
+    }
+    if prot & 4 != 0 {
+        vma_flags |= crate::vma::VmaFlags::EXEC;
+    }
+    let space = paging::current_address_space();
+    if let Some(mem_map) = crate::vma::get_address_space_vmas(space) {
+        mem_map.lock().protect_vma_range(addr, addr + aligned_len, vma_flags);
+    }
     let mut flags = paging::MAP_USER;
     if prot & 2 != 0 {
         flags |= paging::MAP_WRITABLE;
@@ -678,7 +720,7 @@ fn linux_mprotect_user(addr: u64, length: u64, prot: u64) -> u64 {
         flags |= paging::MAP_NO_EXECUTE;
     }
     let pages = (aligned_len / paging::PAGE_SIZE) as usize;
-    if paging::protect(paging::current_address_space(), addr, pages, flags).is_ok() {
+    if paging::protect(space, addr, pages, flags).is_ok() {
         0
     } else {
         SYSCALL_ERROR
@@ -742,9 +784,15 @@ fn generate_procfs_content(path: &str) -> Option<alloc::vec::Vec<u8>> {
             "processor\t: 0\nvendor_id\t: GenuineIntel\nmodel name\t: Vanta Virtual CPU\ncpu MHz\t\t: 3000.000\n\n"
         ))
     } else if path == "/proc/meminfo" {
-        Some(alloc::vec::Vec::from(
-            "MemTotal:       2097152 kB\nMemFree:        1843200 kB\nMemAvailable:   1843200 kB\nBuffers:           1024 kB\nCached:           16384 kB\n"
-        ))
+        let stats = crate::memory::stats();
+        let total_kb = (stats.tracked_frames as u64) * 4;
+        let free_kb = (crate::memory::free_frames_count() as u64) * 4;
+        let swap_total_kb = crate::swap::swap_total_sectors() / 2;
+        let s = format!(
+            "MemTotal:       {:8} kB\nMemFree:        {:8} kB\nMemAvailable:   {:8} kB\nBuffers:           1024 kB\nCached:           16384 kB\nSwapTotal:      {:8} kB\nSwapFree:       {:8} kB\n",
+            total_kb, free_kb, free_kb, swap_total_kb, swap_total_kb
+        );
+        Some(s.into_bytes())
     } else if path == "/proc/version" {
         Some(alloc::vec::Vec::from(
             "Linux version 6.1.0-vanta (vanta@build) (gcc 12.2.0) #1 SMP PREEMPT\n"
@@ -2119,7 +2167,7 @@ fn user_physical_address(address: u64, writable: bool) -> Result<u64, ()> {
     let mut flags = match paging::flags_in(space, address) {
         Some(f) => f,
         None => {
-            if let Ok(true) = crate::vma::resolve_demand_page(space, address) {
+            if let Ok(true) = crate::vma::resolve_demand_page(space, address, writable) {
                 paging::flags_in(space, address).ok_or(())?
             } else {
                 return Err(());

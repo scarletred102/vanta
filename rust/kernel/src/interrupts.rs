@@ -234,7 +234,8 @@ extern "C" fn vanta_page_fault_dispatch(
         }
 
         if fault_vaddr < 0x0000_8000_0000_0000 {
-            if let Ok(true) = crate::vma::resolve_demand_page(space, fault_vaddr) {
+            let is_write = code.contains(PageFaultErrorCode::CAUSED_BY_WRITE);
+            if let Ok(true) = crate::vma::resolve_demand_page(space, fault_vaddr, is_write) {
                 return core::ptr::null();
             }
         }

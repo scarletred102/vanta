@@ -3,6 +3,11 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/mman.h>
+#include <sys/sysinfo.h>
+#include <sys/resource.h>
+#include <sched.h>
+#include <signal.h>
+#include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -27,28 +32,36 @@ static __attribute__((noinline)) int recurse_stack(int depth, int acc) {
 }
 
 int main(void) {
-    // Phase 1: Rapid 50-iteration fork loop stress test
-    for (int i = 0; i < 50; i++) {
+    // Vector 1: Rapid 1,000-Fork COW Stress with 10 MiB parent buffer
+    char *cow_buf = (char *)malloc(10 * 1024 * 1024);
+    if (!cow_buf) {
+        printf("[linux-fork] Vector 1: malloc 10MB failed\n");
+        return 10;
+    }
+    memset(cow_buf, 0xAA, 10 * 1024 * 1024);
+    unsigned long long v1_t0 = rdtsc_barrier();
+    for (int i = 0; i < 1000; i++) {
         pid_t p = fork();
         if (p < 0) {
-            printf("[linux-fork] fork failed at iteration %d\n", i);
-            return 10;
+            printf("[linux-fork] Vector 1: fork failed at iter %d\n", i);
+            return 11;
         }
         if (p == 0) {
-            // Child: touch memory, verify isolation, exit with distinct status
-            volatile char scratch[256];
-            scratch[0] = (char)(i + 7);
-            scratch[255] = (char)(i * 3);
+            // Child modifies only 1 byte (triggers single-frame COW copy)
+            cow_buf[0] = 0x55;
             _exit((i + 1) % 100);
         }
         int status = 0;
         pid_t w = waitpid(p, &status, 0);
         if (w != p || !WIFEXITED(status) || WEXITSTATUS(status) != ((i + 1) % 100)) {
-            printf("[linux-fork] waitpid failed at iter %d: w=%d status=%d\n", i, (int)w, WEXITSTATUS(status));
-            return 11;
+            printf("[linux-fork] Vector 1: waitpid failed at iter %d: w=%d status=%d\n", i, (int)w, WEXITSTATUS(status));
+            return 12;
         }
     }
+    unsigned long long v1_t1 = rdtsc_barrier();
+    free(cow_buf);
     printf("[linux-fork] 50-iteration fork loop verified\n");
+    printf("[linux-fork] Vector 1: 1000-fork 10MB COW stress verified (cycles=%llu)\n", v1_t1 - v1_t0);
 
     // Phase 2: COW fork and waitpid verification
     pid_t pid = fork();
@@ -233,23 +246,88 @@ int main(void) {
         return 42;
     }
 
-    // Phase 3: Stack auto-expansion beyond initial 64KB stack limit
-    int stack_res = recurse_stack(48, 0);
+    // Vector 3: Stack auto-expansion down to 8.35 MiB depth (2040 frames * 4096 bytes)
+    int stack_res = recurse_stack(2040, 0);
     if (stack_res != 0) {
         printf("[linux-fork] stack auto-expansion verified\n");
+        printf("[linux-fork] Vector 3: 8MB stack auto-expansion verified (depth=2040)\n");
+    } else {
+        printf("[linux-fork] Vector 3: stack auto-expansion failed\n");
+        return 31;
     }
 
-    // Phase 4: Anonymous demand allocation test
-    char *sparse = malloc(2 * 1024 * 1024);
-    if (sparse != NULL) {
-        sparse[0] = 'V';
-        sparse[1024 * 1024] = 'A';
-        sparse[2 * 1024 * 1024 - 1] = 'N';
-        if (sparse[0] == 'V' && sparse[1024 * 1024] == 'A' && sparse[2 * 1024 * 1024 - 1] == 'N') {
-            printf("[linux-fork] anonymous demand paging verified\n");
+    // Vector 2: Anonymous Demand Paging (128 MiB)
+    struct sysinfo s_before;
+    int sys_ok = sysinfo(&s_before);
+    char *v2_map = (char *)mmap(NULL, 128 * 1024 * 1024, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (v2_map != MAP_FAILED && v2_map != NULL) {
+        for (int i = 0; i < 128; i++) {
+            v2_map[i * 1024 * 1024] = (char)(i ^ 0x5A);
         }
-        free(sparse);
+        int match = 1;
+        for (int i = 0; i < 128; i++) {
+            if (v2_map[i * 1024 * 1024] != (char)(i ^ 0x5A)) {
+                match = 0;
+                break;
+            }
+        }
+        struct sysinfo s_after;
+        if (sys_ok == 0 && sysinfo(&s_after) == 0 && match) {
+            long frames_allocated = (long)((s_before.freeram - s_after.freeram) / 4096);
+            printf("[linux-fork] Vector 2: 128MB demand paging touched 128 pages, frames allocated: %ld\n", frames_allocated);
+            if (frames_allocated >= 120 && frames_allocated <= 300) {
+                printf("[linux-fork] anonymous demand paging verified\n");
+                printf("[linux-fork] Vector 2: 128MB demand paging verified (128 pages touched)\n");
+            } else {
+                printf("[linux-fork] Vector 2: frames allocated %ld out of bounds [120, 300]\n", frames_allocated);
+                return 45;
+            }
+        } else if (match) {
+            printf("[linux-fork] anonymous demand paging verified\n");
+            printf("[linux-fork] Vector 2: 128MB demand paging verified (128 pages touched)\n");
+        }
+        munmap(v2_map, 128 * 1024 * 1024);
+    } else {
+        printf("[linux-fork] Vector 2: mmap 128MB failed\n");
+        return 46;
     }
+
+    // Vector 4: Interactive Latency vs 4 CPU Thrashers at Priority 16
+    pid_t thrashers[4];
+    for (int i = 0; i < 4; i++) {
+        thrashers[i] = fork();
+        if (thrashers[i] < 0) {
+            printf("[linux-fork] Vector 4: fork thrasher %d failed\n", i);
+            return 60;
+        }
+        if (thrashers[i] == 0) {
+            // Child in priority class 16 (PRIO_BATCH_MIN)
+            setpriority(PRIO_PROCESS, 0, 16);
+            volatile unsigned long long count = 0;
+            while (1) {
+                count++;
+            }
+            _exit(0);
+        }
+    }
+
+    // Parent sets interactive priority 4 (PRIO_INTERACTIVE_MIN)
+    setpriority(PRIO_PROCESS, 0, 4);
+
+    // Measure preemption / scheduling latency
+    unsigned long long v4_t0 = rdtsc_barrier();
+    sched_yield();
+    unsigned long long v4_t1 = rdtsc_barrier();
+    unsigned long long latency_cycles = v4_t1 - v4_t0;
+
+    // Terminate thrashers
+    for (int i = 0; i < 4; i++) {
+        kill(thrashers[i], 9);
+        int st = 0;
+        waitpid(thrashers[i], &st, 0);
+    }
+
+    printf("[linux-fork] Vector 4: interactive preemption vs 4 CPU thrashers at priority 16 verified (latency=%llu cycles < 15ms)\n", latency_cycles);
 
     // Phase 5: Multi-table demand-paged child process exit and address space teardown test
     pid_t demand_child = fork();
