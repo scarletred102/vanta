@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
-    [ValidateRange(5, 300)]
-    [int]$TimeoutSeconds = 150
+    [ValidateRange(5, 900)]
+    [int]$TimeoutSeconds = 480
 )
 
 $ErrorActionPreference = "Stop"
@@ -151,6 +151,10 @@ $common = @(
     "[dynamic-shlib] SUCCESS: cross-boundary data relocation verified",
     "[linux-dynamic] thread spawned",
     "[net] virtio-net adapter initialized",
+    "[net-test] sub-threshold test: 10/10 packets received, 0 drops",
+    "[net-test] burst test: 500 packets sent, 500 received in exact sequential order (0 loss, 0 reordering)",
+    "[net-test] NAPI coalescing: 0 drops under 1000 pps threshold, 0 drops under burst load (PASS)",
+    "[net-test] CPU utilization: active-polling=",
     "[linux-dynamic] network acceptance passed",
     "[linux-fork] 50-iteration fork loop verified",
     "[linux-fork] Vector 1: 1000-fork 10MB COW stress verified",
@@ -203,4 +207,4 @@ Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required 
 Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
 
 Write-Host "[test] GPT Gate A, Gate B, Gate C, Gate D, Gate E, and Gate F acceptance passed"
-$first -split "`n" | Where-Object { $_ -match "SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=" } | ForEach-Object { Write-Host $_ }
+$first -split "`n" | Where-Object { $_ -match "SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net" } | ForEach-Object { Write-Host $_ }

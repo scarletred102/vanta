@@ -471,10 +471,43 @@ pub fn poll_network() -> Result<(), NetworkError> {
     poll_network_locked(state)
 }
 
+pub fn dispatch_network_bottom_half() {
+    let mut state = match NETWORK.try_lock() {
+        Some(s) => s,
+        None => return,
+    };
+    if let Some(state) = state.as_mut() {
+        let _ = poll_network_locked(state);
+    }
+}
+
+pub fn socket_has_pending_data(handle: u32) -> bool {
+    let state = NETWORK.lock();
+    let Some(state) = state.as_ref() else {
+        return false;
+    };
+    if let Some(socket) = state.sockets.get(&handle) {
+        match socket {
+            Socket::Udp(udp) => !udp.rx_queue.is_empty(),
+            Socket::Tcp(tcp) => {
+                !tcp.rx_buffer.is_empty()
+                    || tcp.rx_closed
+                    || tcp.state == TcpState::Reset
+                    || tcp.state == TcpState::Closed
+            }
+            Socket::Raw => false,
+        }
+    } else {
+        false
+    }
+}
+
 fn poll_network_locked(state: &mut NetworkState) -> Result<(), NetworkError> {
     while let Some(frame) = state.device.receive()? {
+        crate::virtio_net::record_rx_packet();
         process_incoming_frame(state, &frame)?;
     }
+    crate::virtio_net::clear_bottom_half_pending();
     Ok(())
 }
 
@@ -499,7 +532,7 @@ fn process_incoming_frame(state: &mut NetworkState, frame: &[u8]) -> Result<(), 
             let Some((ip, ip_payload)) = net::parse_ipv4(eth_payload) else {
                 return Ok(());
             };
-            if ip.dest_ip != our_ip && ip.dest_ip != [255, 255, 255, 255] {
+            if ip.dest_ip != our_ip && ip.dest_ip != [127, 0, 0, 1] && ip.dest_ip != [255, 255, 255, 255] {
                 return Ok(());
             }
 
@@ -522,7 +555,7 @@ fn process_incoming_frame(state: &mut NetworkState, frame: &[u8]) -> Result<(), 
                 }
                 net::IP_PROTOCOL_UDP => {
                     if let Some((udp, udp_data)) = net::parse_udp(ip_payload, ip.src_ip, ip.dest_ip) {
-                        for socket in state.sockets.values_mut() {
+                        for (&handle, socket) in state.sockets.iter_mut() {
                             if let Socket::Udp(udp_sock) = socket {
                                 if udp_sock.bound && (udp_sock.local_port == udp.dest_port || udp_sock.local_port == 0) {
                                     udp_sock.rx_queue.push(UdpDatagram {
@@ -530,6 +563,7 @@ fn process_incoming_frame(state: &mut NetworkState, frame: &[u8]) -> Result<(), 
                                         src_port: udp.src_port,
                                         data: udp_data.to_vec(),
                                     });
+                                    crate::scheduler::wake_pipe_waiters(0x5000_0000 | (handle as u64));
                                 }
                             }
                         }
@@ -1212,9 +1246,13 @@ pub fn socket_sendto(
 
     match action {
         SendToAction::Udp { local_port } => {
-            let dest_mac = resolve_destination_mac(state, dest_ip)?;
             let our_mac = state.device.mac();
             let our_ip = state.configuration.address;
+            let dest_mac = if dest_ip == our_ip || dest_ip == [127, 0, 0, 1] {
+                our_mac
+            } else {
+                resolve_destination_mac(state, dest_ip)?
+            };
             let frame = net::build_udp_frame(
                 our_mac,
                 dest_mac,
@@ -1225,6 +1263,9 @@ pub fn socket_sendto(
                 bytes,
             );
             state.device.transmit(&frame)?;
+            if dest_ip == our_ip || dest_ip == [127, 0, 0, 1] {
+                let _ = process_incoming_frame(state, &frame);
+            }
             Ok(bytes.len())
         }
         SendToAction::Tcp { remote_ip, remote_port, local_port, dest_mac, mut seq_num, ack_num } => {
@@ -1257,10 +1298,13 @@ pub fn socket_sendto(
             if let Some(Socket::Tcp(tcp)) = state.sockets.get_mut(&handle) {
                 tcp.seq_num = seq_num;
             }
-            let _ = poll_network_locked(state);
+
             Ok(bytes.len())
         }
-        SendToAction::Raw => Ok(bytes.len()),
+        SendToAction::Raw => {
+            state.device.transmit(bytes)?;
+            Ok(bytes.len())
+        }
     }
 }
 
@@ -1269,7 +1313,7 @@ pub fn socket_recv(handle: u32, limit: usize, nonblocking: bool) -> Result<Vec<u
         return Ok(Vec::new());
     }
 
-    for _ in 0..TCP_POLL_ATTEMPTS {
+    for _ in 0..100 {
         {
             let mut state = NETWORK.lock();
             let state = state.as_mut().ok_or(NetworkError::Unavailable)?;
@@ -1306,7 +1350,7 @@ pub fn socket_recv(handle: u32, limit: usize, nonblocking: bool) -> Result<Vec<u
         core::hint::spin_loop();
     }
 
-    Err(NetworkError::TcpReceiveTimeout)
+    Err(NetworkError::WouldBlock)
 }
 
 pub fn socket_recvfrom(
@@ -1314,7 +1358,7 @@ pub fn socket_recvfrom(
     limit: usize,
     nonblocking: bool,
 ) -> Result<(Vec<u8>, Ipv4Address, u16), NetworkError> {
-    for _ in 0..TCP_POLL_ATTEMPTS {
+    for _ in 0..100 {
         {
             let mut state = NETWORK.lock();
             let state = state.as_mut().ok_or(NetworkError::Unavailable)?;
@@ -1352,7 +1396,7 @@ pub fn socket_recvfrom(
         }
         core::hint::spin_loop();
     }
-    Err(NetworkError::TcpReceiveTimeout)
+    Err(NetworkError::WouldBlock)
 }
 
 pub fn socket_getsockname(handle: u32) -> Result<(Ipv4Address, u16), NetworkError> {

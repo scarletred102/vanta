@@ -425,16 +425,7 @@ fn dispatch_linux(
     arg5: u64,
     arg6: u64,
 ) -> u64 {
-    crate::serial_println!(
-        "[linux-syscall] nr={} a1={:#x} a2={:#x} a3={:#x} a4={:#x} a5={:#x} a6={:#x}",
-        number,
-        arg1,
-        arg2,
-        arg3,
-        arg4,
-        arg5,
-        arg6
-    );
+
     let request = vanta_linuxd::LinuxSyscallRequest {
         number,
         args: [arg1, arg2, arg3, arg4, arg5, arg6],
@@ -670,14 +661,22 @@ fn dispatch_linux(
                     linux_nanosleep_user(arg1, arg2)
                 }
             }
-            vanta_linuxd::LinuxOp::SendTo | vanta_linuxd::LinuxOp::SendMsg => {
+            vanta_linuxd::LinuxOp::SendTo => {
+                linux_sendto_user(arg1, arg2, arg3, arg4, arg5, arg6)
+            }
+            vanta_linuxd::LinuxOp::SendMsg => {
                 write_user(arg1, arg2, arg3)
             }
-            vanta_linuxd::LinuxOp::RecvFrom | vanta_linuxd::LinuxOp::RecvMsg => {
+            vanta_linuxd::LinuxOp::RecvFrom => {
+                linux_recvfrom_user(arg1, arg2, arg3, arg4, arg5, arg6)
+            }
+            vanta_linuxd::LinuxOp::RecvMsg => {
                 read_user(arg1, arg2, arg3)
             }
-            vanta_linuxd::LinuxOp::Bind
-            | vanta_linuxd::LinuxOp::Listen
+            vanta_linuxd::LinuxOp::Bind => {
+                linux_bind_user(arg1, arg2, arg3)
+            }
+            vanta_linuxd::LinuxOp::Listen
             | vanta_linuxd::LinuxOp::Accept
             | vanta_linuxd::LinuxOp::Accept4 => 0,
             vanta_linuxd::LinuxOp::GetSockName
@@ -2778,10 +2777,101 @@ fn pipe_user(pointer: u64, flags: u64) -> u64 {
 }
 
 fn socket_user(domain: u64, socket_type: u64, protocol: u64) -> u64 {
-    if domain != 2 || socket_type != 1 || protocol != 0 {
+    let raw_type = socket_type & 0xf;
+    if domain != 2 || (raw_type != 1 && raw_type != 2) {
         return SYSCALL_ERROR;
     }
-    crate::scheduler::open_socket_current().unwrap_or(SYSCALL_ERROR)
+    crate::scheduler::open_socket_current(domain, raw_type, protocol).unwrap_or(SYSCALL_ERROR)
+}
+
+fn linux_bind_user(descriptor: u64, addr_ptr: u64, addr_len: u64) -> u64 {
+    if addr_ptr == 0 || addr_len < 8 {
+        return SYSCALL_ERROR;
+    }
+    let Ok(addr_bytes) = copy_from_user(addr_ptr, 8, false) else {
+        return SYSCALL_ERROR;
+    };
+    let family = u16::from_ne_bytes([addr_bytes[0], addr_bytes[1]]);
+    if family != 2 {
+        return SYSCALL_ERROR;
+    }
+    let port = u16::from_be_bytes([addr_bytes[2], addr_bytes[3]]);
+    let ip = [addr_bytes[4], addr_bytes[5], addr_bytes[6], addr_bytes[7]];
+    crate::scheduler::bind_current(descriptor, ip, port)
+        .map(|()| 0)
+        .unwrap_or(SYSCALL_ERROR)
+}
+
+fn linux_sendto_user(
+    descriptor: u64,
+    buf_ptr: u64,
+    len: u64,
+    _flags: u64,
+    dest_ptr: u64,
+    dest_len: u64,
+) -> u64 {
+    if validate_user_buffer(buf_ptr, len, false).is_err() {
+        return SYSCALL_ERROR;
+    }
+    if dest_ptr != 0 && dest_len >= 8 {
+        let Ok(addr_bytes) = copy_from_user(dest_ptr, 8, false) else {
+            return SYSCALL_ERROR;
+        };
+        let family = u16::from_ne_bytes([addr_bytes[0], addr_bytes[1]]);
+        if family != 2 {
+            return SYSCALL_ERROR;
+        }
+        let port = u16::from_be_bytes([addr_bytes[2], addr_bytes[3]]);
+        let ip = [addr_bytes[4], addr_bytes[5], addr_bytes[6], addr_bytes[7]];
+        let Ok(payload) = copy_from_user(buf_ptr, len, false) else {
+            return SYSCALL_ERROR;
+        };
+        crate::scheduler::sendto_current(descriptor, &payload, ip, port)
+            .map(|n| n as u64)
+            .unwrap_or(SYSCALL_ERROR)
+    } else {
+        write_user(descriptor, buf_ptr, len)
+    }
+}
+
+fn linux_recvfrom_user(
+    descriptor: u64,
+    buf_ptr: u64,
+    len: u64,
+    flags: u64,
+    src_ptr: u64,
+    addrlen_ptr: u64,
+) -> u64 {
+    if validate_user_buffer(buf_ptr, len, true).is_err() {
+        return SYSCALL_ERROR;
+    }
+    let nonblocking = (flags & 0x40) != 0; // MSG_DONTWAIT
+    let to_read = len.min(65536) as usize;
+
+    match crate::scheduler::recvfrom_current(descriptor, to_read, nonblocking) {
+        Ok((bytes, src_ip, src_port)) => {
+            if copy_to_user(buf_ptr, &bytes).is_err() {
+                return SYSCALL_ERROR;
+            }
+            if src_ptr != 0 && addrlen_ptr != 0 {
+                let mut sockaddr = [0u8; 16];
+                sockaddr[0..2].copy_from_slice(&2_u16.to_ne_bytes());
+                sockaddr[2..4].copy_from_slice(&src_port.to_be_bytes());
+                sockaddr[4..8].copy_from_slice(&src_ip);
+                let _ = copy_to_user(src_ptr, &sockaddr);
+                let _ = copy_to_user(addrlen_ptr, &16_u32.to_ne_bytes());
+            }
+            bytes.len() as u64
+        }
+        Err(crate::network::NetworkError::WouldBlock) => {
+            if nonblocking {
+                return (-(11 as i64)) as u64; // -EAGAIN
+            }
+            current_cpu_local().block_descriptor = descriptor;
+            SYSCALL_RETURN_BLOCK
+        }
+        Err(_) => SYSCALL_ERROR,
+    }
 }
 
 fn connect_user(descriptor: u64, pointer: u64, length: u64) -> u64 {

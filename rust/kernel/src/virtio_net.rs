@@ -26,9 +26,10 @@ const DESC_WRITE: u16 = 2;
 const DMA_MIN_PHYSICAL: u64 = 0x10_0000;
 const VIRTIO_NET_HEADER_SIZE: usize = 10;
 const FRAME_BUFFER_SIZE: usize = PAGE_SIZE as usize;
-const RX_BUFFER_COUNT: usize = 32;
-const POLL_ATTEMPTS: usize = 1_000_000;
+const RX_BUFFER_COUNT: usize = 128;
+const POLL_ATTEMPTS: usize = 20_000;
 const FEATURE_MAC: u32 = 1 << 5;
+const NAPI_BURST_THRESHOLD: u64 = 1000;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -60,6 +61,89 @@ pub enum VirtioNetError {
     TransmitTimeout,
 }
 
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64};
+
+static IRQ_COUNT: AtomicU64 = AtomicU64::new(0);
+static RX_PACKET_COUNT: AtomicU64 = AtomicU64::new(0);
+static TX_PACKET_COUNT: AtomicU64 = AtomicU64::new(0);
+static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+static VIRTIO_IO_BASE: AtomicU16 = AtomicU16::new(0);
+static NET_BH_PENDING: AtomicBool = AtomicBool::new(false);
+static NAPI_MODE: AtomicBool = AtomicBool::new(false);
+static PACKETS_IN_WINDOW: AtomicU64 = AtomicU64::new(0);
+static WINDOW_START_TICKS: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug)]
+pub struct NetStats {
+    pub irq_count: u64,
+    pub rx_packets: u64,
+    pub tx_packets: u64,
+    pub drop_count: u64,
+    pub napi_mode: bool,
+}
+
+pub fn get_net_stats() -> NetStats {
+    NetStats {
+        irq_count: IRQ_COUNT.load(Ordering::Relaxed),
+        rx_packets: RX_PACKET_COUNT.load(Ordering::Relaxed),
+        tx_packets: TX_PACKET_COUNT.load(Ordering::Relaxed),
+        drop_count: DROP_COUNT.load(Ordering::Relaxed),
+        napi_mode: NAPI_MODE.load(Ordering::Relaxed),
+    }
+}
+
+pub fn is_bottom_half_pending() -> bool {
+    NET_BH_PENDING.load(Ordering::Acquire)
+}
+
+pub fn clear_bottom_half_pending() {
+    NET_BH_PENDING.store(false, Ordering::Release);
+}
+
+pub fn record_rx_packet() {
+    RX_PACKET_COUNT.fetch_add(1, Ordering::Relaxed);
+    let current_ticks = crate::timer::current_tick();
+    let start = WINDOW_START_TICKS.load(Ordering::Acquire);
+    if current_ticks.saturating_sub(start) >= 100 {
+        WINDOW_START_TICKS.store(current_ticks, Ordering::Release);
+        let in_window = PACKETS_IN_WINDOW.swap(1, Ordering::Relaxed);
+        let pps = in_window * 10;
+        if pps >= NAPI_BURST_THRESHOLD {
+            if !NAPI_MODE.load(Ordering::Acquire) {
+                NAPI_MODE.store(true, Ordering::Release);
+                crate::serial_println!(
+                    "[virtio-net] NAPI burst mode engaged: ~{} pps (threshold={})",
+                    pps,
+                    NAPI_BURST_THRESHOLD
+                );
+            }
+        } else if NAPI_MODE.load(Ordering::Acquire) {
+            NAPI_MODE.store(false, Ordering::Release);
+            crate::serial_println!(
+                "[virtio-net] NAPI mode disengaged: ~{} pps, normal interrupt mode restored",
+                pps
+            );
+        }
+    } else {
+        PACKETS_IN_WINDOW.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub fn handle_interrupt() {
+    let io_base = VIRTIO_IO_BASE.load(Ordering::Acquire);
+    if io_base == 0 {
+        return;
+    }
+    let isr = port_read8(io_base, 0x13);
+    if isr & 1 != 0 {
+        let count = IRQ_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if count <= 5 || count % 100 == 0 {
+            crate::serial_println!("[virtio-net] isr triggered: isr={:#x} irq_count={}", isr, count);
+        }
+        NET_BH_PENDING.store(true, Ordering::Release);
+    }
+}
+
 pub struct VirtioNet {
     io_base: u16,
     mac: [u8; 6],
@@ -81,6 +165,32 @@ impl VirtioNet {
             return Err(VirtioNetError::UnsupportedDevice);
         }
         let io_base = (bar & 0xfffc) as u16;
+        VIRTIO_IO_BASE.store(io_base, Ordering::Release);
+
+        let irq_reg = crate::pci::read_u32(address, 0x3c);
+        let irq_line = (irq_reg & 0xff) as u8;
+        crate::serial_println!(
+            "[virtio-net] pci address={:?} io_base={:#x} irq_line={} irq_pin={}",
+            address,
+            io_base,
+            irq_line,
+            (irq_reg >> 8) & 0xff
+        );
+        if irq_line != 0 && irq_line != 0xff {
+            let res = crate::ioapic::route_irq(
+                irq_line as u32,
+                crate::interrupts::HwIrq::VirtioNet.as_u8(),
+                true,
+                true,
+            );
+            crate::serial_println!(
+                "[virtio-net] routed IRQ line {} to vector {} (ioapic res={:?})",
+                irq_line,
+                crate::interrupts::HwIrq::VirtioNet.as_u8(),
+                res
+            );
+        }
+
         let command = crate::pci::read_u32(address, 0x04) as u16 | 0x0004 | 0x0001;
         let previous_command = crate::pci::read_u32(address, 0x04);
         crate::pci::write_u32(
@@ -135,7 +245,19 @@ impl VirtioNet {
         self.mac
     }
 
+    pub fn set_interrupt_suppression(&mut self, suppress: bool) {
+        if let Ok(queue) = queue_virtual(&self.rx) {
+            let avail = (queue + self.rx.avail_offset as u64) as *mut u16;
+            unsafe {
+                let current = avail.read_volatile();
+                let new_flags = if suppress { current | 1 } else { current & !1 };
+                avail.write_volatile(new_flags);
+            }
+        }
+    }
+
     pub fn transmit(&mut self, frame: &[u8]) -> Result<(), VirtioNetError> {
+        TX_PACKET_COUNT.fetch_add(1, Ordering::Relaxed);
         if frame.len() + VIRTIO_NET_HEADER_SIZE > FRAME_BUFFER_SIZE {
             return Err(VirtioNetError::FrameTooLarge);
         }

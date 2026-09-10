@@ -168,6 +168,7 @@ struct Task {
     comm: [u8; 16],
     pdeath_signal: u64,
     rlimits: [u64; 32],
+    cpu_ticks: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -249,8 +250,10 @@ struct OpenDirectory {
     offset: usize,
 }
 
-struct OpenSocket {
-    connection: Option<crate::network::TcpConnection>,
+pub struct OpenSocket {
+    pub handle: u32,
+    pub socket_type: u32,
+    pub connection: Option<crate::network::TcpConnection>,
 }
 
 struct IpcEndpoint {
@@ -335,7 +338,7 @@ fn close_pipe_writer(writer: Arc<Mutex<PipeWriter>>) {
     }
 }
 
-fn wake_pipe_waiters(pipe_id: u64) {
+pub(crate) fn wake_pipe_waiters(pipe_id: u64) {
     for sched_lock in &SCHEDULERS {
         let mut scheduler = sched_lock.lock();
         let Some(scheduler) = scheduler.as_mut() else {
@@ -693,6 +696,10 @@ pub fn timer_tick(context: *mut InterruptContext) -> *const InterruptContext {
         }
     }
 
+    if crate::virtio_net::is_bottom_half_pending() {
+        crate::network::dispatch_network_bottom_half();
+    }
+
     let interrupted = unsafe { &*context };
     if !interrupted.interrupted_user_mode() {
         return context;
@@ -706,6 +713,7 @@ pub fn timer_tick(context: *mut InterruptContext) -> *const InterruptContext {
         scheduler.ticks = scheduler.ticks.wrapping_add(1);
 
         let previous = scheduler.current;
+        scheduler.tasks[previous].cpu_ticks = scheduler.tasks[previous].cpu_ticks.wrapping_add(1);
         if scheduler.tasks[previous].time_slice_remaining > 0 {
             scheduler.tasks[previous].time_slice_remaining -= 1;
         }
@@ -1084,6 +1092,9 @@ fn wait_for_next_runnable(
             }
         }
         drop(scheduler_guard);
+        if crate::virtio_net::is_bottom_half_pending() {
+            crate::network::dispatch_network_bottom_half();
+        }
         x86_64::instructions::interrupts::enable();
         x86_64::instructions::hlt();
         scheduler_guard = current_scheduler().lock();
@@ -1103,6 +1114,14 @@ pub fn current_tid() -> u64 {
     scheduler
         .as_ref()
         .map(|scheduler| scheduler.tasks[scheduler.current].tid)
+        .unwrap_or(0)
+}
+
+pub fn current_cpu_ticks() -> u64 {
+    let scheduler = current_scheduler().lock();
+    scheduler
+        .as_ref()
+        .map(|scheduler| scheduler.tasks[scheduler.current].cpu_ticks)
         .unwrap_or(0)
 }
 
@@ -1833,6 +1852,7 @@ pub fn clone_task_current(
         comm: parent_task.comm,
         pdeath_signal: 0,
         rlimits: parent_task.rlimits,
+        cpu_ticks: 0,
     };
 
     let space = parent_process_arc.lock().address_space();
@@ -1987,6 +2007,7 @@ pub fn pipe_wait_key(descriptor: u64) -> Option<u64> {
     match descriptor.resource {
         DescriptorResource::PipeRead(reader) => Some(reader.lock().state.lock().id),
         DescriptorResource::Ipc(endpoint) => Some(endpoint.lock().state.lock().id),
+        DescriptorResource::Socket(socket) => Some(0x5000_0000 | (socket.lock().handle as u64)),
         _ => None,
     }
 }
@@ -2344,6 +2365,7 @@ fn new_task(
         comm: *b"vanta-app\0\0\0\0\0\0\0",
         pdeath_signal: 0,
         rlimits,
+        cpu_ticks: 0,
     }
 }
 
@@ -2423,7 +2445,9 @@ pub fn open_directory_current(path: String, entries: Vec<String>) -> Result<u64,
     )
 }
 
-pub fn open_socket_current() -> Result<u64, ()> {
+pub fn open_socket_current(domain: u64, socket_type: u64, protocol: u64) -> Result<u64, ()> {
+    let handle = crate::network::socket_create(domain as u32, socket_type as u32, protocol as u32)
+        .map_err(|_| ())?;
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
     let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
@@ -2433,10 +2457,48 @@ pub fn open_socket_current() -> Result<u64, ()> {
             capability: allocate_capability(),
             rights: Rights::READ | Rights::WRITE | Rights::TRANSFER | Rights::CONNECT,
             resource: DescriptorResource::Socket(Arc::new(Mutex::new(OpenSocket {
+                handle,
+                socket_type: socket_type as u32,
                 connection: None,
             }))),
         },
     )
+}
+
+pub fn bind_current(descriptor: u64, ip: crate::net::Ipv4Address, port: u16) -> Result<(), ()> {
+    let descriptor = current_descriptor(descriptor)?;
+    let DescriptorResource::Socket(socket) = descriptor.resource else {
+        return Err(());
+    };
+    let handle = socket.lock().handle;
+    crate::network::socket_bind(handle, ip, port).map_err(|_| ())
+}
+
+pub fn sendto_current(
+    descriptor: u64,
+    bytes: &[u8],
+    dest_ip: crate::net::Ipv4Address,
+    dest_port: u16,
+) -> Result<usize, ()> {
+    let descriptor = current_descriptor(descriptor)?;
+    let DescriptorResource::Socket(socket) = descriptor.resource else {
+        return Err(());
+    };
+    let handle = socket.lock().handle;
+    crate::network::socket_sendto(handle, bytes, dest_ip, dest_port).map_err(|_| ())
+}
+
+pub fn recvfrom_current(
+    descriptor: u64,
+    limit: usize,
+    nonblocking: bool,
+) -> Result<(Vec<u8>, crate::net::Ipv4Address, u16), crate::network::NetworkError> {
+    let descriptor = current_descriptor(descriptor).map_err(|_| crate::network::NetworkError::SocketNotFound)?;
+    let DescriptorResource::Socket(socket) = descriptor.resource else {
+        return Err(crate::network::NetworkError::InvalidSocketType);
+    };
+    let handle = socket.lock().handle;
+    crate::network::socket_recvfrom(handle, limit, nonblocking)
 }
 
 pub fn connect_socket_current(
@@ -2455,7 +2517,9 @@ pub fn connect_socket_current(
     if socket.connection.is_some() {
         return Err(());
     }
-    socket.connection = Some(crate::network::tcp_connect(remote_ip, remote_port).map_err(|_| ())?);
+    let conn = crate::network::tcp_connect(remote_ip, remote_port).map_err(|_| ())?;
+    socket.handle = conn.socket_handle;
+    socket.connection = Some(conn);
     Ok(())
 }
 
@@ -2830,9 +2894,12 @@ pub fn read_current(descriptor: u64, length: usize) -> Result<Vec<u8>, ()> {
             Ok(bytes)
         }
         DescriptorResource::Socket(socket) => {
-            let mut socket = socket.lock();
-            let connection = socket.connection.as_mut().ok_or(())?;
-            crate::network::tcp_receive(connection, length).map_err(|_| ())
+            let handle = socket.lock().handle;
+            match crate::network::socket_recv(handle, length, false) {
+                Ok(bytes) => Ok(bytes),
+                Err(crate::network::NetworkError::WouldBlock) => Ok(Vec::new()),
+                Err(_) => Err(()),
+            }
         }
         DescriptorResource::Serial => Err(()),
         DescriptorResource::Tty => Ok(read_tty(length)),
@@ -2901,6 +2968,10 @@ pub fn read_would_block(descriptor: u64) -> bool {
                     .iter()
                     .any(|message| message.sender_pid != current_pid())
         }
+        DescriptorResource::Socket(socket) => {
+            let handle = socket.lock().handle;
+            !crate::network::socket_has_pending_data(handle)
+        }
         _ => false,
     }
 }
@@ -2920,9 +2991,8 @@ pub fn close_current(descriptor: u64) -> Result<(), ()> {
     match descriptor.resource {
         DescriptorResource::Socket(socket) => {
             if Arc::strong_count(&socket) == 1 {
-                if let Some(connection) = socket.lock().connection.take() {
-                    crate::network::tcp_close(connection).map_err(|_| ())?;
-                }
+                let handle = socket.lock().handle;
+                let _ = crate::network::socket_close(handle);
             }
         }
         DescriptorResource::PipeWrite(writer) => close_pipe_writer(writer),
@@ -2948,9 +3018,8 @@ pub fn write_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
     }
     match descriptor.resource {
         DescriptorResource::Socket(socket) => {
-            let mut socket = socket.lock();
-            let connection = socket.connection.as_mut().ok_or(())?;
-            crate::network::tcp_send(connection, bytes).map_err(|_| ())
+            let handle = socket.lock().handle;
+            crate::network::socket_send(handle, bytes).map(|_| ()).map_err(|_| ())
         }
         DescriptorResource::PipeWrite(writer) => {
             let pipe_id = writer.lock().write(bytes);

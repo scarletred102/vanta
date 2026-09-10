@@ -16,11 +16,12 @@ pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 pub enum HwIrq {
     Timer = PIC_1_OFFSET,
     Keyboard,
+    VirtioNet = PIC_1_OFFSET + 8,
     Mouse = PIC_1_OFFSET + 12,
 }
 
 impl HwIrq {
-    fn as_u8(self) -> u8 {
+    pub fn as_u8(self) -> u8 {
         self as u8
     }
 }
@@ -53,6 +54,7 @@ lazy_static! {
             ));
         }
         idt[HwIrq::Keyboard.as_u8()].set_handler_fn(keyboard_handler);
+        idt[HwIrq::VirtioNet.as_u8()].set_handler_fn(virtio_net_handler);
         idt[HwIrq::Mouse.as_u8()].set_handler_fn(mouse_handler);
         idt
     };
@@ -314,5 +316,14 @@ extern "x86-interrupt" fn mouse_handler(_frame: InterruptStackFrame) {
         crate::apic::end_of_interrupt();
     } else {
         unsafe { PICS.lock().notify_end_of_interrupt(HwIrq::Mouse.as_u8()) };
+    }
+}
+
+extern "x86-interrupt" fn virtio_net_handler(_frame: InterruptStackFrame) {
+    crate::virtio_net::handle_interrupt();
+    if IOAPIC_ACTIVE.load(Ordering::Acquire) {
+        crate::apic::end_of_interrupt();
+    } else {
+        unsafe { PICS.lock().notify_end_of_interrupt(HwIrq::VirtioNet.as_u8()) };
     }
 }

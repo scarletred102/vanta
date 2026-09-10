@@ -348,6 +348,12 @@ pub fn get_clock_time(clock_id: u64) -> (u64, u64) {
         1 | 4 | 7 => { // CLOCK_MONOTONIC, CLOCK_MONOTONIC_RAW, CLOCK_BOOTTIME
             (sec, nsec)
         }
+        2 | 3 => { // CLOCK_PROCESS_CPUTIME_ID, CLOCK_THREAD_CPUTIME_ID
+            let cpu_ms = crate::scheduler::current_cpu_ticks();
+            let cpu_sec = cpu_ms / 1000;
+            let cpu_nsec = (cpu_ms % 1000) * 1_000_000;
+            (cpu_sec, cpu_nsec)
+        }
         _ => (sec, nsec),
     }
 }
