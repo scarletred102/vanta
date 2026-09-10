@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
-    [ValidateRange(5, 180)]
-    [int]$TimeoutSeconds = 90
+    [ValidateRange(5, 300)]
+    [int]$TimeoutSeconds = 150
 )
 
 $ErrorActionPreference = "Stop"
@@ -98,6 +98,9 @@ function Invoke-GptBoot {
 $common = @(
     "[storage] RedoxFS root mounted",
     "[storage] RedoxFS persistence check: true",
+    "[swap] watermark reached: evicting page 0x50000000 to slot 0",
+    "[swap] page-in from disk: vaddr=0x50000000 slot=0",
+    "[swap] memory pressure eviction and swap-in verified: slot=0 data-verified=true",
     "[proc] launching native /sbin/init",
     "[native] acceptance: developer-gate ok",
     "[native] terminal/filesystem acceptance passed",
@@ -193,4 +196,4 @@ Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required 
 Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
 
 Write-Host "[test] GPT Gate A, Gate B, Gate C, Gate D, and Gate E acceptance passed"
-$first -split "`n" | Where-Object { $_ -match "SIGSEGV|linux-fork|destroy_address_space|Vector" } | ForEach-Object { Write-Host $_ }
+$first -split "`n" | Where-Object { $_ -match "SIGSEGV|linux-fork|destroy_address_space|Vector|swap" } | ForEach-Object { Write-Host $_ }

@@ -388,6 +388,9 @@ pub fn resolve_swapped_page(space: AddressSpace, virtual_address: u64) -> Result
     crate::swap::SWAP_MANAGER.lock().free_slot(slot);
     flush_if_active(space, page_vaddr);
 
+    crate::serial_println!("[swap] page-in from disk: vaddr={:#x} slot={}", page_vaddr, slot);
+    crate::swap::track_user_page(space, page_vaddr);
+
     Ok(true)
 }
 
@@ -434,6 +437,9 @@ pub fn check_and_clear_accessed(space: AddressSpace, virtual_address: u64) -> Re
     let entry = read_entry(location.table_phys, location.index).ok_or(MapError::NoHhdm)?;
     if entry & PRESENT == 0 {
         return Ok(None);
+    }
+    if entry & MAP_COW != 0 {
+        return Ok(Some(true));
     }
 
     let was_accessed = (entry & ACCESSED) != 0;
@@ -485,6 +491,12 @@ pub fn unmap(space: AddressSpace, virtual_address: u64) -> Result<Option<u64>, M
     };
     let current = read_entry(location.table_phys, location.index).ok_or(MapError::NoHhdm)?;
     if current & PRESENT == 0 {
+        if current & MAP_SWAPPED != 0 {
+            let slot = ((current >> 12) & 0x000f_ffff) as u32;
+            crate::swap::SWAP_MANAGER.lock().free_slot(slot);
+            let _ = write_entry(location.table_phys, location.index, 0);
+            flush_if_active(space, virtual_address);
+        }
         return Ok(None);
     }
 

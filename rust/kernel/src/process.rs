@@ -307,6 +307,7 @@ impl Process {
                     return Err(ProcessError::FrameReleaseFailed);
                 }
             }
+            crate::swap::untrack_user_page(self.space, mapping.virtual_address);
         }
 
         let freed_tables = paging::destroy_address_space(self.space).map_err(ProcessError::Map)?;

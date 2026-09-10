@@ -394,6 +394,7 @@ pub fn resolve_demand_page(space: AddressSpace, address: u64, is_write: bool) ->
             let flags = crate::paging::MAP_USER | crate::paging::MAP_WRITABLE | crate::paging::MAP_NO_EXECUTE;
             if crate::paging::map(space, page_aligned, phys, flags).is_ok() {
                 mem_map.dynamic_mappings.push(page_aligned);
+                crate::swap::track_user_page(space, page_aligned);
                 return Ok(true);
             } else {
                 let _ = crate::memory::free_frame(frame);
@@ -425,6 +426,7 @@ pub fn resolve_demand_page(space: AddressSpace, address: u64, is_write: bool) ->
             }
             if crate::paging::map(space, page_aligned, phys, pte_flags).is_ok() {
                 mem_map.dynamic_mappings.push(page_aligned);
+                crate::swap::track_user_page(space, page_aligned);
                 return Ok(true);
             } else {
                 let _ = crate::memory::free_frame(frame);
