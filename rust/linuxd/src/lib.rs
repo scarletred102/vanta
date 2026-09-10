@@ -431,7 +431,7 @@ pub fn translate(number: u64) -> Result<Translation, UnsupportedSyscall> {
         57 => (LinuxOp::Fork, None),
         58 => (LinuxOp::VFork, None),
         59 => (LinuxOp::ExecVe, Some(Syscall::ExecVe)),
-        60 => (LinuxOp::Exit, Some(Syscall::Exit)),
+        60 => (LinuxOp::Exit, None),
         61 => (LinuxOp::Wait4, None),
         62 => (LinuxOp::Kill, Some(Syscall::Kill)),
         63 => (LinuxOp::Uname, None),

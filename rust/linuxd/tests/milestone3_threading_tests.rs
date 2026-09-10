@@ -114,6 +114,18 @@ fn test_threading_and_futex_syscall_translations() {
     assert_eq!(tr_wait4.linux_number, 61);
     assert_eq!(tr_wait4.operation, LinuxOp::Wait4);
     assert_eq!(tr_wait4.native, None);
+
+    // Exit (60) - per-thread exit
+    let tr_exit = translate(60).expect("exit must be translated");
+    assert_eq!(tr_exit.linux_number, 60);
+    assert_eq!(tr_exit.operation, LinuxOp::Exit);
+    assert_eq!(tr_exit.native, None);
+
+    // ExitGroup (231) - thread group exit
+    let tr_exit_group = translate(231).expect("exit_group must be translated");
+    assert_eq!(tr_exit_group.linux_number, 231);
+    assert_eq!(tr_exit_group.operation, LinuxOp::ExitGroup);
+    assert_eq!(tr_exit_group.native, None);
 }
 
 #[test]

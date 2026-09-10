@@ -735,11 +735,17 @@ pub fn exit_current(code: u64) -> *const UserContext {
     drop(exited_process);
 
     if let Some(parent_pid) = parent_pid {
-        let current_cpu = crate::syscall::current_cpu_index();
-        for (cpu_idx, sched_lock) in SCHEDULERS.iter().enumerate() {
-            if cpu_idx == current_cpu { continue; }
-            let mut sched = sched_lock.lock();
-            let Some(sched) = sched.as_mut() else { continue; };
+        let any_thread_alive = SCHEDULERS.iter().any(|sched_lock| {
+            sched_lock.lock().as_ref().map_or(false, |sched| {
+                sched.tasks.iter().any(|task| task.tgid == exited_tgid && task.process.is_some())
+            })
+        });
+        if !any_thread_alive {
+            let current_cpu = crate::syscall::current_cpu_index();
+            for (cpu_idx, sched_lock) in SCHEDULERS.iter().enumerate() {
+                if cpu_idx == current_cpu { continue; }
+            let mut sched_guard = sched_lock.lock();
+            let Some(sched) = sched_guard.as_mut() else { continue; };
             if let Some(parent) = sched.tasks.iter_mut().find(|task| {
                 task.tgid == parent_pid
                     && (matches!(task.state, TaskState::Waiting { child_pid, .. } if child_pid == exited_tgid || child_pid == u64::MAX || child_pid == 0))
@@ -758,12 +764,14 @@ pub fn exit_current(code: u64) -> *const UserContext {
                 parent.state = TaskState::Runnable;
                 parent.context.return_value = return_val;
                 parent.interrupt_context.rax = return_val;
+                drop(sched_guard);
                 if let Some(ref mut cur_sched) = *current_scheduler().lock() {
                     let cur = cur_sched.current;
                     cur_sched.tasks[cur].state = TaskState::Reaped;
                 }
                 break;
             }
+        }
         }
     }
 
@@ -842,19 +850,32 @@ fn current_target() -> (UserContext, AddressSpace) {
     (task.context, space)
 }
 
+fn priority_tier(prio: u8) -> u8 {
+    if prio <= PRIO_RT_MAX {
+        0
+    } else if prio <= PRIO_INTERACTIVE_MAX {
+        1
+    } else if prio <= PRIO_NORMAL_MAX {
+        2
+    } else {
+        3
+    }
+}
+
 fn next_alive(scheduler: &Scheduler, current: usize) -> Option<usize> {
     let mut best_index = None;
-    let mut best_priority = 255u8;
+    let mut best_tier = 255u8;
     let n = scheduler.tasks.len();
 
     for offset in 1..=n {
         let index = (current + offset) % n;
         let task = &scheduler.tasks[index];
         if task.state == TaskState::Runnable {
-            if task.priority < best_priority {
-                best_priority = task.priority;
+            let tier = priority_tier(task.priority);
+            if tier < best_tier {
+                best_tier = tier;
                 best_index = Some(index);
-                if best_priority == 0 {
+                if best_tier == 0 {
                     break;
                 }
             }
@@ -1560,9 +1581,7 @@ pub fn clone_task_current(
     };
 
     let child_clear_child_tid = if flags & vanta_linuxd::CLONE_CHILD_CLEARTID != 0 {
-        if parent_tidptr != 0 && parent_tidptr >= 0x1000_0000 {
-            parent_tidptr
-        } else if child_tidptr != 0 {
+        if child_tidptr != 0 {
             child_tidptr
         } else {
             parent_tidptr
