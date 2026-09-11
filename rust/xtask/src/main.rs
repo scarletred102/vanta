@@ -259,6 +259,8 @@ fn build_default_image() -> Result<(), String> {
     let linux_dns_test = read_file(root.join("target/compat/linux/dns-test"))?;
     let linux_dhcp_test = read_file(root.join("target/compat/linux/dhcp-test"))?;
     let linux_afunix_test = read_file(root.join("target/compat/linux/afunix-test"))?;
+    let linux_afunix_receiver = read_file(root.join("target/compat/linux/afunix-receiver"))?;
+    let linux_afunix_sender = read_file(root.join("target/compat/linux/afunix-sender"))?;
     let linux_dynamic_fork = read_file(root.join("target/compat/linux/dynamic-fork"))?;
     let linux_dynamic_epoll = read_file(root.join("target/compat/linux/dynamic-epoll"))?;
     let linux_dynamic_proc = read_file(root.join("target/compat/linux/dynamic-proc"))?;
@@ -665,6 +667,20 @@ fn build_default_image() -> Result<(), String> {
         RootFile {
             path: "/compat/linux/afunix-test",
             contents: &linux_afunix_test,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/afunix-receiver",
+            contents: &linux_afunix_receiver,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/afunix-sender",
+            contents: &linux_afunix_sender,
             mode: 0o755,
             uid: 0,
             gid: 0,
@@ -1078,6 +1094,8 @@ fn build_linux_samples(root: &Path) -> Result<(), String> {
         ("dns-test.c", "dns-test"),
         ("dhcp-test.c", "dhcp-test"),
         ("afunix-test.c", "afunix-test"),
+        ("afunix-receiver.c", "afunix-receiver"),
+        ("afunix-sender.c", "afunix-sender"),
         ("dynamic-fork.c", "dynamic-fork"),
         ("dynamic-epoll.c", "dynamic-epoll"),
         ("dynamic-proc.c", "dynamic-proc"),

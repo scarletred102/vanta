@@ -312,6 +312,22 @@ fn gate_d_acceptance() -> bool {
     print_val(b"[linux] afunix-test", afunix_test, afunix_test_exit);
     let afunix_test_ok = afunix_test != u64::MAX && afunix_test_exit == 0;
 
+    let afunix_rx = vanta_userland::spawn_linux(b"/compat/linux/afunix-receiver");
+    let afunix_tx = vanta_userland::spawn_linux(b"/compat/linux/afunix-sender");
+    let afunix_tx_exit = if afunix_tx != u64::MAX {
+        vanta_userland::wait(afunix_tx)
+    } else {
+        999
+    };
+    let afunix_rx_exit = if afunix_rx != u64::MAX {
+        vanta_userland::wait(afunix_rx)
+    } else {
+        999
+    };
+    print_val(b"[linux] afunix-sender", afunix_tx, afunix_tx_exit);
+    print_val(b"[linux] afunix-receiver", afunix_rx, afunix_rx_exit);
+    let afunix_unrelated_ok = afunix_tx != u64::MAX && afunix_tx_exit == 0 && afunix_rx != u64::MAX && afunix_rx_exit == 0;
+
     let wget_pid = vanta_userland::spawn_with_args(
         b"/bin/wget",
         &[b"wget\0", b"-O\0", b"/test.txt\0", b"https://example.com/test.txt\0"],
@@ -483,6 +499,7 @@ fn gate_d_acceptance() -> bool {
         && dns_test_ok
         && dhcp_test_ok
         && afunix_test_ok
+        && afunix_unrelated_ok
         && wget_ok
         && file_ok
 }
