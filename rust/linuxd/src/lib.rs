@@ -536,6 +536,8 @@ pub fn translate(number: u64) -> Result<Translation, UnsupportedSyscall> {
         43 | 288 => (LinuxOp::Accept, None),
         44 => (LinuxOp::SendTo, None),
         45 => (LinuxOp::RecvFrom, None),
+        46 => (LinuxOp::SendMsg, None),
+        47 => (LinuxOp::RecvMsg, None),
         49 => (LinuxOp::Bind, None),
         50 => (LinuxOp::Listen, None),
         51 => (LinuxOp::GetSockName, None),

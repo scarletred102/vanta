@@ -665,13 +665,13 @@ fn dispatch_linux(
                 linux_sendto_user(arg1, arg2, arg3, arg4, arg5, arg6)
             }
             vanta_linuxd::LinuxOp::SendMsg => {
-                write_user(arg1, arg2, arg3)
+                linux_sendmsg_user(arg1, arg2, arg3)
             }
             vanta_linuxd::LinuxOp::RecvFrom => {
                 linux_recvfrom_user(arg1, arg2, arg3, arg4, arg5, arg6)
             }
             vanta_linuxd::LinuxOp::RecvMsg => {
-                read_user(arg1, arg2, arg3)
+                linux_recvmsg_user(arg1, arg2, arg3)
             }
             vanta_linuxd::LinuxOp::Bind => {
                 linux_bind_user(arg1, arg2, arg3)
@@ -870,6 +870,10 @@ fn generate_procfs_content(path: &str) -> Option<alloc::vec::Vec<u8>> {
         ))
     } else if path == "/proc/uptime" {
         Some(alloc::vec::Vec::from("10.00 10.00\n"))
+    } else if path == "/proc/net/dns" {
+        let (queries, hits, entries) = crate::dns::get_dns_stats();
+        let s = format!("queries: {}\nhits: {}\nentries: {}\n", queries, hits, entries);
+        Some(s.into_bytes())
     } else if path.ends_with("/status") {
         let pid = crate::scheduler::current_pid();
         let ppid = crate::scheduler::current_parent_pid();
@@ -2920,6 +2924,57 @@ fn linux_recvfrom_user(
         }
         Err(_) => SYSCALL_ERROR,
     }
+}
+
+fn linux_recvmsg_user(descriptor: u64, msghdr_ptr: u64, flags: u64) -> u64 {
+    if msghdr_ptr == 0 {
+        return SYSCALL_ERROR;
+    }
+    let Ok(hdr_bytes) = copy_from_user(msghdr_ptr, 32, false) else {
+        return SYSCALL_ERROR;
+    };
+    let msg_name = u64::from_ne_bytes(hdr_bytes[0..8].try_into().unwrap());
+    let _msg_namelen = u32::from_ne_bytes(hdr_bytes[8..12].try_into().unwrap());
+    let msg_iov = u64::from_ne_bytes(hdr_bytes[16..24].try_into().unwrap());
+    let msg_iovlen = u64::from_ne_bytes(hdr_bytes[24..32].try_into().unwrap());
+
+    if msg_iov == 0 || msg_iovlen == 0 {
+        return 0;
+    }
+
+    let Ok(iov_bytes) = copy_from_user(msg_iov, 16, false) else {
+        return SYSCALL_ERROR;
+    };
+    let iov_base = u64::from_ne_bytes(iov_bytes[0..8].try_into().unwrap());
+    let iov_len = u64::from_ne_bytes(iov_bytes[8..16].try_into().unwrap());
+
+    let addrlen_ptr = if msg_name != 0 { msghdr_ptr + 8 } else { 0 };
+    linux_recvfrom_user(descriptor, iov_base, iov_len, flags, msg_name, addrlen_ptr)
+}
+
+fn linux_sendmsg_user(descriptor: u64, msghdr_ptr: u64, flags: u64) -> u64 {
+    if msghdr_ptr == 0 {
+        return SYSCALL_ERROR;
+    }
+    let Ok(hdr_bytes) = copy_from_user(msghdr_ptr, 32, false) else {
+        return SYSCALL_ERROR;
+    };
+    let msg_name = u64::from_ne_bytes(hdr_bytes[0..8].try_into().unwrap());
+    let msg_namelen = u32::from_ne_bytes(hdr_bytes[8..12].try_into().unwrap());
+    let msg_iov = u64::from_ne_bytes(hdr_bytes[16..24].try_into().unwrap());
+    let msg_iovlen = u64::from_ne_bytes(hdr_bytes[24..32].try_into().unwrap());
+
+    if msg_iov == 0 || msg_iovlen == 0 {
+        return 0;
+    }
+
+    let Ok(iov_bytes) = copy_from_user(msg_iov, 16, false) else {
+        return SYSCALL_ERROR;
+    };
+    let iov_base = u64::from_ne_bytes(iov_bytes[0..8].try_into().unwrap());
+    let iov_len = u64::from_ne_bytes(iov_bytes[8..16].try_into().unwrap());
+
+    linux_sendto_user(descriptor, iov_base, iov_len, flags, msg_name, msg_namelen as u64)
 }
 
 fn connect_user(descriptor: u64, pointer: u64, length: u64) -> u64 {

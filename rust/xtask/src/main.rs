@@ -255,16 +255,33 @@ fn build_default_image() -> Result<(), String> {
     let linux_dynamic_threads = read_file(root.join("target/compat/linux/dynamic-threads"))?;
     let linux_dynamic_net = read_file(root.join("target/compat/linux/dynamic-net"))?;
     let linux_http_server = read_file(root.join("target/compat/linux/http-server"))?;
+    let linux_dns_test = read_file(root.join("target/compat/linux/dns-test"))?;
     let linux_dynamic_fork = read_file(root.join("target/compat/linux/dynamic-fork"))?;
     let linux_dynamic_epoll = read_file(root.join("target/compat/linux/dynamic-epoll"))?;
     let linux_dynamic_proc = read_file(root.join("target/compat/linux/dynamic-proc"))?;
     let busybox = read_file(root.join("target/compat/linux/busybox"))?;
     let lua = read_file(root.join("target/compat/linux/lua"))?;
     let vanta_release = b"Vanta OS 0.1.0 (musl-compat)\n".to_vec();
+    let hosts_content = b"127.0.0.1 localhost\n10.0.2.15 vanta\n".to_vec();
+    let resolv_conf_content = b"nameserver 10.0.2.3\n".to_vec();
     let root_files = [
         RootFile {
             path: "/etc/vanta-release",
             contents: &vanta_release,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/etc/hosts",
+            contents: &hosts_content,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/etc/resolv.conf",
+            contents: &resolv_conf_content,
             mode: 0o644,
             uid: 0,
             gid: 0,
@@ -622,6 +639,13 @@ fn build_default_image() -> Result<(), String> {
         RootFile {
             path: "/compat/linux/http-server",
             contents: &linux_http_server,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/dns-test",
+            contents: &linux_dns_test,
             mode: 0o755,
             uid: 0,
             gid: 0,
@@ -1012,6 +1036,7 @@ fn build_linux_samples(root: &Path) -> Result<(), String> {
         ("dynamic-threads.c", "dynamic-threads"),
         ("dynamic-net.c", "dynamic-net"),
         ("http-server.c", "http-server"),
+        ("dns-test.c", "dns-test"),
         ("dynamic-fork.c", "dynamic-fork"),
         ("dynamic-epoll.c", "dynamic-epoll"),
         ("dynamic-proc.c", "dynamic-proc"),

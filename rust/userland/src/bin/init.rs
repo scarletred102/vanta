@@ -285,6 +285,15 @@ fn gate_d_acceptance() -> bool {
     print_val(b"[linux] http-server", http_srv, http_srv_exit);
     let http_srv_ok = http_srv != u64::MAX && http_srv_exit == 0;
 
+    let dns_test = vanta_userland::spawn_linux(b"/compat/linux/dns-test");
+    let dns_test_exit = if dns_test != u64::MAX {
+        vanta_userland::wait(dns_test)
+    } else {
+        999
+    };
+    print_val(b"[linux] dns-test", dns_test, dns_test_exit);
+    let dns_test_ok = dns_test != u64::MAX && dns_test_exit == 0;
+
     let dyn_fork = vanta_userland::spawn_linux(b"/compat/linux/dynamic-fork");
     let dyn_fork_exit = if dyn_fork != u64::MAX {
         vanta_userland::wait(dyn_fork)
@@ -424,7 +433,7 @@ fn gate_d_acceptance() -> bool {
         && bb_sh_ok
         && lua_ok
         && vpkg_ok
-        && bb_sh_ok
+        && dns_test_ok
 }
 
 fn audit_persistence() -> bool {

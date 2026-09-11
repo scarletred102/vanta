@@ -257,6 +257,220 @@ void exit(int status) {
     sys_exit(status);
 }
 
+static int sys_socket(int domain, int type, int protocol) {
+    int ret;
+    __asm__ volatile (
+        "syscall"
+        : "=a"(ret)
+        : "a"(41), "D"(domain), "S"(type), "d"(protocol)
+        : "rcx", "r11", "memory"
+    );
+    return ret;
+}
+
+static long sys_sendto(int fd, const void *buf, size_t len, int flags, const void *dest_addr, uint32_t addrlen) {
+    long ret;
+    register int64_t r10 __asm__("r10") = flags;
+    register const void *r8  __asm__("r8")  = dest_addr;
+    register uint64_t r9  __asm__("r9")  = addrlen;
+    __asm__ volatile (
+        "syscall"
+        : "=a"(ret)
+        : "a"(44), "D"(fd), "S"(buf), "d"(len), "r"(r10), "r"(r8), "r"(r9)
+        : "rcx", "r11", "memory"
+    );
+    return ret;
+}
+
+static long sys_recvfrom(int fd, void *buf, size_t len, int flags, void *src_addr, void *addrlen) {
+    long ret;
+    register int64_t r10 __asm__("r10") = flags;
+    register void *r8  __asm__("r8")  = src_addr;
+    register void *r9  __asm__("r9")  = addrlen;
+    __asm__ volatile (
+        "syscall"
+        : "=a"(ret)
+        : "a"(45), "D"(fd), "S"(buf), "d"(len), "r"(r10), "r"(r8), "r"(r9)
+        : "rcx", "r11", "memory"
+    );
+    return ret;
+}
+
+struct my_sockaddr_in {
+    uint16_t sin_family;
+    uint16_t sin_port;
+    uint32_t sin_addr;
+    char     sin_zero[8];
+};
+
+struct my_addrinfo {
+    int                    ai_flags;
+    int                    ai_family;
+    int                    ai_socktype;
+    int                    ai_protocol;
+    uint32_t               ai_addrlen;
+    struct my_sockaddr_in *ai_addr;
+    char                  *ai_canonname;
+    struct my_addrinfo    *ai_next;
+};
+
+struct my_hostent {
+    char  *h_name;
+    char **h_aliases;
+    int    h_addrtype;
+    int    h_length;
+    char **h_addr_list;
+};
+
+#define EAI_NONAME -2
+
+static struct my_addrinfo g_addrinfo;
+static struct my_sockaddr_in g_sockaddr;
+static struct my_hostent g_hostent;
+static char *g_addr_list[2];
+static uint32_t g_host_addr;
+static char g_host_name[128];
+
+__attribute__((visibility("default")))
+int getaddrinfo(const char *node, const char *service, const void *hints, struct my_addrinfo **res) {
+    if (!node || !res) return EAI_NONAME;
+    (void)service; (void)hints;
+
+    // Build DNS query packet
+    uint8_t qpkt[256];
+    my_memset(qpkt, 0, sizeof(qpkt));
+    qpkt[0] = 0x12; qpkt[1] = 0x34; // tx_id
+    qpkt[2] = 0x01; qpkt[3] = 0x00; // flags: RD=1
+    qpkt[4] = 0x00; qpkt[5] = 0x01; // QDCOUNT = 1
+
+    int qpos = 12;
+    const char *p = node;
+    while (*p) {
+        const char *dot = p;
+        while (*dot && *dot != '.') dot++;
+        int len = dot - p;
+        if (len > 63 || qpos + 1 + len >= 250) return EAI_NONAME;
+        qpkt[qpos++] = len;
+        for (int i = 0; i < len; i++) qpkt[qpos++] = p[i];
+        p = dot;
+        if (*p == '.') p++;
+    }
+    qpkt[qpos++] = 0; // terminate QNAME
+    qpkt[qpos++] = 0; qpkt[qpos++] = 1; // QTYPE = A (1)
+    qpkt[qpos++] = 0; qpkt[qpos++] = 1; // QCLASS = IN (1)
+
+    // Open UDP socket
+    int s = sys_socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0);
+    if (s < 0) return EAI_NONAME;
+
+    struct my_sockaddr_in dns_srv;
+    my_memset(&dns_srv, 0, sizeof(dns_srv));
+    dns_srv.sin_family = 2; // AF_INET
+    dns_srv.sin_port = 0x3500; // htons(53) = 0x0035 in be -> 0x3500 on le
+    dns_srv.sin_addr = 0x0302000a; // 10.0.2.3 in le
+
+    long sent = sys_sendto(s, qpkt, qpos, 0, &dns_srv, sizeof(dns_srv));
+    if (sent < 0) {
+        sys_close(s);
+        return EAI_NONAME;
+    }
+
+    uint8_t resp[512];
+    my_memset(resp, 0, sizeof(resp));
+    long rcvd = sys_recvfrom(s, resp, sizeof(resp), 0, 0, 0);
+    sys_close(s);
+
+    if (rcvd < 12) return EAI_NONAME;
+    uint16_t flags = (resp[2] << 8) | resp[3];
+    if ((flags & 0x0f) == 3) {
+        // NXDOMAIN
+        return EAI_NONAME;
+    }
+    if ((flags & 0x8000) == 0) return EAI_NONAME; // not a response
+
+    uint16_t qdcount = (resp[4] << 8) | resp[5];
+    uint16_t ancount = (resp[6] << 8) | resp[7];
+    if (ancount == 0) return EAI_NONAME;
+
+    // Skip question section
+    int offset = 12;
+    for (int q = 0; q < qdcount; q++) {
+        while (offset < rcvd) {
+            uint8_t len = resp[offset++];
+            if (len == 0) break;
+            if ((len & 0xc0) == 0xc0) { offset++; break; }
+            offset += len;
+        }
+        offset += 4; // QTYPE + QCLASS
+    }
+
+    // Parse answers
+    uint32_t resolved_ip = 0;
+    for (int a = 0; a < ancount && offset < rcvd; a++) {
+        while (offset < rcvd) {
+            uint8_t len = resp[offset++];
+            if (len == 0) break;
+            if ((len & 0xc0) == 0xc0) { offset++; break; }
+            offset += len;
+        }
+        if (offset + 10 > rcvd) break;
+        uint16_t rtype = (resp[offset] << 8) | resp[offset + 1];
+        uint16_t rdlength = (resp[offset + 8] << 8) | resp[offset + 9];
+        offset += 10;
+        if (offset + rdlength > rcvd) break;
+        if (rtype == 1 && rdlength == 4) {
+            resolved_ip = *(uint32_t *)&resp[offset];
+            break;
+        }
+        offset += rdlength;
+    }
+
+    if (resolved_ip == 0) return EAI_NONAME;
+
+    my_memset(&g_sockaddr, 0, sizeof(g_sockaddr));
+    g_sockaddr.sin_family = 2; // AF_INET
+    g_sockaddr.sin_addr = resolved_ip;
+
+    my_memset(&g_addrinfo, 0, sizeof(g_addrinfo));
+    g_addrinfo.ai_family = 2;
+    g_addrinfo.ai_socktype = 1; // SOCK_STREAM
+    g_addrinfo.ai_addrlen = sizeof(g_sockaddr);
+    g_addrinfo.ai_addr = &g_sockaddr;
+
+    *res = &g_addrinfo;
+    return 0;
+}
+
+__attribute__((visibility("default")))
+void freeaddrinfo(void *res) {
+    (void)res;
+}
+
+__attribute__((visibility("default")))
+struct my_hostent *gethostbyname(const char *name) {
+    struct my_addrinfo *res = 0;
+    if (getaddrinfo(name, 0, 0, &res) != 0 || !res) {
+        return 0;
+    }
+    struct my_sockaddr_in *sin = res->ai_addr;
+    g_host_addr = sin->sin_addr;
+    g_addr_list[0] = (char *)&g_host_addr;
+    g_addr_list[1] = 0;
+
+    my_memset(&g_hostent, 0, sizeof(g_hostent));
+    size_t nl = my_strlen(name);
+    if (nl >= sizeof(g_host_name)) nl = sizeof(g_host_name) - 1;
+    my_memcpy(g_host_name, name, nl);
+    g_host_name[nl] = 0;
+
+    g_hostent.h_name = g_host_name;
+    g_hostent.h_aliases = 0;
+    g_hostent.h_addrtype = 2; // AF_INET
+    g_hostent.h_length = 4;
+    g_hostent.h_addr_list = g_addr_list;
+    return &g_hostent;
+}
+
 static uintptr_t lookup_symbol(const char *name) {
     if (my_strcmp(name, "__libc_start_main") == 0) {
         return (uintptr_t)&__libc_start_main;
@@ -266,6 +480,15 @@ static uintptr_t lookup_symbol(const char *name) {
     }
     if (my_strcmp(name, "exit") == 0 || my_strcmp(name, "_exit") == 0) {
         return (uintptr_t)&exit;
+    }
+    if (my_strcmp(name, "getaddrinfo") == 0) {
+        return (uintptr_t)&getaddrinfo;
+    }
+    if (my_strcmp(name, "freeaddrinfo") == 0) {
+        return (uintptr_t)&freeaddrinfo;
+    }
+    if (my_strcmp(name, "gethostbyname") == 0) {
+        return (uintptr_t)&gethostbyname;
     }
     for (int i = 0; i < loaded_lib_count; i++) {
         LoadedLib *lib = &loaded_libs[i];

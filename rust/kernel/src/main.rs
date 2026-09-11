@@ -43,6 +43,7 @@ mod virtio;
 mod virtio_net;
 mod vma;
 pub mod socket;
+pub mod dns;
 mod swap;
 
 #[used]

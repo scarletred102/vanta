@@ -31,15 +31,15 @@ static ISN_COUNTER: AtomicU32 = AtomicU32::new(0x1000_0000);
 // Core Network State & Sockets
 // -----------------------------------------------------------------------------
 
-struct NetworkState {
-    device: VirtioNet,
-    configuration: NetworkConfig,
-    arp_table: BTreeMap<Ipv4Address, MacAddress>,
-    gateway_mac: Option<MacAddress>,
-    gateway_echoed: bool,
-    dns_replied: bool,
-    tcp_connected: bool,
-    sockets: BTreeMap<u32, Socket>,
+pub(crate) struct NetworkState {
+    pub(crate) device: VirtioNet,
+    pub(crate) configuration: NetworkConfig,
+    pub(crate) arp_table: BTreeMap<Ipv4Address, MacAddress>,
+    pub(crate) gateway_mac: Option<MacAddress>,
+    pub(crate) gateway_echoed: bool,
+    pub(crate) dns_replied: bool,
+    pub(crate) tcp_connected: bool,
+    pub(crate) sockets: BTreeMap<u32, Socket>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -350,6 +350,9 @@ fn resolve_destination_mac(state: &mut NetworkState, target_ip: Ipv4Address) -> 
     let our_ip = state.configuration.address;
     if target_ip == [127, 0, 0, 1] || target_ip == our_ip {
         return Ok(state.device.mac());
+    }
+    if target_ip == state.configuration.dns {
+        return state.gateway_mac.ok_or(NetworkError::GatewayUnreachable);
     }
     let is_local_subnet = target_ip[0] == our_ip[0]
         && target_ip[1] == our_ip[1]
@@ -1377,6 +1380,20 @@ pub fn socket_sendto(
 
     match action {
         SendToAction::Udp { local_port } => {
+            if dest_ip == state.configuration.dns && dest_port == 53 {
+                if let Some(reply_data) = crate::dns::handle_dns_datagram(bytes, state) {
+                    if let Some(Socket::Udp(udp)) = state.sockets.get_mut(&handle) {
+                        udp.rx_queue.push(UdpDatagram {
+                            src_ip: dest_ip,
+                            src_port: dest_port,
+                            data: reply_data,
+                        });
+                        crate::scheduler::wake_pipe_waiters(0x5000_0000 | (handle as u64));
+                        return Ok(bytes.len());
+                    }
+                }
+            }
+
             let our_mac = state.device.mac();
             let our_ip = state.configuration.address;
             let dest_mac = if dest_ip == our_ip || dest_ip == [127, 0, 0, 1] {
