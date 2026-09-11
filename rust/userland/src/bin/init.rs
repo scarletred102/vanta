@@ -294,6 +294,15 @@ fn gate_d_acceptance() -> bool {
     print_val(b"[linux] dns-test", dns_test, dns_test_exit);
     let dns_test_ok = dns_test != u64::MAX && dns_test_exit == 0;
 
+    let dhcp_test = vanta_userland::spawn_linux(b"/compat/linux/dhcp-test");
+    let dhcp_test_exit = if dhcp_test != u64::MAX {
+        vanta_userland::wait(dhcp_test)
+    } else {
+        999
+    };
+    print_val(b"[linux] dhcp-test", dhcp_test, dhcp_test_exit);
+    let dhcp_test_ok = dhcp_test != u64::MAX && dhcp_test_exit == 0;
+
     let dyn_fork = vanta_userland::spawn_linux(b"/compat/linux/dynamic-fork");
     let dyn_fork_exit = if dyn_fork != u64::MAX {
         vanta_userland::wait(dyn_fork)
@@ -434,6 +443,7 @@ fn gate_d_acceptance() -> bool {
         && lua_ok
         && vpkg_ok
         && dns_test_ok
+        && dhcp_test_ok
 }
 
 fn audit_persistence() -> bool {

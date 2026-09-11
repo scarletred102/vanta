@@ -118,9 +118,29 @@ pub use crate::socket::*;
 pub fn initialize() -> Result<NetworkInfo, NetworkError> {
     crate::serial_println!("[net] probing VirtIO network device");
     let mut device = VirtioNet::probe()?;
-    crate::serial_println!("[net] loading VFS configuration");
-    let configuration = load_configuration()?;
+    let mut configuration = load_configuration()?;
     let mac = device.mac();
+
+    // Attempt dynamic IP lease acquisition via DHCP (RFC 2131)
+    match crate::dhcp::acquire_lease(&mut device) {
+        Ok(lease) => {
+            crate::serial_println!(
+                "[net] DHCP lease applied: address={}.{}.{}.{} gateway={}.{}.{}.{} dns={}.{}.{}.{}",
+                lease.ip[0], lease.ip[1], lease.ip[2], lease.ip[3],
+                lease.gateway[0], lease.gateway[1], lease.gateway[2], lease.gateway[3],
+                lease.dns[0], lease.dns[1], lease.dns[2], lease.dns[3],
+            );
+            configuration.address = lease.ip;
+            configuration.gateway = lease.gateway;
+            configuration.dns = lease.dns;
+        }
+        Err(err) => {
+            crate::serial_println!(
+                "[net] DHCP acquisition failed ({:?}); using static VFS configuration",
+                err
+            );
+        }
+    }
 
     let mut arp_table = BTreeMap::new();
 

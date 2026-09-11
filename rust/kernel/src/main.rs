@@ -44,6 +44,7 @@ mod virtio_net;
 mod vma;
 pub mod socket;
 pub mod dns;
+pub mod dhcp;
 mod swap;
 
 #[used]
