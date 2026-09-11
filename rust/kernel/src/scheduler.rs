@@ -183,14 +183,14 @@ enum TaskState {
 }
 
 #[derive(Clone)]
-struct FileDescriptor {
-    capability: CapabilityId,
-    rights: Rights,
-    resource: DescriptorResource,
+pub(crate) struct FileDescriptor {
+    pub(crate) capability: CapabilityId,
+    pub(crate) rights: Rights,
+    pub(crate) resource: DescriptorResource,
 }
 
 #[derive(Clone)]
-enum DescriptorResource {
+pub(crate) enum DescriptorResource {
     File(Arc<Mutex<OpenFile>>),
     Directory(Arc<Mutex<OpenDirectory>>),
     Serial,
@@ -198,6 +198,7 @@ enum DescriptorResource {
     PipeRead(Arc<Mutex<PipeReader>>),
     PipeWrite(Arc<Mutex<PipeWriter>>),
     Socket(Arc<Mutex<OpenSocket>>),
+    AfUnix(Arc<Mutex<crate::af_unix::AfUnixSocket>>),
     Ipc(Arc<Mutex<IpcEndpoint>>),
     Epoll(Arc<Mutex<EpollInstance>>),
     EventFd(Arc<Mutex<EventFdInstance>>),
@@ -2008,6 +2009,7 @@ pub fn pipe_wait_key(descriptor: u64) -> Option<u64> {
         DescriptorResource::PipeRead(reader) => Some(reader.lock().state.lock().id),
         DescriptorResource::Ipc(endpoint) => Some(endpoint.lock().state.lock().id),
         DescriptorResource::Socket(socket) => Some(0x5000_0000 | (socket.lock().handle as u64)),
+        DescriptorResource::AfUnix(socket) => Some(socket.lock().id),
         _ => None,
     }
 }
@@ -2446,6 +2448,20 @@ pub fn open_directory_current(path: String, entries: Vec<String>) -> Result<u64,
 }
 
 pub fn open_socket_current(domain: u64, socket_type: u64, protocol: u64) -> Result<u64, ()> {
+    if domain == 1 {
+        let sock = crate::af_unix::create_socket(socket_type as u32)?;
+        let mut scheduler = current_scheduler().lock();
+        let scheduler = scheduler.as_mut().ok_or(())?;
+        let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
+        return install_descriptor(
+            &mut descriptors,
+            FileDescriptor {
+                capability: allocate_capability(),
+                rights: Rights::READ | Rights::WRITE | Rights::TRANSFER | Rights::CONNECT,
+                resource: DescriptorResource::AfUnix(sock),
+            },
+        );
+    }
     let handle = crate::network::socket_create(domain as u32, socket_type as u32, protocol as u32)
         .map_err(|_| ())?;
     let mut scheduler = current_scheduler().lock();
@@ -2519,41 +2535,65 @@ pub fn connect_socket_current(
 
 pub fn listen_current(descriptor: u64, backlog: usize) -> Result<(), crate::network::NetworkError> {
     let desc = current_descriptor(descriptor).map_err(|_| crate::network::NetworkError::SocketNotFound)?;
-    let DescriptorResource::Socket(socket) = desc.resource else {
-        return Err(crate::network::NetworkError::InvalidSocketType);
-    };
-    let handle = socket.lock().handle;
-    crate::network::socket_listen(handle, backlog)
+    match desc.resource {
+        DescriptorResource::Socket(socket) => {
+            let handle = socket.lock().handle;
+            crate::network::socket_listen(handle, backlog)
+        }
+        DescriptorResource::AfUnix(socket) => {
+            crate::af_unix::listen_af_unix(&socket, backlog).map_err(|_| crate::network::NetworkError::Unavailable)
+        }
+        _ => Err(crate::network::NetworkError::InvalidSocketType),
+    }
 }
 
 pub fn accept_current(
     descriptor: u64,
     nonblocking: bool,
-) -> Result<(u64, crate::net::Ipv4Address, u16), crate::network::NetworkError> {
+) -> Result<(u64, u16, crate::net::Ipv4Address, u16), crate::network::NetworkError> {
     let desc = current_descriptor(descriptor).map_err(|_| crate::network::NetworkError::SocketNotFound)?;
-    let DescriptorResource::Socket(socket) = desc.resource else {
-        return Err(crate::network::NetworkError::InvalidSocketType);
-    };
-    let listener_handle = socket.lock().handle;
-    let (new_handle, remote_ip, remote_port) = crate::network::socket_accept(listener_handle, nonblocking)?;
+    match desc.resource {
+        DescriptorResource::Socket(socket) => {
+            let listener_handle = socket.lock().handle;
+            let (new_handle, remote_ip, remote_port) = crate::network::socket_accept(listener_handle, nonblocking)?;
 
-    let mut scheduler = current_scheduler().lock();
-    let scheduler = scheduler.as_mut().ok_or(crate::network::NetworkError::Unavailable)?;
-    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
-    let fd = install_descriptor(
-        &mut descriptors,
-        FileDescriptor {
-            capability: allocate_capability(),
-            rights: Rights::READ | Rights::WRITE | Rights::TRANSFER | Rights::CONNECT,
-            resource: DescriptorResource::Socket(Arc::new(Mutex::new(OpenSocket {
-                handle: new_handle,
-                socket_type: 1, // SOCK_STREAM
-                connection: None,
-            }))),
-        },
-    ).map_err(|_| crate::network::NetworkError::Unavailable)?;
+            let mut scheduler = current_scheduler().lock();
+            let scheduler = scheduler.as_mut().ok_or(crate::network::NetworkError::Unavailable)?;
+            let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
+            let fd = install_descriptor(
+                &mut descriptors,
+                FileDescriptor {
+                    capability: allocate_capability(),
+                    rights: Rights::READ | Rights::WRITE | Rights::TRANSFER | Rights::CONNECT,
+                    resource: DescriptorResource::Socket(Arc::new(Mutex::new(OpenSocket {
+                        handle: new_handle,
+                        socket_type: 1, // SOCK_STREAM
+                        connection: None,
+                    }))),
+                },
+            ).map_err(|_| crate::network::NetworkError::Unavailable)?;
 
-    Ok((fd, remote_ip, remote_port))
+            Ok((fd, 2, remote_ip, remote_port))
+        }
+        DescriptorResource::AfUnix(socket) => {
+            let client_sock = crate::af_unix::accept_af_unix(&socket, nonblocking)
+                .map_err(|()| crate::network::NetworkError::WouldBlock)?;
+            let mut scheduler = current_scheduler().lock();
+            let scheduler = scheduler.as_mut().ok_or(crate::network::NetworkError::Unavailable)?;
+            let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
+            let fd = install_descriptor(
+                &mut descriptors,
+                FileDescriptor {
+                    capability: allocate_capability(),
+                    rights: Rights::READ | Rights::WRITE | Rights::TRANSFER | Rights::CONNECT,
+                    resource: DescriptorResource::AfUnix(client_sock),
+                },
+            ).map_err(|_| crate::network::NetworkError::Unavailable)?;
+
+            Ok((fd, 1, [0, 0, 0, 0], 0))
+        }
+        _ => Err(crate::network::NetworkError::InvalidSocketType),
+    }
 }
 
 pub fn getsockname_current(descriptor: u64) -> Result<(crate::net::Ipv4Address, u16), crate::network::NetworkError> {
@@ -2596,16 +2636,99 @@ pub fn is_socket_descriptor(descriptor: u64) -> bool {
     let Ok(desc) = current_descriptor(descriptor) else {
         return false;
     };
-    matches!(desc.resource, DescriptorResource::Socket(_))
+    matches!(desc.resource, DescriptorResource::Socket(_) | DescriptorResource::AfUnix(_))
+}
+
+pub fn is_af_unix_descriptor(descriptor: u64) -> bool {
+    let Ok(desc) = current_descriptor(descriptor) else {
+        return false;
+    };
+    matches!(desc.resource, DescriptorResource::AfUnix(_))
+}
+
+pub(crate) fn get_descriptor_clone(descriptor: u64) -> Result<FileDescriptor, ()> {
+    current_descriptor(descriptor)
+}
+
+pub(crate) fn install_descriptor_current(fd: FileDescriptor) -> Result<u64, ()> {
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
+    install_descriptor(&mut descriptors, fd)
+}
+
+pub fn socketpair_current(domain: u64, socket_type: u64) -> Result<(u64, u64), ()> {
+    if domain != 1 {
+        return Err(());
+    }
+    let (sock_a, sock_b) = crate::af_unix::create_socketpair(socket_type as u32)?;
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
+    let fd_a = install_descriptor(
+        &mut descriptors,
+        FileDescriptor {
+            capability: allocate_capability(),
+            rights: Rights::READ | Rights::WRITE | Rights::TRANSFER | Rights::CONNECT,
+            resource: DescriptorResource::AfUnix(sock_a),
+        },
+    )?;
+    let fd_b = install_descriptor(
+        &mut descriptors,
+        FileDescriptor {
+            capability: allocate_capability(),
+            rights: Rights::READ | Rights::WRITE | Rights::TRANSFER | Rights::CONNECT,
+            resource: DescriptorResource::AfUnix(sock_b),
+        },
+    )?;
+    Ok((fd_a, fd_b))
+}
+
+pub fn bind_unix_current(descriptor: u64, path: &str) -> Result<(), ()> {
+    let descriptor = current_descriptor(descriptor)?;
+    let DescriptorResource::AfUnix(socket) = descriptor.resource else {
+        return Err(());
+    };
+    crate::af_unix::bind_af_unix(&socket, path)
+}
+
+pub fn connect_unix_current(descriptor: u64, path: &str) -> Result<(), ()> {
+    let descriptor = current_descriptor(descriptor)?;
+    let DescriptorResource::AfUnix(socket) = descriptor.resource else {
+        return Err(());
+    };
+    crate::af_unix::connect_af_unix(&socket, path)
+}
+
+pub(crate) fn send_unix_current(descriptor: u64, data: &[u8], passed_fds: Vec<FileDescriptor>) -> Result<usize, ()> {
+    let descriptor = current_descriptor(descriptor)?;
+    let DescriptorResource::AfUnix(socket) = descriptor.resource else {
+        return Err(());
+    };
+    crate::af_unix::send_af_unix(&socket, data, passed_fds)
+}
+
+pub(crate) fn recv_unix_current(descriptor: u64, limit: usize) -> Result<(Vec<u8>, Vec<FileDescriptor>), ()> {
+    let descriptor = current_descriptor(descriptor)?;
+    let DescriptorResource::AfUnix(socket) = descriptor.resource else {
+        return Err(());
+    };
+    crate::af_unix::recv_af_unix(&socket, limit)
 }
 
 pub fn send_socket_current(descriptor: u64, bytes: &[u8]) -> Result<usize, crate::network::NetworkError> {
     let desc = current_descriptor(descriptor).map_err(|_| crate::network::NetworkError::SocketNotFound)?;
-    let DescriptorResource::Socket(socket) = desc.resource else {
-        return Err(crate::network::NetworkError::InvalidSocketType);
-    };
-    let handle = socket.lock().handle;
-    crate::network::socket_send(handle, bytes)
+    match desc.resource {
+        DescriptorResource::Socket(socket) => {
+            let handle = socket.lock().handle;
+            crate::network::socket_send(handle, bytes)
+        }
+        DescriptorResource::AfUnix(socket) => {
+            crate::af_unix::send_af_unix(&socket, bytes, alloc::vec::Vec::new())
+                .map_err(|()| crate::network::NetworkError::BrokenPipe)
+        }
+        _ => Err(crate::network::NetworkError::InvalidSocketType),
+    }
 }
 
 pub fn duplicate_current(descriptor: u64) -> Result<u64, ()> {
@@ -2658,7 +2781,7 @@ pub fn stat_linux_current(descriptor: u64) -> Result<[u8; 144], ()> {
         DescriptorResource::PipeRead(_) | DescriptorResource::PipeWrite(_) => {
             (0o010600u32, 0i64, false)
         }
-        DescriptorResource::Socket(_) => (0o140666u32, 0i64, false),
+        DescriptorResource::Socket(_) | DescriptorResource::AfUnix(_) => (0o140666u32, 0i64, false),
         DescriptorResource::Ipc(_) | DescriptorResource::Epoll(_) | DescriptorResource::EventFd(_) => {
             (0o010600u32, 0i64, false)
         }
@@ -2986,6 +3109,23 @@ pub fn read_current(descriptor: u64, length: usize) -> Result<Vec<u8>, ()> {
                 Err(_) => Err(()),
             }
         }
+        DescriptorResource::AfUnix(socket) => {
+            match crate::af_unix::recv_af_unix(&socket, length) {
+                Ok((bytes, fds)) => {
+                    if !fds.is_empty() {
+                        let mut scheduler = current_scheduler().lock();
+                        if let Some(scheduler) = scheduler.as_mut() {
+                            let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
+                            for fd in fds {
+                                let _ = install_descriptor(&mut descriptors, fd);
+                            }
+                        }
+                    }
+                    Ok(bytes)
+                }
+                Err(()) => Ok(Vec::new()),
+            }
+        }
         DescriptorResource::Serial => Err(()),
         DescriptorResource::Tty => Ok(read_tty(length)),
         DescriptorResource::PipeRead(reader) => Ok(reader.lock().read(length)),
@@ -3057,6 +3197,9 @@ pub fn read_would_block(descriptor: u64) -> bool {
             let handle = socket.lock().handle;
             !crate::network::socket_has_pending_data(handle)
         }
+        DescriptorResource::AfUnix(socket) => {
+            !socket.lock().has_pending_data()
+        }
         _ => false,
     }
 }
@@ -3078,6 +3221,11 @@ pub fn close_current(descriptor: u64) -> Result<(), ()> {
             if Arc::strong_count(&socket) == 1 {
                 let handle = socket.lock().handle;
                 let _ = crate::network::socket_close(handle);
+            }
+        }
+        DescriptorResource::AfUnix(socket) => {
+            if Arc::strong_count(&socket) == 1 {
+                socket.lock().close();
             }
         }
         DescriptorResource::PipeWrite(writer) => close_pipe_writer(writer),
@@ -3105,6 +3253,9 @@ pub fn write_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
         DescriptorResource::Socket(socket) => {
             let handle = socket.lock().handle;
             crate::network::socket_send(handle, bytes).map(|_| ()).map_err(|_| ())
+        }
+        DescriptorResource::AfUnix(socket) => {
+            crate::af_unix::send_af_unix(&socket, bytes, alloc::vec::Vec::new()).map(|_| ()).map_err(|_| ())
         }
         DescriptorResource::PipeWrite(writer) => {
             let pipe_id = writer.lock().write(bytes);
@@ -3247,6 +3398,15 @@ pub fn epoll_wait_current(epfd: u64, maxevents: usize) -> Result<Vec<(u32, u64)>
                     revents |= vanta_linuxd::EPOLLIN;
                 }
                 if crate::network::socket_can_write(handle) {
+                    revents |= vanta_linuxd::EPOLLOUT;
+                }
+            }
+            DescriptorResource::AfUnix(ref sock) => {
+                let s = sock.lock();
+                if s.has_pending_data() {
+                    revents |= vanta_linuxd::EPOLLIN;
+                }
+                if s.can_write() {
                     revents |= vanta_linuxd::EPOLLOUT;
                 }
             }

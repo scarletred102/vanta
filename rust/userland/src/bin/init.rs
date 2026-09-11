@@ -303,6 +303,15 @@ fn gate_d_acceptance() -> bool {
     print_val(b"[linux] dhcp-test", dhcp_test, dhcp_test_exit);
     let dhcp_test_ok = dhcp_test != u64::MAX && dhcp_test_exit == 0;
 
+    let afunix_test = vanta_userland::spawn_linux(b"/compat/linux/afunix-test");
+    let afunix_test_exit = if afunix_test != u64::MAX {
+        vanta_userland::wait(afunix_test)
+    } else {
+        999
+    };
+    print_val(b"[linux] afunix-test", afunix_test, afunix_test_exit);
+    let afunix_test_ok = afunix_test != u64::MAX && afunix_test_exit == 0;
+
     let dyn_fork = vanta_userland::spawn_linux(b"/compat/linux/dynamic-fork");
     let dyn_fork_exit = if dyn_fork != u64::MAX {
         vanta_userland::wait(dyn_fork)
@@ -444,6 +453,7 @@ fn gate_d_acceptance() -> bool {
         && vpkg_ok
         && dns_test_ok
         && dhcp_test_ok
+        && afunix_test_ok
 }
 
 fn audit_persistence() -> bool {

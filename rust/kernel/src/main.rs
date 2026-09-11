@@ -45,6 +45,7 @@ mod vma;
 pub mod socket;
 pub mod dns;
 pub mod dhcp;
+pub mod af_unix;
 mod swap;
 
 #[used]

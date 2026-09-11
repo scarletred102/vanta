@@ -694,6 +694,9 @@ fn dispatch_linux(
             vanta_linuxd::LinuxOp::GetPeerName => {
                 linux_getpeername_user(arg1, arg2, arg3)
             }
+            vanta_linuxd::LinuxOp::SocketPair => {
+                linux_socketpair_user(arg1, arg2, arg3, arg4)
+            }
             vanta_linuxd::LinuxOp::SetSockOpt => {
                 linux_setsockopt_user(arg1, arg2, arg3, arg4, arg5)
             }
@@ -2586,6 +2589,15 @@ fn write_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
         }
         return length;
     }
+    if crate::scheduler::is_af_unix_descriptor(descriptor) {
+        match crate::scheduler::send_unix_current(descriptor, &bytes, alloc::vec::Vec::new()) {
+            Ok(n) => return n as u64,
+            Err(()) => {
+                let _ = crate::scheduler::interrupt_current(13); // SIGPIPE
+                return (-(32 as i64)) as u64; // -EPIPE
+            }
+        }
+    }
     if crate::scheduler::is_socket_descriptor(descriptor) {
         match crate::scheduler::send_socket_current(descriptor, &bytes) {
             Ok(n) => return n as u64,
@@ -2827,21 +2839,45 @@ fn pipe_user(pointer: u64, flags: u64) -> u64 {
 
 fn socket_user(domain: u64, socket_type: u64, protocol: u64) -> u64 {
     let raw_type = socket_type & 0xf;
-    if domain != 2 || (raw_type != 1 && raw_type != 2) {
+    if (domain != 1 && domain != 2) || (raw_type != 1 && raw_type != 2) {
         return SYSCALL_ERROR;
     }
     crate::scheduler::open_socket_current(domain, raw_type, protocol).unwrap_or(SYSCALL_ERROR)
 }
 
-fn linux_bind_user(descriptor: u64, addr_ptr: u64, addr_len: u64) -> u64 {
-    if addr_ptr == 0 || addr_len < 8 {
+fn linux_socketpair_user(domain: u64, socket_type: u64, _protocol: u64, sv_ptr: u64) -> u64 {
+    let raw_type = socket_type & 0xf;
+    let Ok((fd0, fd1)) = crate::scheduler::socketpair_current(domain, raw_type) else {
+        return SYSCALL_ERROR;
+    };
+    let mut sv = [0u8; 8];
+    sv[0..4].copy_from_slice(&(fd0 as u32).to_ne_bytes());
+    sv[4..8].copy_from_slice(&(fd1 as u32).to_ne_bytes());
+    if copy_to_user(sv_ptr, &sv).is_err() {
         return SYSCALL_ERROR;
     }
-    let Ok(addr_bytes) = copy_from_user(addr_ptr, 8, false) else {
+    0
+}
+
+fn linux_bind_user(descriptor: u64, addr_ptr: u64, addr_len: u64) -> u64 {
+    if addr_ptr == 0 || addr_len < 2 {
+        return SYSCALL_ERROR;
+    }
+    let Ok(addr_bytes) = copy_from_user(addr_ptr, addr_len.min(110), false) else {
         return SYSCALL_ERROR;
     };
     let family = u16::from_ne_bytes([addr_bytes[0], addr_bytes[1]]);
-    if family != 2 {
+    if family == 1 {
+        let path_bytes = &addr_bytes[2..];
+        let path_len = path_bytes.iter().position(|&b| b == 0).unwrap_or(path_bytes.len());
+        let Ok(path_str) = core::str::from_utf8(&path_bytes[..path_len]) else {
+            return SYSCALL_ERROR;
+        };
+        return crate::scheduler::bind_unix_current(descriptor, path_str)
+            .map(|()| 0)
+            .unwrap_or(SYSCALL_ERROR);
+    }
+    if family != 2 || addr_len < 8 {
         return SYSCALL_ERROR;
     }
     let port = u16::from_be_bytes([addr_bytes[2], addr_bytes[3]]);
@@ -2861,6 +2897,14 @@ fn linux_sendto_user(
 ) -> u64 {
     if validate_user_buffer(buf_ptr, len, false).is_err() {
         return SYSCALL_ERROR;
+    }
+    if crate::scheduler::is_af_unix_descriptor(descriptor) {
+        let Ok(payload) = copy_from_user(buf_ptr, len, false) else {
+            return SYSCALL_ERROR;
+        };
+        return crate::scheduler::send_unix_current(descriptor, &payload, alloc::vec::Vec::new())
+            .map(|n| n as u64)
+            .unwrap_or(SYSCALL_ERROR);
     }
     if dest_ptr != 0 && dest_len >= 8 {
         let Ok(addr_bytes) = copy_from_user(dest_ptr, 8, false) else {
@@ -2915,6 +2959,27 @@ fn linux_recvfrom_user(
     let nonblocking = (flags & 0x40) != 0; // MSG_DONTWAIT
     let to_read = len.min(65536) as usize;
 
+    if crate::scheduler::is_af_unix_descriptor(descriptor) {
+        match crate::scheduler::recv_unix_current(descriptor, to_read) {
+            Ok((bytes, fds)) => {
+                for fd in fds {
+                    let _ = crate::scheduler::install_descriptor_current(fd);
+                }
+                if copy_to_user(buf_ptr, &bytes).is_err() {
+                    return SYSCALL_ERROR;
+                }
+                return bytes.len() as u64;
+            }
+            Err(()) => {
+                if nonblocking {
+                    return (-(11 as i64)) as u64; // -EAGAIN
+                }
+                current_cpu_local().block_descriptor = descriptor;
+                return SYSCALL_RETURN_BLOCK;
+            }
+        }
+    }
+
     match crate::scheduler::recvfrom_current(descriptor, to_read, nonblocking) {
         Ok((bytes, src_ip, src_port)) => {
             if copy_to_user(buf_ptr, &bytes).is_err() {
@@ -2945,13 +3010,15 @@ fn linux_recvmsg_user(descriptor: u64, msghdr_ptr: u64, flags: u64) -> u64 {
     if msghdr_ptr == 0 {
         return SYSCALL_ERROR;
     }
-    let Ok(hdr_bytes) = copy_from_user(msghdr_ptr, 32, false) else {
+    let Ok(hdr_bytes) = copy_from_user(msghdr_ptr, 56, false) else {
         return SYSCALL_ERROR;
     };
     let msg_name = u64::from_ne_bytes(hdr_bytes[0..8].try_into().unwrap());
     let _msg_namelen = u32::from_ne_bytes(hdr_bytes[8..12].try_into().unwrap());
     let msg_iov = u64::from_ne_bytes(hdr_bytes[16..24].try_into().unwrap());
     let msg_iovlen = u64::from_ne_bytes(hdr_bytes[24..32].try_into().unwrap());
+    let msg_control = u64::from_ne_bytes(hdr_bytes[32..40].try_into().unwrap());
+    let msg_controllen = u64::from_ne_bytes(hdr_bytes[40..48].try_into().unwrap());
 
     if msg_iov == 0 || msg_iovlen == 0 {
         return 0;
@@ -2962,6 +3029,53 @@ fn linux_recvmsg_user(descriptor: u64, msghdr_ptr: u64, flags: u64) -> u64 {
     };
     let iov_base = u64::from_ne_bytes(iov_bytes[0..8].try_into().unwrap());
     let iov_len = u64::from_ne_bytes(iov_bytes[8..16].try_into().unwrap());
+
+    if crate::scheduler::is_af_unix_descriptor(descriptor) {
+        if validate_user_buffer(iov_base, iov_len, true).is_err() {
+            return SYSCALL_ERROR;
+        }
+        let nonblocking = (flags & 0x40) != 0;
+        let to_read = iov_len.min(65536) as usize;
+        match crate::scheduler::recv_unix_current(descriptor, to_read) {
+            Ok((bytes, fds)) => {
+                if copy_to_user(iov_base, &bytes).is_err() {
+                    return SYSCALL_ERROR;
+                }
+                if !fds.is_empty() && msg_control != 0 && msg_controllen >= 16 {
+                    let mut installed_fd_nums = alloc::vec::Vec::new();
+                    for fd in fds {
+                        if let Ok(new_fd_num) = crate::scheduler::install_descriptor_current(fd) {
+                            installed_fd_nums.push(new_fd_num as i32);
+                        }
+                    }
+                    let total_cmsg_len = 16 + installed_fd_nums.len() * 4;
+                    let mut cmsg_buf = alloc::vec![0u8; total_cmsg_len];
+                    cmsg_buf[0..8].copy_from_slice(&(total_cmsg_len as u64).to_ne_bytes());
+                    cmsg_buf[8..12].copy_from_slice(&1i32.to_ne_bytes()); // SOL_SOCKET = 1
+                    cmsg_buf[12..16].copy_from_slice(&1i32.to_ne_bytes()); // SCM_RIGHTS = 1
+                    for (idx, fd_num) in installed_fd_nums.iter().enumerate() {
+                        let offset = 16 + idx * 4;
+                        cmsg_buf[offset..offset+4].copy_from_slice(&fd_num.to_ne_bytes());
+                    }
+                    let copy_len = (total_cmsg_len as u64).min(msg_controllen);
+                    let _ = copy_to_user(msg_control, &cmsg_buf[..copy_len as usize]);
+                    let _ = copy_to_user(msghdr_ptr + 40, &copy_len.to_ne_bytes());
+                } else if !fds.is_empty() {
+                    for fd in fds {
+                        let _ = crate::scheduler::install_descriptor_current(fd);
+                    }
+                }
+                return bytes.len() as u64;
+            }
+            Err(()) => {
+                if nonblocking {
+                    return (-(11 as i64)) as u64;
+                }
+                current_cpu_local().block_descriptor = descriptor;
+                return SYSCALL_RETURN_BLOCK;
+            }
+        }
+    }
 
     let addrlen_ptr = if msg_name != 0 { msghdr_ptr + 8 } else { 0 };
     linux_recvfrom_user(descriptor, iov_base, iov_len, flags, msg_name, addrlen_ptr)
@@ -2971,13 +3085,15 @@ fn linux_sendmsg_user(descriptor: u64, msghdr_ptr: u64, flags: u64) -> u64 {
     if msghdr_ptr == 0 {
         return SYSCALL_ERROR;
     }
-    let Ok(hdr_bytes) = copy_from_user(msghdr_ptr, 32, false) else {
+    let Ok(hdr_bytes) = copy_from_user(msghdr_ptr, 56, false) else {
         return SYSCALL_ERROR;
     };
     let msg_name = u64::from_ne_bytes(hdr_bytes[0..8].try_into().unwrap());
     let msg_namelen = u32::from_ne_bytes(hdr_bytes[8..12].try_into().unwrap());
     let msg_iov = u64::from_ne_bytes(hdr_bytes[16..24].try_into().unwrap());
     let msg_iovlen = u64::from_ne_bytes(hdr_bytes[24..32].try_into().unwrap());
+    let msg_control = u64::from_ne_bytes(hdr_bytes[32..40].try_into().unwrap());
+    let msg_controllen = u64::from_ne_bytes(hdr_bytes[40..48].try_into().unwrap());
 
     if msg_iov == 0 || msg_iovlen == 0 {
         return 0;
@@ -2989,17 +3105,61 @@ fn linux_sendmsg_user(descriptor: u64, msghdr_ptr: u64, flags: u64) -> u64 {
     let iov_base = u64::from_ne_bytes(iov_bytes[0..8].try_into().unwrap());
     let iov_len = u64::from_ne_bytes(iov_bytes[8..16].try_into().unwrap());
 
+    let mut passed_fds = alloc::vec::Vec::new();
+    if msg_control != 0 && msg_controllen >= 16 {
+        let read_len = (msg_controllen as usize).min(256);
+        if let Ok(cmsg_buf) = copy_from_user(msg_control, read_len as u64, false) {
+            let cmsg_len = u64::from_ne_bytes(cmsg_buf[0..8].try_into().unwrap()) as usize;
+            let cmsg_level = i32::from_ne_bytes(cmsg_buf[8..12].try_into().unwrap());
+            let cmsg_type = i32::from_ne_bytes(cmsg_buf[12..16].try_into().unwrap());
+            if cmsg_level == 1 && cmsg_type == 1 && cmsg_len >= 16 {
+                let fds_bytes_len = (cmsg_len - 16).min(cmsg_buf.len() - 16);
+                let num_fds = fds_bytes_len / 4;
+                for i in 0..num_fds {
+                    let offset = 16 + i * 4;
+                    let fd_num = i32::from_ne_bytes(cmsg_buf[offset..offset+4].try_into().unwrap());
+                    if let Ok(fd_desc) = crate::scheduler::get_descriptor_clone(fd_num as u64) {
+                        passed_fds.push(fd_desc);
+                    }
+                }
+            }
+        }
+    }
+
+    if crate::scheduler::is_af_unix_descriptor(descriptor) {
+        if validate_user_buffer(iov_base, iov_len, false).is_err() {
+            return SYSCALL_ERROR;
+        }
+        let Ok(payload) = copy_from_user(iov_base, iov_len, false) else {
+            return SYSCALL_ERROR;
+        };
+        return crate::scheduler::send_unix_current(descriptor, &payload, passed_fds)
+            .map(|n| n as u64)
+            .unwrap_or(SYSCALL_ERROR);
+    }
+
     linux_sendto_user(descriptor, iov_base, iov_len, flags, msg_name, msg_namelen as u64)
 }
 
 fn connect_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
-    if length < 8 {
+    if length < 2 {
         return SYSCALL_ERROR;
     }
-    let Ok(address) = copy_from_user(pointer, 8, false) else {
+    let Ok(address) = copy_from_user(pointer, length.min(110), false) else {
         return SYSCALL_ERROR;
     };
-    if u16::from_ne_bytes([address[0], address[1]]) != 2 {
+    let family = u16::from_ne_bytes([address[0], address[1]]);
+    if family == 1 {
+        let path_bytes = &address[2..];
+        let path_len = path_bytes.iter().position(|&b| b == 0).unwrap_or(path_bytes.len());
+        let Ok(path_str) = core::str::from_utf8(&path_bytes[..path_len]) else {
+            return SYSCALL_ERROR;
+        };
+        return crate::scheduler::connect_unix_current(descriptor, path_str)
+            .map(|()| 0)
+            .unwrap_or(SYSCALL_ERROR);
+    }
+    if family != 2 || length < 8 {
         return SYSCALL_ERROR;
     }
     let port = u16::from_be_bytes([address[2], address[3]]);
@@ -3019,15 +3179,21 @@ fn linux_accept4_user(descriptor: u64, addr_ptr: u64, addrlen_ptr: u64, flags: u
     let nonblocking = (flags & 0x800) != 0; // SOCK_NONBLOCK
     let result = crate::scheduler::accept_current(descriptor, nonblocking);
     match result {
-        Ok((new_fd, remote_ip, remote_port)) => {
+        Ok((new_fd, family, remote_ip, remote_port)) => {
             if addr_ptr != 0 && addrlen_ptr != 0 {
-                let mut addr = [0u8; 16];
-                addr[0..2].copy_from_slice(&2u16.to_ne_bytes()); // AF_INET
-                addr[2..4].copy_from_slice(&remote_port.to_be_bytes());
-                addr[4..8].copy_from_slice(&remote_ip);
-                let _ = copy_to_user(addr_ptr, &addr);
-                let len = 16u32;
-                let _ = copy_to_user(addrlen_ptr, &len.to_ne_bytes());
+                let mut addr = [0u8; 112];
+                addr[0..2].copy_from_slice(&(family as u16).to_ne_bytes());
+                if family == 2 {
+                    addr[2..4].copy_from_slice(&remote_port.to_be_bytes());
+                    addr[4..8].copy_from_slice(&remote_ip);
+                    let _ = copy_to_user(addr_ptr, &addr[..16]);
+                    let len = 16u32;
+                    let _ = copy_to_user(addrlen_ptr, &len.to_ne_bytes());
+                } else {
+                    let _ = copy_to_user(addr_ptr, &addr[..2]);
+                    let len = 2u32;
+                    let _ = copy_to_user(addrlen_ptr, &len.to_ne_bytes());
+                }
             }
             new_fd
         }
