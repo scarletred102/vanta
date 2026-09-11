@@ -600,12 +600,13 @@ fn dispatch_linux(
             | vanta_linuxd::LinuxOp::Rseq => 0,
             vanta_linuxd::LinuxOp::SigAltStack => linux_sigaltstack_user(arg1, arg2),
             vanta_linuxd::LinuxOp::GetRandom => {
-                let count = arg2.min(256);
-                let bytes = [0x5au8; 256];
-                if copy_to_user(arg1, &bytes[..count as usize]).is_err() {
+                let count = (arg2 as usize).min(1024);
+                let mut bytes = [0u8; 1024];
+                crate::random::get_random_bytes(&mut bytes[..count]);
+                if copy_to_user(arg1, &bytes[..count]).is_err() {
                     SYSCALL_ERROR
                 } else {
-                    count
+                    count as u64
                 }
             }
             vanta_linuxd::LinuxOp::SchedGetAffinity => SYSCALL_ERROR,
@@ -976,6 +977,10 @@ fn linux_openat_user(directory_fd: u64, path_pointer: u64, flags: u64) -> u64 {
         (contents, alloc::string::String::from(path))
     };
     let writable = flags & 3 != 0;
+    let mut contents = contents;
+    if writable && (flags & 512 != 0) {
+        contents.clear();
+    }
     crate::scheduler::open_native_current(
         path,
         contents,

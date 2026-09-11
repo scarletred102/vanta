@@ -187,6 +187,10 @@ $common = @(
     "[afunix-test] PASS: named VFS path bind and connect",
     "[afunix-test] PASS: SCM_RIGHTS file descriptor passing",
     "[afunix-test] ALL TESTS PASSED",
+    "[linux] wget: spawn=",
+    "[wget] TLS handshake completed successfully!",
+    "[wget] Certificate chain verified against /etc/ssl/certs",
+    "[net] TLS 1.3 outbound HTTPS download verified: /test.txt saved to RedoxFS",
     "[linux-fork] 50-iteration fork loop verified",
     "[linux-fork] Vector 1: 1000-fork 10MB COW stress verified",
     "[linux-fork] COW fork and waitpid verified",
@@ -238,4 +242,4 @@ Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required 
 Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
 
 Write-Host "[test] GPT Gate A, Gate B, Gate C, Gate D, Gate E, and Gate F acceptance passed"
-$first -split "`n" | Where-Object { $_ -match "SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net|http-server" } | ForEach-Object { Write-Host $_ }
+$first -split "`n" | Where-Object { $_ -match "SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net|http-server|wget" } | ForEach-Object { Write-Host $_ }

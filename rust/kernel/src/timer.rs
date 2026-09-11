@@ -283,7 +283,114 @@ impl TimerWheel {
 
 static WHEEL: Mutex<TimerWheel> = Mutex::new(TimerWheel::new());
 static GLOBAL_TICKS: AtomicU64 = AtomicU64::new(0);
-static REALTIME_BASE_SEC: AtomicI64 = AtomicI64::new(1_700_000_000);
+static REALTIME_BASE_SEC: AtomicI64 = AtomicI64::new(1_789_100_000);
+static RTC_INITIALIZED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn read_rtc_seconds() -> Option<u64> {
+    use x86_64::instructions::port::Port;
+    unsafe {
+        let mut addr_port: Port<u8> = Port::new(0x70);
+        let mut data_port: Port<u8> = Port::new(0x71);
+
+        let mut attempts = 0;
+        loop {
+            addr_port.write(0x0A);
+            if (data_port.read() & 0x80) == 0 {
+                break;
+            }
+            attempts += 1;
+            if attempts > 10000 {
+                return None;
+            }
+        }
+
+        addr_port.write(0x00);
+        let sec = data_port.read();
+        addr_port.write(0x02);
+        let min = data_port.read();
+        addr_port.write(0x04);
+        let hour = data_port.read();
+        addr_port.write(0x07);
+        let day = data_port.read();
+        addr_port.write(0x08);
+        let month = data_port.read();
+        addr_port.write(0x09);
+        let year = data_port.read();
+        addr_port.write(0x32);
+        let century = data_port.read();
+
+        addr_port.write(0x0B);
+        let reg_b = data_port.read();
+
+        let is_bcd = (reg_b & 0x04) == 0;
+        let decode = |v: u8| -> u32 {
+            if is_bcd {
+                ((v >> 4) * 10 + (v & 0x0F)) as u32
+            } else {
+                v as u32
+            }
+        };
+
+        let sec = decode(sec);
+        let min = decode(min);
+        let mut hour = decode(hour & 0x7F);
+        if (reg_b & 0x02) == 0 && (hour & 0x80) != 0 {
+            hour = ((hour & 0x7F) + 12) % 24;
+        }
+        let day = decode(day);
+        let month = decode(month);
+        let year = decode(year);
+        let century = decode(century);
+
+        let full_year = if century >= 19 && century <= 22 {
+            century * 100 + year
+        } else if year >= 70 {
+            1900 + year
+        } else {
+            2000 + year
+        };
+
+        if month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || min > 59 || sec > 59 {
+            return None;
+        }
+
+        let mut days = 0u64;
+        for y in 1970..full_year {
+            let leap = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+            days += leap;
+        }
+        let leap = if full_year % 4 == 0 && (full_year % 100 != 0 || full_year % 400 == 0) { 1 } else { 0 };
+        let days_before = match month {
+            1 => 0,
+            2 => 31,
+            3 => 59 + leap,
+            4 => 90 + leap,
+            5 => 120 + leap,
+            6 => 151 + leap,
+            7 => 181 + leap,
+            8 => 212 + leap,
+            9 => 243 + leap,
+            10 => 273 + leap,
+            11 => 304 + leap,
+            12 => 334 + leap,
+            _ => 0,
+        };
+        days += days_before as u64 + (day - 1) as u64;
+        let unix_secs = days * 86400 + (hour as u64) * 3600 + (min as u64) * 60 + (sec as u64);
+        Some(unix_secs)
+    }
+}
+
+fn sync_rtc_if_needed() {
+    if !RTC_INITIALIZED.swap(true, Ordering::SeqCst) {
+        if let Some(rtc_sec) = read_rtc_seconds() {
+            if rtc_sec >= 1_700_000_000 {
+                REALTIME_BASE_SEC.store(rtc_sec as i64, Ordering::Release);
+                crate::serial_println!("[rtc] system realtime clock synchronized to RTC: {} (UNIX)", rtc_sec);
+            }
+        }
+    }
+}
 
 pub fn tick() -> Vec<TimerEntry> {
     GLOBAL_TICKS.fetch_add(1, Ordering::SeqCst);
@@ -341,6 +448,7 @@ pub fn get_clock_time(clock_id: u64) -> (u64, u64) {
     let nsec = (ms % 1000) * 1_000_000;
     match clock_id {
         0 => { // CLOCK_REALTIME
+            sync_rtc_if_needed();
             let base = REALTIME_BASE_SEC.load(Ordering::Acquire);
             let real_sec = (base as u64).wrapping_add(sec);
             (real_sec, nsec)

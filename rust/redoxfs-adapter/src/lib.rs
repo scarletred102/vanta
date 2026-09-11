@@ -174,7 +174,7 @@ impl<D: SectorIo> RedoxFsBackend<D> {
         let (name, parent) = split_parent(&parts)?;
         self.filesystem.tx(|tx| {
             let parent =
-                resolve_with_access(tx, parent, credentials, Node::MODE_WRITE | Node::MODE_EXEC)?;
+                resolve_with_access(tx, parent, credentials, Node::MODE_EXEC)?;
             let ptr = match tx.find_node(parent, name) {
                 Ok(node) => {
                     if node.data().is_dir() {
@@ -188,8 +188,15 @@ impl<D: SectorIo> RedoxFsBackend<D> {
                     }
                     node.ptr()
                 }
-                Err(error) if error.errno == ENOENT => tx
-                    .create_node_with_owner(
+                Err(error) if error.errno == ENOENT => {
+                    let parent_node = tx.read_tree(parent)?;
+                    if !parent_node
+                        .data()
+                        .permission(credentials.uid, credentials.gid, Node::MODE_WRITE)
+                    {
+                        return Err(Error::new(EACCES));
+                    }
+                    tx.create_node_with_owner(
                         parent,
                         name,
                         Node::MODE_FILE | (0o666 & !credentials.umask),
@@ -198,7 +205,8 @@ impl<D: SectorIo> RedoxFsBackend<D> {
                         0,
                         0,
                     )?
-                    .ptr(),
+                    .ptr()
+                }
                 Err(error) => return Err(error),
             };
             tx.truncate_node(ptr, 0, 0, 0)?;

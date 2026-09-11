@@ -46,6 +46,7 @@ pub mod socket;
 pub mod dns;
 pub mod dhcp;
 pub mod af_unix;
+pub mod random;
 mod swap;
 
 #[used]

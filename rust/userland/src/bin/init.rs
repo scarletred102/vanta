@@ -312,6 +312,35 @@ fn gate_d_acceptance() -> bool {
     print_val(b"[linux] afunix-test", afunix_test, afunix_test_exit);
     let afunix_test_ok = afunix_test != u64::MAX && afunix_test_exit == 0;
 
+    let wget_pid = vanta_userland::spawn_with_args(
+        b"/bin/wget",
+        &[b"wget\0", b"-O\0", b"/test.txt\0", b"https://example.com/test.txt\0"],
+        0,
+        1,
+        2,
+    );
+    let wget_exit = if wget_pid != u64::MAX {
+        vanta_userland::wait(wget_pid)
+    } else {
+        999
+    };
+    print_val(b"[linux] wget", wget_pid, wget_exit);
+    let wget_ok = wget_pid != u64::MAX && wget_exit == 0;
+
+    let test_fd = vanta_userland::open(b"/test.txt", vanta_userland::OPEN_READ);
+    let mut file_ok = false;
+    if test_fd != u64::MAX {
+        let mut check_buf = [0u8; 64];
+        let n = vanta_userland::read(test_fd, &mut check_buf);
+        if n > 0 && n != u64::MAX {
+            file_ok = true;
+        }
+        vanta_userland::close(test_fd);
+    }
+    if wget_ok && file_ok {
+        vanta_userland::write(1, b"[net] TLS 1.3 outbound HTTPS download verified: /test.txt saved to RedoxFS\n");
+    }
+
     let dyn_fork = vanta_userland::spawn_linux(b"/compat/linux/dynamic-fork");
     let dyn_fork_exit = if dyn_fork != u64::MAX {
         vanta_userland::wait(dyn_fork)
@@ -454,6 +483,8 @@ fn gate_d_acceptance() -> bool {
         && dns_test_ok
         && dhcp_test_ok
         && afunix_test_ok
+        && wget_ok
+        && file_ok
 }
 
 fn audit_persistence() -> bool {

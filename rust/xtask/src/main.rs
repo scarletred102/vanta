@@ -199,6 +199,7 @@ fn build_default_image() -> Result<(), String> {
     build_userland(&root)?;
     build_sdk(&root)?;
     build_linux_samples(&root)?;
+    build_wget(&root)?;
 
     let boot_efi = read_file(root.join("esp/EFI/BOOT/BOOTX64.EFI"))?;
     let kernel = read_file(root.join("target/x86_64-unknown-none/release/vanta-kernel"))?;
@@ -263,6 +264,8 @@ fn build_default_image() -> Result<(), String> {
     let linux_dynamic_proc = read_file(root.join("target/compat/linux/dynamic-proc"))?;
     let busybox = read_file(root.join("target/compat/linux/busybox"))?;
     let lua = read_file(root.join("target/compat/linux/lua"))?;
+    let linux_wget = read_file(root.join("target/x86_64-unknown-linux-musl/release/wget"))?;
+    let ca_certs = read_file(root.join("../compat/linux/ca-certificates.crt"))?;
     let vanta_release = b"Vanta OS 0.1.0 (musl-compat)\n".to_vec();
     let hosts_content = b"127.0.0.1 localhost\n10.0.2.15 vanta\n".to_vec();
     let resolv_conf_content = b"nameserver 10.0.2.3\n".to_vec();
@@ -708,6 +711,27 @@ fn build_default_image() -> Result<(), String> {
             uid: 0,
             gid: 0,
         },
+        RootFile {
+            path: "/bin/wget",
+            contents: &linux_wget,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/etc/ssl/certs/ca-certificates.crt",
+            contents: &ca_certs,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/test.txt",
+            contents: b"",
+            mode: 0o666,
+            uid: 1000,
+            gid: 1000,
+        },
     ];
 
     let busybox_applets = [
@@ -739,7 +763,6 @@ fn build_default_image() -> Result<(), String> {
         "/bin/ps",
         "/bin/killall",
         "/bin/top",
-        "/bin/wget",
         "/bin/nc",
         "/bin/diff",
         "/bin/patch",
@@ -1106,6 +1129,92 @@ fn build_linux_samples(root: &Path) -> Result<(), String> {
         fs::copy(&lua_source, &lua_dest)
             .map_err(|e| format!("failed to copy lua: {e}"))?;
     }
+    Ok(())
+}
+
+fn build_wget(root: &Path) -> Result<(), String> {
+    let gcc_wrapper = root.join("target/bin/x86_64-linux-musl-gcc.exe");
+    let ar_wrapper = root.join("target/bin/x86_64-linux-musl-ar.exe");
+    if !gcc_wrapper.exists() || !ar_wrapper.exists() {
+        let bin_dir = root.join("target/bin");
+        fs::create_dir_all(&bin_dir).map_err(|e| format!("{e}"))?;
+        fs::write(
+            bin_dir.join("gcc_wrapper.c"),
+            r#"#include <windows.h>
+#include <stdio.h>
+#include <string.h>
+
+int main(int argc, char **argv) {
+    char cmd[65536];
+    strcpy(cmd, "zig cc -target x86_64-linux-musl ");
+    for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "--target=", 9) == 0) {
+            continue;
+        }
+        strcat(cmd, "\"");
+        strcat(cmd, argv[i]);
+        strcat(cmd, "\" ");
+    }
+    return system(cmd);
+}
+"#,
+        )
+        .map_err(|e| format!("{e}"))?;
+        fs::write(
+            bin_dir.join("ar_wrapper.c"),
+            r#"#include <windows.h>
+#include <stdio.h>
+#include <string.h>
+
+int main(int argc, char **argv) {
+    char cmd[32768];
+    strcpy(cmd, "zig ar ");
+    for (int i = 1; i < argc; i++) {
+        strcat(cmd, "\"");
+        strcat(cmd, argv[i]);
+        strcat(cmd, "\" ");
+    }
+    return system(cmd);
+}
+"#,
+        )
+        .map_err(|e| format!("{e}"))?;
+
+        let _ = Command::new("zig")
+            .args(["cc", "target/bin/gcc_wrapper.c", "-o", "target/bin/x86_64-linux-musl-gcc.exe"])
+            .current_dir(root)
+            .status();
+        let _ = Command::new("zig")
+            .args(["cc", "target/bin/ar_wrapper.c", "-o", "target/bin/x86_64-linux-musl-ar.exe"])
+            .current_dir(root)
+            .status();
+    }
+
+    let rustup = rustup_path();
+    let linker_flag = format!("-C link-self-contained=no -C linker={}", gcc_wrapper.display());
+    let status = Command::new(&rustup)
+        .current_dir(root)
+        .env("CC_x86_64_unknown_linux_musl", &gcc_wrapper)
+        .env("AR_x86_64_unknown_linux_musl", &ar_wrapper)
+        .env("RUSTFLAGS", &linker_flag)
+        .args([
+            "run",
+            RUST_TOOLCHAIN,
+            "cargo",
+            "build",
+            "-p",
+            "vanta-wget",
+            "--release",
+            "--target",
+            "x86_64-unknown-linux-musl",
+        ])
+        .status()
+        .map_err(|e| format!("failed to start wget build: {e}"))?;
+
+    if !status.success() {
+        return Err(format!("wget build exited with {status}"));
+    }
+
     Ok(())
 }
 

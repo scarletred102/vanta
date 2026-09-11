@@ -176,20 +176,8 @@ impl Process {
             {
                 return Err(());
             }
-            addr
-        } else if addr != 0
-            && addr & (PAGE_SIZE - 1) == 0
-            && addr.checked_add(aligned_length).ok_or(())? < USER_STACK_START
-        {
-            addr
-        } else {
-            let base = self.mmap_next;
-            self.mmap_next = self.mmap_next.checked_add(aligned_length).ok_or(())?;
-            base
-        };
-        if map_fixed {
-            let mut page = base_address;
-            while page < base_address + aligned_length {
+            let mut page = addr;
+            while page < addr + aligned_length {
                 if let Ok(Some(physical)) = paging::unmap(self.space, page) {
                     let _ = memory::free_frame(memory::PhysFrame(physical));
                     if let Some(pos) = self.mappings.iter().position(|m| m.virtual_address == page) {
@@ -198,7 +186,52 @@ impl Process {
                 }
                 page += PAGE_SIZE;
             }
-        }
+            let _ = self.memory_map.lock().remove_vma_range(addr, addr + aligned_length);
+            addr
+        } else {
+            let hint_ok = if addr != 0 && addr & (PAGE_SIZE - 1) == 0 {
+                if let Some(end) = addr.checked_add(aligned_length) {
+                    if end <= USER_STACK_START {
+                        let mem = self.memory_map.lock();
+                        let overlap = if let Some((_, prev_vma)) = mem.vmas.range(..end).next_back() {
+                            prev_vma.end > addr
+                        } else {
+                            false
+                        };
+                        !overlap
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if hint_ok {
+                addr
+            } else {
+                let mut base = self.mmap_next;
+                let mem = self.memory_map.lock();
+                loop {
+                    let end = base.checked_add(aligned_length).ok_or(())?;
+                    if end >= USER_STACK_START {
+                        return Err(());
+                    }
+                    if let Some((_, prev_vma)) = mem.vmas.range(..end).next_back() {
+                        if prev_vma.end > base {
+                            base = (prev_vma.end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                drop(mem);
+                self.mmap_next = base.checked_add(aligned_length).ok_or(())?;
+                base
+            }
+        };
 
         let mut vma_flags = crate::vma::VmaFlags::ANONYMOUS;
         if prot & 1 != 0 {

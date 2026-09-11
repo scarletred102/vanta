@@ -9,6 +9,7 @@ members = [
     "redoxfs-adapter",
     "services",
     "userland",
+    "wget",
     "xtask",
 ]
 resolver = "2"
