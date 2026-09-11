@@ -254,6 +254,7 @@ fn build_default_image() -> Result<(), String> {
     let linux_dynamic_signal = read_file(root.join("target/compat/linux/dynamic-signal"))?;
     let linux_dynamic_threads = read_file(root.join("target/compat/linux/dynamic-threads"))?;
     let linux_dynamic_net = read_file(root.join("target/compat/linux/dynamic-net"))?;
+    let linux_http_server = read_file(root.join("target/compat/linux/http-server"))?;
     let linux_dynamic_fork = read_file(root.join("target/compat/linux/dynamic-fork"))?;
     let linux_dynamic_epoll = read_file(root.join("target/compat/linux/dynamic-epoll"))?;
     let linux_dynamic_proc = read_file(root.join("target/compat/linux/dynamic-proc"))?;
@@ -614,6 +615,13 @@ fn build_default_image() -> Result<(), String> {
         RootFile {
             path: "/compat/linux/dynamic-net",
             contents: &linux_dynamic_net,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
+            path: "/compat/linux/http-server",
+            contents: &linux_http_server,
             mode: 0o755,
             uid: 0,
             gid: 0,
@@ -1003,6 +1011,7 @@ fn build_linux_samples(root: &Path) -> Result<(), String> {
         ("dynamic-signal.c", "dynamic-signal"),
         ("dynamic-threads.c", "dynamic-threads"),
         ("dynamic-net.c", "dynamic-net"),
+        ("http-server.c", "http-server"),
         ("dynamic-fork.c", "dynamic-fork"),
         ("dynamic-epoll.c", "dynamic-epoll"),
         ("dynamic-proc.c", "dynamic-proc"),

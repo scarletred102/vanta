@@ -156,6 +156,17 @@ $common = @(
     "[net-test] NAPI coalescing: 0 drops under 1000 pps threshold, 0 drops under burst load (PASS)",
     "[net-test] CPU utilization: active-polling=",
     "[linux-dynamic] network acceptance passed",
+    "[http-server] starting BSD socket lifecycle tests...",
+    "[http-server] PASS: socket options (SO_REUSEADDR, TCP_NODELAY)",
+    "[http-server] PASS: bind and getsockname (127.0.0.1:8080)",
+    "[http-server] PASS: listen(backlog=128)",
+    "[http-server] PASS: accept4 and getpeername",
+    "[http-server] PASS: HTTP GET request-response payload verified",
+    "[http-server] PASS: graceful FIN/EOF teardown",
+    "[http-server] PASS: EPIPE delivered on closed socket write",
+    "[http-server] PASS: TIME_WAIT port reuse with SO_REUSEADDR",
+    "[http-server] PASS: 3 concurrent client connections verified",
+    "[http-server] ALL TESTS PASSED",
     "[linux-fork] 50-iteration fork loop verified",
     "[linux-fork] Vector 1: 1000-fork 10MB COW stress verified",
     "[linux-fork] COW fork and waitpid verified",
@@ -207,4 +218,4 @@ Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required 
 Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
 
 Write-Host "[test] GPT Gate A, Gate B, Gate C, Gate D, Gate E, and Gate F acceptance passed"
-$first -split "`n" | Where-Object { $_ -match "SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net" } | ForEach-Object { Write-Host $_ }
+$first -split "`n" | Where-Object { $_ -match "SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net|http-server" } | ForEach-Object { Write-Host $_ }

@@ -42,6 +42,7 @@ mod vfs;
 mod virtio;
 mod virtio_net;
 mod vma;
+pub mod socket;
 mod swap;
 
 #[used]

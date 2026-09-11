@@ -676,13 +676,30 @@ fn dispatch_linux(
             vanta_linuxd::LinuxOp::Bind => {
                 linux_bind_user(arg1, arg2, arg3)
             }
-            vanta_linuxd::LinuxOp::Listen
-            | vanta_linuxd::LinuxOp::Accept
-            | vanta_linuxd::LinuxOp::Accept4 => 0,
-            vanta_linuxd::LinuxOp::GetSockName
-            | vanta_linuxd::LinuxOp::GetPeerName
-            | vanta_linuxd::LinuxOp::SetSockOpt
-            | vanta_linuxd::LinuxOp::GetSockOpt => 0,
+            vanta_linuxd::LinuxOp::Connect => {
+                connect_user(arg1, arg2, arg3)
+            }
+            vanta_linuxd::LinuxOp::Listen => {
+                linux_listen_user(arg1, arg2)
+            }
+            vanta_linuxd::LinuxOp::Accept => {
+                linux_accept4_user(arg1, arg2, arg3, 0)
+            }
+            vanta_linuxd::LinuxOp::Accept4 => {
+                linux_accept4_user(arg1, arg2, arg3, arg4)
+            }
+            vanta_linuxd::LinuxOp::GetSockName => {
+                linux_getsockname_user(arg1, arg2, arg3)
+            }
+            vanta_linuxd::LinuxOp::GetPeerName => {
+                linux_getpeername_user(arg1, arg2, arg3)
+            }
+            vanta_linuxd::LinuxOp::SetSockOpt => {
+                linux_setsockopt_user(arg1, arg2, arg3, arg4, arg5)
+            }
+            vanta_linuxd::LinuxOp::GetSockOpt => {
+                linux_getsockopt_user(arg1, arg2, arg3, arg4, arg5)
+            }
             vanta_linuxd::LinuxOp::Fork | vanta_linuxd::LinuxOp::VFork => {
                 linux_clone_user(0, 0, 0, 0, 0)
             }
@@ -2550,6 +2567,19 @@ fn write_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
         }
         return length;
     }
+    if crate::scheduler::is_socket_descriptor(descriptor) {
+        match crate::scheduler::send_socket_current(descriptor, &bytes) {
+            Ok(n) => return n as u64,
+            Err(crate::network::NetworkError::BrokenPipe) => {
+                let _ = crate::scheduler::interrupt_current(13); // SIGPIPE
+                return (-(32 as i64)) as u64; // -EPIPE
+            }
+            Err(crate::network::NetworkError::WouldBlock) => {
+                return (-(11 as i64)) as u64; // -EAGAIN
+            }
+            Err(_) => return SYSCALL_ERROR,
+        }
+    }
     match crate::scheduler::write_current(descriptor, &bytes) {
         Ok(()) => length,
         Err(()) => SYSCALL_ERROR,
@@ -2806,7 +2836,7 @@ fn linux_sendto_user(
     descriptor: u64,
     buf_ptr: u64,
     len: u64,
-    _flags: u64,
+    flags: u64,
     dest_ptr: u64,
     dest_len: u64,
 ) -> u64 {
@@ -2830,6 +2860,24 @@ fn linux_sendto_user(
             .map(|n| n as u64)
             .unwrap_or(SYSCALL_ERROR)
     } else {
+        if crate::scheduler::is_socket_descriptor(descriptor) {
+            let Ok(payload) = copy_from_user(buf_ptr, len, false) else {
+                return SYSCALL_ERROR;
+            };
+            match crate::scheduler::send_socket_current(descriptor, &payload) {
+                Ok(n) => return n as u64,
+                Err(crate::network::NetworkError::BrokenPipe) => {
+                    if flags & 0x4000 == 0 { // MSG_NOSIGNAL = 0x4000
+                        let _ = crate::scheduler::interrupt_current(13); // SIGPIPE
+                    }
+                    return (-(32 as i64)) as u64; // -EPIPE
+                }
+                Err(crate::network::NetworkError::WouldBlock) => {
+                    return (-(11 as i64)) as u64; // -EAGAIN
+                }
+                Err(_) => return SYSCALL_ERROR,
+            }
+        }
         write_user(descriptor, buf_ptr, len)
     }
 }
@@ -2875,10 +2923,10 @@ fn linux_recvfrom_user(
 }
 
 fn connect_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
-    if length != 16 {
+    if length < 8 {
         return SYSCALL_ERROR;
     }
-    let Ok(address) = copy_from_user(pointer, length, false) else {
+    let Ok(address) = copy_from_user(pointer, 8, false) else {
         return SYSCALL_ERROR;
     };
     if u16::from_ne_bytes([address[0], address[1]]) != 2 {
@@ -2889,6 +2937,119 @@ fn connect_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
     crate::scheduler::connect_socket_current(descriptor, remote_ip, port)
         .map(|()| 0)
         .unwrap_or(SYSCALL_ERROR)
+}
+
+fn linux_listen_user(descriptor: u64, backlog: u64) -> u64 {
+    crate::scheduler::listen_current(descriptor, backlog as usize)
+        .map(|()| 0)
+        .unwrap_or(SYSCALL_ERROR)
+}
+
+fn linux_accept4_user(descriptor: u64, addr_ptr: u64, addrlen_ptr: u64, flags: u64) -> u64 {
+    let nonblocking = (flags & 0x800) != 0; // SOCK_NONBLOCK
+    let result = crate::scheduler::accept_current(descriptor, nonblocking);
+    match result {
+        Ok((new_fd, remote_ip, remote_port)) => {
+            if addr_ptr != 0 && addrlen_ptr != 0 {
+                let mut addr = [0u8; 16];
+                addr[0..2].copy_from_slice(&2u16.to_ne_bytes()); // AF_INET
+                addr[2..4].copy_from_slice(&remote_port.to_be_bytes());
+                addr[4..8].copy_from_slice(&remote_ip);
+                let _ = copy_to_user(addr_ptr, &addr);
+                let len = 16u32;
+                let _ = copy_to_user(addrlen_ptr, &len.to_ne_bytes());
+            }
+            new_fd
+        }
+        Err(crate::network::NetworkError::WouldBlock) => {
+            if nonblocking {
+                (-(11 as i64)) as u64 // -EAGAIN
+            } else {
+                current_cpu_local().block_descriptor = descriptor;
+                SYSCALL_RETURN_BLOCK
+            }
+        }
+        Err(_) => SYSCALL_ERROR,
+    }
+}
+
+fn linux_getsockname_user(descriptor: u64, addr_ptr: u64, addrlen_ptr: u64) -> u64 {
+    if addr_ptr == 0 || addrlen_ptr == 0 {
+        return SYSCALL_ERROR;
+    }
+    match crate::scheduler::getsockname_current(descriptor) {
+        Ok((ip, port)) => {
+            let mut addr = [0u8; 16];
+            addr[0..2].copy_from_slice(&2u16.to_ne_bytes()); // AF_INET
+            addr[2..4].copy_from_slice(&port.to_be_bytes());
+            addr[4..8].copy_from_slice(&ip);
+            let _ = copy_to_user(addr_ptr, &addr);
+            let len = 16u32;
+            let _ = copy_to_user(addrlen_ptr, &len.to_ne_bytes());
+            0
+        }
+        Err(_) => SYSCALL_ERROR,
+    }
+}
+
+fn linux_getpeername_user(descriptor: u64, addr_ptr: u64, addrlen_ptr: u64) -> u64 {
+    if addr_ptr == 0 || addrlen_ptr == 0 {
+        return SYSCALL_ERROR;
+    }
+    match crate::scheduler::getpeername_current(descriptor) {
+        Ok((ip, port)) => {
+            let mut addr = [0u8; 16];
+            addr[0..2].copy_from_slice(&2u16.to_ne_bytes()); // AF_INET
+            addr[2..4].copy_from_slice(&port.to_be_bytes());
+            addr[4..8].copy_from_slice(&ip);
+            let _ = copy_to_user(addr_ptr, &addr);
+            let len = 16u32;
+            let _ = copy_to_user(addrlen_ptr, &len.to_ne_bytes());
+            0
+        }
+        Err(_) => (-(107 as i64)) as u64, // -ENOTCONN
+    }
+}
+
+fn linux_setsockopt_user(
+    descriptor: u64,
+    level: u64,
+    optname: u64,
+    optval_ptr: u64,
+    optlen: u64,
+) -> u64 {
+    if optval_ptr == 0 || optlen < 4 {
+        return SYSCALL_ERROR;
+    }
+    let Ok(val_bytes) = copy_from_user(optval_ptr, 4, false) else {
+        return SYSCALL_ERROR;
+    };
+    let optval = u32::from_ne_bytes([val_bytes[0], val_bytes[1], val_bytes[2], val_bytes[3]]);
+    crate::scheduler::setsockopt_current(descriptor, level as u32, optname as u32, optval)
+        .map(|()| 0)
+        .unwrap_or(SYSCALL_ERROR)
+}
+
+fn linux_getsockopt_user(
+    descriptor: u64,
+    level: u64,
+    optname: u64,
+    optval_ptr: u64,
+    optlen_ptr: u64,
+) -> u64 {
+    if optval_ptr == 0 || optlen_ptr == 0 {
+        return SYSCALL_ERROR;
+    }
+    match crate::scheduler::getsockopt_current(descriptor, level as u32, optname as u32) {
+        Ok(val) => {
+            let bytes = val.to_ne_bytes();
+            let _ = copy_to_user(optval_ptr, &bytes);
+            let len = 4u32;
+            let _ = copy_to_user(optlen_ptr, &len.to_ne_bytes());
+            0
+        }
+        Err(_) => SYSCALL_ERROR,
+    }
 }
 
 fn is_native_path(path: &str) -> bool {

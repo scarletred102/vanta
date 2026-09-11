@@ -96,6 +96,7 @@ pub enum NetworkError {
     ConnectionReset,
     ConnectionClosed,
     WouldBlock,
+    BrokenPipe,
     InvalidArgument,
 }
 
@@ -106,98 +107,9 @@ impl From<VirtioNetError> for NetworkError {
 }
 
 // -----------------------------------------------------------------------------
-// Sockets Data Structures
+// Sockets Data Structures (re-exported from socket.rs)
 // -----------------------------------------------------------------------------
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SocketType {
-    Stream,
-    Datagram,
-    Raw,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TcpState {
-    Closed,
-    Listen,
-    SynSent,
-    SynReceived,
-    Established,
-    FinWait1,
-    FinWait2,
-    CloseWait,
-    Closing,
-    LastAck,
-    TimeWait,
-    Reset,
-}
-
-pub struct SocketOptions {
-    pub reuse_addr: bool,
-    pub rcvbuf: usize,
-    pub sndbuf: usize,
-    pub nonblocking: bool,
-}
-
-impl Default for SocketOptions {
-    fn default() -> Self {
-        Self {
-            reuse_addr: false,
-            rcvbuf: 65536,
-            sndbuf: 65536,
-            nonblocking: false,
-        }
-    }
-}
-
-pub struct UdpDatagram {
-    pub src_ip: Ipv4Address,
-    pub src_port: u16,
-    pub data: Vec<u8>,
-}
-
-pub struct PendingSyn {
-    pub remote_ip: Ipv4Address,
-    pub remote_port: u16,
-    pub remote_mac: MacAddress,
-    pub our_isn: u32,
-    pub peer_seq: u32,
-}
-
-pub struct TcpSocket {
-    pub state: TcpState,
-    pub local_ip: Ipv4Address,
-    pub local_port: u16,
-    pub remote_ip: Ipv4Address,
-    pub remote_port: u16,
-    pub remote_mac: Option<MacAddress>,
-    pub seq_num: u32,
-    pub ack_num: u32,
-    pub snd_una: u32,
-    pub snd_wnd: u16,
-    pub rx_buffer: Vec<u8>,
-    pub rx_closed: bool,
-    pub tx_closed: bool,
-    pub backlog: usize,
-    pub accept_queue: Vec<u32>,
-    pub pending_syns: Vec<PendingSyn>,
-    pub options: SocketOptions,
-}
-
-pub struct UdpSocket {
-    pub local_ip: Ipv4Address,
-    pub local_port: u16,
-    pub bound: bool,
-    pub connected_peer: Option<(Ipv4Address, u16)>,
-    pub rx_queue: Vec<UdpDatagram>,
-    pub options: SocketOptions,
-}
-
-pub enum Socket {
-    Tcp(TcpSocket),
-    Udp(UdpSocket),
-    Raw,
-}
+pub use crate::socket::*;
 
 // -----------------------------------------------------------------------------
 // Initialization & Bring-up
@@ -436,6 +348,9 @@ fn generate_isn(local_port: u16, remote_port: u16) -> u32 {
 
 fn resolve_destination_mac(state: &mut NetworkState, target_ip: Ipv4Address) -> Result<MacAddress, NetworkError> {
     let our_ip = state.configuration.address;
+    if target_ip == [127, 0, 0, 1] || target_ip == our_ip {
+        return Ok(state.device.mac());
+    }
     let is_local_subnet = target_ip[0] == our_ip[0]
         && target_ip[1] == our_ip[1]
         && target_ip[2] == our_ip[2];
@@ -491,6 +406,7 @@ pub fn socket_has_pending_data(handle: u32) -> bool {
             Socket::Udp(udp) => !udp.rx_queue.is_empty(),
             Socket::Tcp(tcp) => {
                 !tcp.rx_buffer.is_empty()
+                    || !tcp.accept_queue.is_empty()
                     || tcp.rx_closed
                     || tcp.state == TcpState::Reset
                     || tcp.state == TcpState::Closed
@@ -502,12 +418,58 @@ pub fn socket_has_pending_data(handle: u32) -> bool {
     }
 }
 
+pub fn socket_can_write(handle: u32) -> bool {
+    let state = NETWORK.lock();
+    let Some(state) = state.as_ref() else {
+        return false;
+    };
+    if let Some(socket) = state.sockets.get(&handle) {
+        match socket {
+            Socket::Tcp(tcp) => tcp.state.can_send() && !tcp.tx_closed,
+            Socket::Udp(_) => true,
+            Socket::Raw => true,
+        }
+    } else {
+        false
+    }
+}
+
+fn check_tcp_timers(state: &mut NetworkState) {
+    let current_ticks = crate::timer::current_tick();
+
+    let mut to_remove = Vec::new();
+    for (&handle, sock) in state.sockets.iter_mut() {
+        if let Socket::Tcp(tcp) = sock {
+            if tcp.state == TcpState::TimeWait {
+                if let Some(entered) = tcp.time_wait_entered {
+                    if current_ticks.saturating_sub(entered) >= 2 * TCP_MSL_TICKS {
+                        to_remove.push(handle);
+                    }
+                }
+            } else if tcp.state == TcpState::FinWait1 || tcp.state == TcpState::LastAck || tcp.state == TcpState::Closing {
+                if let Some(entered) = tcp.time_wait_entered {
+                    if current_ticks.saturating_sub(entered) >= 5000 {
+                        to_remove.push(handle);
+                    }
+                }
+            } else if tcp.state == TcpState::Listen {
+                // Purge stale half-open pending_syns older than 3000ms
+                tcp.pending_syns.retain(|syn| current_ticks.saturating_sub(syn.created_tick) < 3000);
+            }
+        }
+    }
+    for handle in to_remove {
+        state.sockets.remove(&handle);
+    }
+}
+
 fn poll_network_locked(state: &mut NetworkState) -> Result<(), NetworkError> {
     while let Some(frame) = state.device.receive()? {
         crate::virtio_net::record_rx_packet();
         process_incoming_frame(state, &frame)?;
     }
     crate::virtio_net::clear_bottom_half_pending();
+    check_tcp_timers(state);
     Ok(())
 }
 
@@ -571,7 +533,7 @@ fn process_incoming_frame(state: &mut NetworkState, frame: &[u8]) -> Result<(), 
                 }
                 net::IP_PROTOCOL_TCP => {
                     if let Some((tcp, tcp_payload)) = net::parse_tcp(ip_payload, ip.src_ip, ip.dest_ip) {
-                        handle_incoming_tcp(state, eth.src_mac, ip.src_ip, &tcp, tcp_payload)?;
+                        handle_incoming_tcp(state, eth.src_mac, ip.src_ip, ip.dest_ip, &tcp, tcp_payload)?;
                     }
                 }
                 _ => {}
@@ -586,6 +548,7 @@ fn handle_incoming_tcp(
     state: &mut NetworkState,
     src_mac: MacAddress,
     src_ip: Ipv4Address,
+    dest_ip: Ipv4Address,
     tcp: &net::TcpHeader,
     payload: &[u8],
 ) -> Result<(), NetworkError> {
@@ -596,12 +559,18 @@ fn handle_incoming_tcp(
     let mut matched_socket_handle = None;
     for (&handle, socket) in state.sockets.iter() {
         if let Socket::Tcp(s) = socket {
-            if s.local_port == tcp.dest_port && s.remote_ip == src_ip && s.remote_port == tcp.src_port {
+            let is_remote_match = s.remote_ip == src_ip
+                || (s.remote_ip == [127, 0, 0, 1] && (src_ip == [127, 0, 0, 1] || src_ip == our_ip))
+                || (src_ip == [127, 0, 0, 1] && (s.remote_ip == [127, 0, 0, 1] || s.remote_ip == our_ip));
+            if s.local_port == tcp.dest_port && is_remote_match && s.remote_port == tcp.src_port {
                 matched_socket_handle = Some(handle);
                 break;
             }
         }
     }
+
+    let mut to_reflect = alloc::vec::Vec::new();
+    let mut wake_handle = None;
 
     if let Some(handle) = matched_socket_handle {
         let Socket::Tcp(s) = state.sockets.get_mut(&handle).unwrap() else {
@@ -626,7 +595,7 @@ fn handle_incoming_tcp(
                     let ack = net::build_tcp_frame(
                         our_mac,
                         src_mac,
-                        our_ip,
+                        dest_ip,
                         src_ip,
                         s.local_port,
                         s.remote_port,
@@ -637,6 +606,9 @@ fn handle_incoming_tcp(
                         b"",
                     );
                     let _ = state.device.transmit(&ack);
+                    if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
+                        to_reflect.push(ack);
+                    }
                 }
             }
             TcpState::Established | TcpState::CloseWait => {
@@ -647,7 +619,7 @@ fn handle_incoming_tcp(
                         let ack = net::build_tcp_frame(
                             our_mac,
                             src_mac,
-                            our_ip,
+                            dest_ip,
                             src_ip,
                             s.local_port,
                             s.remote_port,
@@ -658,11 +630,15 @@ fn handle_incoming_tcp(
                             b"",
                         );
                         let _ = state.device.transmit(&ack);
+                        if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
+                            to_reflect.push(ack);
+                        }
+                        wake_handle = Some(handle);
                     } else if tcp.sequence < s.ack_num {
                         let ack = net::build_tcp_frame(
                             our_mac,
                             src_mac,
-                            our_ip,
+                            dest_ip,
                             src_ip,
                             s.local_port,
                             s.remote_port,
@@ -673,6 +649,9 @@ fn handle_incoming_tcp(
                             b"",
                         );
                         let _ = state.device.transmit(&ack);
+                        if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
+                            to_reflect.push(ack);
+                        }
                     }
                 }
                 if tcp.flags & net::TCP_ACK != 0 {
@@ -685,7 +664,7 @@ fn handle_incoming_tcp(
                     let ack = net::build_tcp_frame(
                         our_mac,
                         src_mac,
-                        our_ip,
+                        dest_ip,
                         src_ip,
                         s.local_port,
                         s.remote_port,
@@ -696,19 +675,17 @@ fn handle_incoming_tcp(
                         b"",
                     );
                     let _ = state.device.transmit(&ack);
+                    if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
+                        to_reflect.push(ack);
+                    }
+                    wake_handle = Some(handle);
                 }
             }
             TcpState::FinWait1 => {
-                if tcp.flags & net::TCP_ACK != 0 {
-                    s.state = TcpState::FinWait2;
-                }
-                if tcp.flags & net::TCP_FIN != 0 {
+                if tcp.flags & net::TCP_ACK != 0 && tcp.flags & net::TCP_FIN != 0 {
                     s.ack_num = s.ack_num.wrapping_add(1);
-                    s.state = if s.state == TcpState::FinWait2 {
-                        TcpState::TimeWait
-                    } else {
-                        TcpState::Closing
-                    };
+                    s.state = TcpState::TimeWait;
+                    s.time_wait_entered = Some(crate::timer::current_tick());
                     let ack = net::build_tcp_frame(
                         our_mac,
                         src_mac,
@@ -723,12 +700,38 @@ fn handle_incoming_tcp(
                         b"",
                     );
                     let _ = state.device.transmit(&ack);
+                    if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
+                        to_reflect.push(ack);
+                    }
+                } else if tcp.flags & net::TCP_ACK != 0 {
+                    s.state = TcpState::FinWait2;
+                } else if tcp.flags & net::TCP_FIN != 0 {
+                    s.ack_num = s.ack_num.wrapping_add(1);
+                    s.state = TcpState::Closing;
+                    let ack = net::build_tcp_frame(
+                        our_mac,
+                        src_mac,
+                        our_ip,
+                        src_ip,
+                        s.local_port,
+                        s.remote_port,
+                        s.seq_num,
+                        s.ack_num,
+                        net::TCP_ACK,
+                        DEFAULT_WINDOW_SIZE,
+                        b"",
+                    );
+                    let _ = state.device.transmit(&ack);
+                    if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
+                        to_reflect.push(ack);
+                    }
                 }
             }
             TcpState::FinWait2 => {
                 if tcp.flags & net::TCP_FIN != 0 {
                     s.ack_num = s.ack_num.wrapping_add(1);
                     s.state = TcpState::TimeWait;
+                    s.time_wait_entered = Some(crate::timer::current_tick());
                     let ack = net::build_tcp_frame(
                         our_mac,
                         src_mac,
@@ -743,6 +746,15 @@ fn handle_incoming_tcp(
                         b"",
                     );
                     let _ = state.device.transmit(&ack);
+                    if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
+                        to_reflect.push(ack);
+                    }
+                }
+            }
+            TcpState::Closing => {
+                if tcp.flags & net::TCP_ACK != 0 {
+                    s.state = TcpState::TimeWait;
+                    s.time_wait_entered = Some(crate::timer::current_tick());
                 }
             }
             TcpState::LastAck => {
@@ -751,6 +763,13 @@ fn handle_incoming_tcp(
                 }
             }
             _ => {}
+        }
+
+        if let Some(h) = wake_handle {
+            crate::scheduler::wake_pipe_waiters(0x5000_0000 | (h as u64));
+        }
+        for pkt in to_reflect {
+            let _ = process_incoming_frame(state, &pkt);
         }
         return Ok(());
     }
@@ -767,16 +786,45 @@ fn handle_incoming_tcp(
     }
 
     if let Some(l_handle) = listener_handle {
-        let Socket::Tcp(listener) = state.sockets.get_mut(&l_handle).unwrap() else {
-            return Ok(());
-        };
+        let current_tick = crate::timer::current_tick();
+        let time_min = (current_tick / 60000) as u32;
 
         if tcp.flags & net::TCP_SYN != 0 && (tcp.flags & net::TCP_ACK == 0) {
-            let our_isn = generate_isn(tcp.dest_port, tcp.src_port);
+            let our_isn = {
+                let Socket::Tcp(listener) = state.sockets.get_mut(&l_handle).unwrap() else {
+                    return Ok(());
+                };
+                if listener.pending_syns.len() >= listener.backlog {
+                    // SYN Cookie Protection (RFC 4987)
+                    crate::serial_println!("[tcp] syn_queue saturated: activated SYN cookie protection (RFC 4987)");
+                    generate_syn_cookie(
+                        our_ip,
+                        src_ip,
+                        tcp.dest_port,
+                        tcp.src_port,
+                        tcp.sequence,
+                        time_min,
+                    )
+                } else {
+                    let isn = generate_isn(tcp.dest_port, tcp.src_port);
+                    listener.pending_syns.retain(|p| !(p.remote_ip == src_ip && p.remote_port == tcp.src_port));
+                    listener.pending_syns.push(PendingSyn {
+                        remote_ip: src_ip,
+                        remote_port: tcp.src_port,
+                        remote_mac: src_mac,
+                        our_isn: isn,
+                        peer_seq: tcp.sequence,
+                        created_tick: current_tick,
+                    });
+                    isn
+                }
+            };
+
+            let reply_ip = if dest_ip == [127, 0, 0, 1] { [127, 0, 0, 1] } else { our_ip };
             let syn_ack = net::build_tcp_frame(
                 our_mac,
                 src_mac,
-                our_ip,
+                reply_ip,
                 src_ip,
                 tcp.dest_port,
                 tcp.src_port,
@@ -787,68 +835,91 @@ fn handle_incoming_tcp(
                 b"",
             );
             let _ = state.device.transmit(&syn_ack);
-            listener.pending_syns.retain(|p| !(p.remote_ip == src_ip && p.remote_port == tcp.src_port));
-            listener.pending_syns.push(PendingSyn {
-                remote_ip: src_ip,
-                remote_port: tcp.src_port,
-                remote_mac: src_mac,
-                our_isn,
-                peer_seq: tcp.sequence,
-            });
+            if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
+                to_reflect.push(syn_ack);
+            }
         } else if tcp.flags & net::TCP_ACK != 0 {
-            if let Some(pos) = listener
-                .pending_syns
-                .iter()
-                .position(|p| p.remote_ip == src_ip && p.remote_port == tcp.src_port)
-            {
-                let pending = listener.pending_syns.remove(pos);
-                if tcp.acknowledgement == pending.our_isn.wrapping_add(1) {
-                    let new_handle = NEXT_SOCKET_HANDLE.fetch_add(1, Ordering::Relaxed);
-                    let mut new_sock = TcpSocket {
-                        state: TcpState::Established,
-                        local_ip: our_ip,
-                        local_port: tcp.dest_port,
-                        remote_ip: src_ip,
-                        remote_port: tcp.src_port,
-                        remote_mac: Some(src_mac),
-                        seq_num: pending.our_isn.wrapping_add(1),
-                        ack_num: tcp.sequence,
-                        snd_una: pending.our_isn.wrapping_add(1),
-                        snd_wnd: tcp.window_size,
-                        rx_buffer: Vec::new(),
-                        rx_closed: false,
-                        tx_closed: false,
-                        backlog: 0,
-                        accept_queue: Vec::new(),
-                        pending_syns: Vec::new(),
-                        options: SocketOptions::default(),
-                    };
-                    if !payload.is_empty() {
-                        new_sock.rx_buffer.extend_from_slice(payload);
-                        new_sock.ack_num = new_sock.ack_num.wrapping_add(payload.len() as u32);
-                        let ack = net::build_tcp_frame(
-                            our_mac,
-                            src_mac,
-                            our_ip,
-                            src_ip,
-                            new_sock.local_port,
-                            new_sock.remote_port,
-                            new_sock.seq_num,
-                            new_sock.ack_num,
-                            net::TCP_ACK,
-                            DEFAULT_WINDOW_SIZE,
-                            b"",
-                        );
-                        let _ = state.device.transmit(&ack);
+            let matching_syn = {
+                let Socket::Tcp(listener) = state.sockets.get_mut(&l_handle).unwrap() else {
+                    return Ok(());
+                };
+                if let Some(pos) = listener
+                    .pending_syns
+                    .iter()
+                    .position(|p| p.remote_ip == src_ip && p.remote_port == tcp.src_port)
+                {
+                    let p = listener.pending_syns.remove(pos);
+                    if tcp.acknowledgement == p.our_isn.wrapping_add(1) {
+                        Some(p.our_isn)
+                    } else {
+                        None
                     }
-                    state.sockets.insert(new_handle, Socket::Tcp(new_sock));
-                    let Socket::Tcp(listener) = state.sockets.get_mut(&l_handle).unwrap() else {
-                        return Ok(());
-                    };
+                } else {
+                    // Check if ACK acknowledges a valid SYN Cookie
+                    let cookie = tcp.acknowledgement.wrapping_sub(1);
+                    let peer_seq = tcp.sequence.wrapping_sub(1);
+                    if validate_syn_cookie(cookie, our_ip, src_ip, tcp.dest_port, tcp.src_port, peer_seq, time_min) {
+                        Some(cookie)
+                    } else {
+                        None
+                    }
+                }
+            };
+
+            if let Some(our_isn) = matching_syn {
+                let new_handle = NEXT_SOCKET_HANDLE.fetch_add(1, Ordering::Relaxed);
+                let mut new_sock = TcpSocket {
+                    state: TcpState::Established,
+                    local_ip: if dest_ip == [127, 0, 0, 1] { [127, 0, 0, 1] } else { our_ip },
+                    local_port: tcp.dest_port,
+                    remote_ip: src_ip,
+                    remote_port: tcp.src_port,
+                    remote_mac: Some(src_mac),
+                    seq_num: our_isn.wrapping_add(1),
+                    ack_num: tcp.sequence,
+                    snd_una: our_isn.wrapping_add(1),
+                    snd_wnd: tcp.window_size,
+                    rx_buffer: Vec::new(),
+                    rx_closed: false,
+                    tx_closed: false,
+                    backlog: 0,
+                    accept_queue: Vec::new(),
+                    pending_syns: Vec::new(),
+                    time_wait_entered: None,
+                    options: SocketOptions::default(),
+                };
+                if !payload.is_empty() {
+                    new_sock.rx_buffer.extend_from_slice(payload);
+                    new_sock.ack_num = new_sock.ack_num.wrapping_add(payload.len() as u32);
+                    let ack = net::build_tcp_frame(
+                        our_mac,
+                        src_mac,
+                        new_sock.local_ip,
+                        src_ip,
+                        new_sock.local_port,
+                        new_sock.remote_port,
+                        new_sock.seq_num,
+                        new_sock.ack_num,
+                        net::TCP_ACK,
+                        DEFAULT_WINDOW_SIZE,
+                        b"",
+                    );
+                    let _ = state.device.transmit(&ack);
+                    if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
+                        to_reflect.push(ack);
+                    }
+                }
+                state.sockets.insert(new_handle, Socket::Tcp(new_sock));
+                if let Some(Socket::Tcp(listener)) = state.sockets.get_mut(&l_handle) {
                     listener.accept_queue.push(new_handle);
                 }
+                crate::scheduler::wake_pipe_waiters(0x5000_0000 | (l_handle as u64));
             }
         }
+    }
+
+    for pkt in to_reflect {
+        let _ = process_incoming_frame(state, &pkt);
     }
 
     Ok(())
@@ -886,6 +957,7 @@ pub fn socket_create(domain: u32, socket_type: u32, _protocol: u32) -> Result<u3
                 backlog: 0,
                 accept_queue: Vec::new(),
                 pending_syns: Vec::new(),
+                time_wait_entered: None,
                 options: SocketOptions::default(),
             })
         }
@@ -923,6 +995,48 @@ pub fn socket_bind(handle: u32, ip: Ipv4Address, port: u16) -> Result<(), Networ
         ip
     };
 
+    // Privileged port check (< 1024 require root)
+    if bind_port < 1024 && bind_port != 0 {
+        let creds = crate::scheduler::current_credentials();
+        if creds.uid != 0 {
+            return Err(NetworkError::InvalidArgument);
+        }
+    }
+
+    let is_reuse_requested = {
+        if let Some(Socket::Tcp(tcp)) = state.sockets.get(&handle) {
+            tcp.options.reuse_addr || tcp.options.reuse_port
+        } else {
+            false
+        }
+    };
+
+    // Port collision check
+    for (&other_h, other_s) in state.sockets.iter() {
+        if other_h == handle {
+            continue;
+        }
+        match other_s {
+            Socket::Tcp(other_tcp) => {
+                if other_tcp.local_port == bind_port && other_tcp.state.is_active() {
+                    // TIME_WAIT port reuse: allow reusing port if existing socket is in TimeWait
+                    if other_tcp.state == TcpState::TimeWait {
+                        continue;
+                    }
+                    if !(is_reuse_requested && (other_tcp.options.reuse_addr || other_tcp.options.reuse_port)) {
+                        return Err(NetworkError::PortInUse);
+                    }
+                }
+            }
+            Socket::Udp(other_udp) => {
+                if other_udp.bound && other_udp.local_port == bind_port {
+                    return Err(NetworkError::PortInUse);
+                }
+            }
+            _ => {}
+        }
+    }
+
     let socket = state.sockets.get_mut(&handle).ok_or(NetworkError::SocketNotFound)?;
     match socket {
         Socket::Tcp(tcp) => {
@@ -957,41 +1071,35 @@ pub fn socket_listen(handle: u32, backlog: usize) -> Result<(), NetworkError> {
                 tcp.local_port = NEXT_TCP_PORT.fetch_add(1, Ordering::Relaxed);
             }
             tcp.state = TcpState::Listen;
-            tcp.backlog = if backlog == 0 { 128 } else { backlog };
+            tcp.backlog = if backlog == 0 { SOMAXCONN } else { backlog.min(SOMAXCONN) };
+            tcp.pending_syns.clear();
+            tcp.accept_queue.clear();
             Ok(())
         }
         _ => Err(NetworkError::InvalidSocketType),
     }
 }
 
-pub fn socket_accept(handle: u32, nonblocking: bool) -> Result<(u32, Ipv4Address, u16), NetworkError> {
-    for _ in 0..TCP_POLL_ATTEMPTS {
-        {
-            let mut state = NETWORK.lock();
-            let state = state.as_mut().ok_or(NetworkError::Unavailable)?;
-            poll_network_locked(state)?;
+pub fn socket_accept(handle: u32, _nonblocking: bool) -> Result<(u32, Ipv4Address, u16), NetworkError> {
+    let mut state = NETWORK.lock();
+    let state = state.as_mut().ok_or(NetworkError::Unavailable)?;
 
-            let socket = state.sockets.get_mut(&handle).ok_or(NetworkError::SocketNotFound)?;
-            let Socket::Tcp(tcp) = socket else {
-                return Err(NetworkError::InvalidSocketType);
-            };
-            if tcp.state != TcpState::Listen {
-                return Err(NetworkError::NotListening);
-            }
-
-            if !tcp.accept_queue.is_empty() {
-                let accepted_handle = tcp.accept_queue.remove(0);
-                if let Some(Socket::Tcp(accepted_sock)) = state.sockets.get(&accepted_handle) {
-                    return Ok((accepted_handle, accepted_sock.remote_ip, accepted_sock.remote_port));
-                }
-            }
-        }
-        if nonblocking {
-            return Err(NetworkError::WouldBlock);
-        }
-        core::hint::spin_loop();
+    let socket = state.sockets.get_mut(&handle).ok_or(NetworkError::SocketNotFound)?;
+    let Socket::Tcp(tcp) = socket else {
+        return Err(NetworkError::InvalidSocketType);
+    };
+    if tcp.state != TcpState::Listen {
+        return Err(NetworkError::NotListening);
     }
-    Err(NetworkError::TcpReceiveTimeout)
+
+    if !tcp.accept_queue.is_empty() {
+        let accepted_handle = tcp.accept_queue.remove(0);
+        if let Some(Socket::Tcp(accepted_sock)) = state.sockets.get(&accepted_handle) {
+            return Ok((accepted_handle, accepted_sock.remote_ip, accepted_sock.remote_port));
+        }
+    }
+
+    Err(NetworkError::WouldBlock)
 }
 
 pub fn socket_connect(
@@ -1021,6 +1129,8 @@ pub fn socket_connect(
                 if tcp.local_port == 0 {
                     tcp.local_port = NEXT_TCP_PORT.fetch_add(1, Ordering::Relaxed);
                 }
+                let src_ip = if remote_ip == [127, 0, 0, 1] { [127, 0, 0, 1] } else { our_ip };
+                tcp.local_ip = src_ip;
                 tcp.remote_ip = remote_ip;
                 tcp.remote_port = remote_port;
                 tcp.remote_mac = Some(dest_mac);
@@ -1032,7 +1142,7 @@ pub fn socket_connect(
                 let syn = net::build_tcp_frame(
                     our_mac,
                     dest_mac,
-                    our_ip,
+                    src_ip,
                     remote_ip,
                     tcp.local_port,
                     remote_port,
@@ -1043,6 +1153,9 @@ pub fn socket_connect(
                     b"",
                 );
                 state.device.transmit(&syn)?;
+                if remote_ip == [127, 0, 0, 1] || remote_ip == our_ip {
+                    let _ = process_incoming_frame(state, &syn);
+                }
             }
             Socket::Udp(udp) => {
                 udp.connected_peer = Some((remote_ip, remote_port));
@@ -1111,7 +1224,14 @@ pub fn socket_send(handle: u32, bytes: &[u8]) -> Result<usize, NetworkError> {
         let socket = state.sockets.get_mut(&handle).ok_or(NetworkError::SocketNotFound)?;
         match socket {
             Socket::Tcp(tcp) => {
-                if tcp.state != TcpState::Established && tcp.state != TcpState::CloseWait {
+                if tcp.state == TcpState::CloseWait
+                    || tcp.state == TcpState::Closed
+                    || tcp.state == TcpState::Reset
+                    || tcp.tx_closed
+                {
+                    return Err(NetworkError::BrokenPipe);
+                }
+                if tcp.state != TcpState::Established {
                     return Err(NetworkError::NotConnected);
                 }
                 let dest_mac = tcp.remote_mac.ok_or(NetworkError::GatewayUnreachable)?;
@@ -1144,7 +1264,10 @@ pub fn socket_send(handle: u32, bytes: &[u8]) -> Result<usize, NetworkError> {
         SendAction::Tcp { remote_ip, remote_port, local_port, dest_mac, mut seq_num, ack_num } => {
             let our_mac = state.device.mac();
             let our_ip = state.configuration.address;
+            let src_ip = if remote_ip == [127, 0, 0, 1] { [127, 0, 0, 1] } else { our_ip };
+            let is_loopback = remote_ip == [127, 0, 0, 1] || remote_ip == our_ip;
 
+            let mut to_reflect = Vec::new();
             let mut offset = 0;
             while offset < bytes.len() {
                 let chunk_len = (bytes.len() - offset).min(MAX_TCP_CHUNK_SIZE);
@@ -1153,7 +1276,7 @@ pub fn socket_send(handle: u32, bytes: &[u8]) -> Result<usize, NetworkError> {
                 let frame = net::build_tcp_frame(
                     our_mac,
                     dest_mac,
-                    our_ip,
+                    src_ip,
                     remote_ip,
                     local_port,
                     remote_port,
@@ -1164,6 +1287,9 @@ pub fn socket_send(handle: u32, bytes: &[u8]) -> Result<usize, NetworkError> {
                     chunk,
                 );
                 state.device.transmit(&frame)?;
+                if is_loopback {
+                    to_reflect.push(frame);
+                }
                 seq_num = seq_num.wrapping_add(chunk_len as u32);
                 offset += chunk_len;
             }
@@ -1171,6 +1297,11 @@ pub fn socket_send(handle: u32, bytes: &[u8]) -> Result<usize, NetworkError> {
             if let Some(Socket::Tcp(tcp)) = state.sockets.get_mut(&handle) {
                 tcp.seq_num = seq_num;
             }
+
+            for f in to_reflect {
+                let _ = process_incoming_frame(state, &f);
+            }
+
             let _ = poll_network_locked(state);
             Ok(bytes.len())
         }
@@ -1271,7 +1402,10 @@ pub fn socket_sendto(
         SendToAction::Tcp { remote_ip, remote_port, local_port, dest_mac, mut seq_num, ack_num } => {
             let our_mac = state.device.mac();
             let our_ip = state.configuration.address;
+            let src_ip = if remote_ip == [127, 0, 0, 1] { [127, 0, 0, 1] } else { our_ip };
+            let is_loopback = remote_ip == [127, 0, 0, 1] || remote_ip == our_ip;
 
+            let mut to_reflect = Vec::new();
             let mut offset = 0;
             while offset < bytes.len() {
                 let chunk_len = (bytes.len() - offset).min(MAX_TCP_CHUNK_SIZE);
@@ -1280,7 +1414,7 @@ pub fn socket_sendto(
                 let frame = net::build_tcp_frame(
                     our_mac,
                     dest_mac,
-                    our_ip,
+                    src_ip,
                     remote_ip,
                     local_port,
                     remote_port,
@@ -1291,12 +1425,19 @@ pub fn socket_sendto(
                     chunk,
                 );
                 state.device.transmit(&frame)?;
+                if is_loopback {
+                    to_reflect.push(frame);
+                }
                 seq_num = seq_num.wrapping_add(chunk_len as u32);
                 offset += chunk_len;
             }
 
             if let Some(Socket::Tcp(tcp)) = state.sockets.get_mut(&handle) {
                 tcp.seq_num = seq_num;
+            }
+
+            for f in to_reflect {
+                let _ = process_incoming_frame(state, &f);
             }
 
             Ok(bytes.len())
@@ -1427,7 +1568,7 @@ pub fn socket_getpeername(handle: u32) -> Result<(Ipv4Address, u16), NetworkErro
     }
 }
 
-pub fn socket_setsockopt(handle: u32, _level: u32, optname: u32, optval: u32) -> Result<(), NetworkError> {
+pub fn socket_setsockopt(handle: u32, level: u32, optname: u32, optval: u32) -> Result<(), NetworkError> {
     let mut state = NETWORK.lock();
     let state = state.as_mut().ok_or(NetworkError::Unavailable)?;
     let socket = state.sockets.get_mut(&handle).ok_or(NetworkError::SocketNotFound)?;
@@ -1436,26 +1577,39 @@ pub fn socket_setsockopt(handle: u32, _level: u32, optname: u32, optval: u32) ->
         Socket::Udp(udp) => &mut udp.options,
         Socket::Raw => return Ok(()),
     };
-    match optname {
-        2 => options.reuse_addr = optval != 0, // SO_REUSEADDR
-        8 => options.rcvbuf = optval as usize, // SO_RCVBUF
-        7 => options.sndbuf = optval as usize, // SO_SNDBUF
-        _ => {}
+    if level == 6 { // IPPROTO_TCP
+        if optname == 1 { // TCP_NODELAY
+            options.tcp_nodelay = optval != 0;
+        }
+    } else { // SOL_SOCKET
+        match optname {
+            2 => options.reuse_addr = optval != 0, // SO_REUSEADDR
+            15 => options.reuse_port = optval != 0, // SO_REUSEPORT
+            8 => options.rcvbuf = optval as usize, // SO_RCVBUF
+            7 => options.sndbuf = optval as usize, // SO_SNDBUF
+            _ => {}
+        }
     }
     Ok(())
 }
 
-pub fn socket_getsockopt(handle: u32, _level: u32, optname: u32) -> Result<u32, NetworkError> {
+pub fn socket_getsockopt(handle: u32, level: u32, optname: u32) -> Result<u32, NetworkError> {
     let state = NETWORK.lock();
     let state = state.as_ref().ok_or(NetworkError::Unavailable)?;
     let socket = state.sockets.get(&handle).ok_or(NetworkError::SocketNotFound)?;
     let (sock_type, options) = match socket {
         Socket::Tcp(tcp) => (1, &tcp.options),
         Socket::Udp(udp) => (2, &udp.options),
-        Socket::Raw => (3, &SocketOptions { reuse_addr: false, rcvbuf: 0, sndbuf: 0, nonblocking: false }),
+        Socket::Raw => (3, &SocketOptions::default()),
     };
+    if level == 6 {
+        if optname == 1 {
+            return Ok(if options.tcp_nodelay { 1 } else { 0 });
+        }
+    }
     match optname {
-        2 => Ok(if options.reuse_addr { 1 } else { 0 }), // SO_REUSEADDR
+        2 => Ok(if options.reuse_addr { 1 } else { 0 }),  // SO_REUSEADDR
+        15 => Ok(if options.reuse_port { 1 } else { 0 }), // SO_REUSEPORT
         3 => Ok(sock_type),                              // SO_TYPE
         4 => Ok(0),                                      // SO_ERROR
         8 => Ok(options.rcvbuf as u32),                  // SO_RCVBUF
@@ -1468,16 +1622,21 @@ pub fn socket_close(handle: u32) -> Result<(), NetworkError> {
     let mut state = NETWORK.lock();
     let state = state.as_mut().ok_or(NetworkError::Unavailable)?;
 
+    let mut remove_now = true;
+    let mut fin_to_reflect = None;
     if let Some(socket) = state.sockets.get_mut(&handle) {
         if let Socket::Tcp(tcp) = socket {
+            let current_ticks = crate::timer::current_tick();
             if tcp.state == TcpState::Established {
                 if let Some(dest_mac) = tcp.remote_mac {
                     let our_mac = state.device.mac();
                     let our_ip = state.configuration.address;
+                    let src_ip = if tcp.remote_ip == [127, 0, 0, 1] { [127, 0, 0, 1] } else { our_ip };
+                    let is_loopback = tcp.remote_ip == [127, 0, 0, 1] || tcp.remote_ip == our_ip;
                     let fin = net::build_tcp_frame(
                         our_mac,
                         dest_mac,
-                        our_ip,
+                        src_ip,
                         tcp.remote_ip,
                         tcp.local_port,
                         tcp.remote_port,
@@ -1488,17 +1647,24 @@ pub fn socket_close(handle: u32) -> Result<(), NetworkError> {
                         b"",
                     );
                     let _ = state.device.transmit(&fin);
+                    if is_loopback {
+                        fin_to_reflect = Some(fin);
+                    }
                     tcp.seq_num = tcp.seq_num.wrapping_add(1);
                     tcp.state = TcpState::FinWait1;
+                    tcp.time_wait_entered = Some(current_ticks);
+                    remove_now = false;
                 }
             } else if tcp.state == TcpState::CloseWait {
                 if let Some(dest_mac) = tcp.remote_mac {
                     let our_mac = state.device.mac();
                     let our_ip = state.configuration.address;
+                    let src_ip = if tcp.remote_ip == [127, 0, 0, 1] { [127, 0, 0, 1] } else { our_ip };
+                    let is_loopback = tcp.remote_ip == [127, 0, 0, 1] || tcp.remote_ip == our_ip;
                     let fin = net::build_tcp_frame(
                         our_mac,
                         dest_mac,
-                        our_ip,
+                        src_ip,
                         tcp.remote_ip,
                         tcp.local_port,
                         tcp.remote_port,
@@ -1509,13 +1675,27 @@ pub fn socket_close(handle: u32) -> Result<(), NetworkError> {
                         b"",
                     );
                     let _ = state.device.transmit(&fin);
+                    if is_loopback {
+                        fin_to_reflect = Some(fin);
+                    }
                     tcp.seq_num = tcp.seq_num.wrapping_add(1);
                     tcp.state = TcpState::LastAck;
+                    tcp.time_wait_entered = Some(current_ticks);
+                    remove_now = false;
                 }
+            } else if tcp.state == TcpState::TimeWait || tcp.state == TcpState::FinWait1 || tcp.state == TcpState::FinWait2 {
+                remove_now = false;
             }
         }
     }
-    state.sockets.remove(&handle);
+
+    if let Some(fin) = fin_to_reflect {
+        let _ = process_incoming_frame(state, &fin);
+    }
+
+    if remove_now {
+        state.sockets.remove(&handle);
+    }
     Ok(())
 }
 

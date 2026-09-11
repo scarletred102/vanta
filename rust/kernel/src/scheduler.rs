@@ -2513,14 +2513,99 @@ pub fn connect_socket_current(
     let DescriptorResource::Socket(socket) = descriptor.resource else {
         return Err(());
     };
-    let mut socket = socket.lock();
-    if socket.connection.is_some() {
-        return Err(());
-    }
-    let conn = crate::network::tcp_connect(remote_ip, remote_port).map_err(|_| ())?;
-    socket.handle = conn.socket_handle;
-    socket.connection = Some(conn);
-    Ok(())
+    let handle = socket.lock().handle;
+    crate::network::socket_connect(handle, remote_ip, remote_port, false).map_err(|_| ())
+}
+
+pub fn listen_current(descriptor: u64, backlog: usize) -> Result<(), crate::network::NetworkError> {
+    let desc = current_descriptor(descriptor).map_err(|_| crate::network::NetworkError::SocketNotFound)?;
+    let DescriptorResource::Socket(socket) = desc.resource else {
+        return Err(crate::network::NetworkError::InvalidSocketType);
+    };
+    let handle = socket.lock().handle;
+    crate::network::socket_listen(handle, backlog)
+}
+
+pub fn accept_current(
+    descriptor: u64,
+    nonblocking: bool,
+) -> Result<(u64, crate::net::Ipv4Address, u16), crate::network::NetworkError> {
+    let desc = current_descriptor(descriptor).map_err(|_| crate::network::NetworkError::SocketNotFound)?;
+    let DescriptorResource::Socket(socket) = desc.resource else {
+        return Err(crate::network::NetworkError::InvalidSocketType);
+    };
+    let listener_handle = socket.lock().handle;
+    let (new_handle, remote_ip, remote_port) = crate::network::socket_accept(listener_handle, nonblocking)?;
+
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(crate::network::NetworkError::Unavailable)?;
+    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
+    let fd = install_descriptor(
+        &mut descriptors,
+        FileDescriptor {
+            capability: allocate_capability(),
+            rights: Rights::READ | Rights::WRITE | Rights::TRANSFER | Rights::CONNECT,
+            resource: DescriptorResource::Socket(Arc::new(Mutex::new(OpenSocket {
+                handle: new_handle,
+                socket_type: 1, // SOCK_STREAM
+                connection: None,
+            }))),
+        },
+    ).map_err(|_| crate::network::NetworkError::Unavailable)?;
+
+    Ok((fd, remote_ip, remote_port))
+}
+
+pub fn getsockname_current(descriptor: u64) -> Result<(crate::net::Ipv4Address, u16), crate::network::NetworkError> {
+    let desc = current_descriptor(descriptor).map_err(|_| crate::network::NetworkError::SocketNotFound)?;
+    let DescriptorResource::Socket(socket) = desc.resource else {
+        return Err(crate::network::NetworkError::InvalidSocketType);
+    };
+    let handle = socket.lock().handle;
+    crate::network::socket_getsockname(handle)
+}
+
+pub fn getpeername_current(descriptor: u64) -> Result<(crate::net::Ipv4Address, u16), crate::network::NetworkError> {
+    let desc = current_descriptor(descriptor).map_err(|_| crate::network::NetworkError::SocketNotFound)?;
+    let DescriptorResource::Socket(socket) = desc.resource else {
+        return Err(crate::network::NetworkError::InvalidSocketType);
+    };
+    let handle = socket.lock().handle;
+    crate::network::socket_getpeername(handle)
+}
+
+pub fn setsockopt_current(descriptor: u64, level: u32, optname: u32, optval: u32) -> Result<(), crate::network::NetworkError> {
+    let desc = current_descriptor(descriptor).map_err(|_| crate::network::NetworkError::SocketNotFound)?;
+    let DescriptorResource::Socket(socket) = desc.resource else {
+        return Err(crate::network::NetworkError::InvalidSocketType);
+    };
+    let handle = socket.lock().handle;
+    crate::network::socket_setsockopt(handle, level, optname, optval)
+}
+
+pub fn getsockopt_current(descriptor: u64, level: u32, optname: u32) -> Result<u32, crate::network::NetworkError> {
+    let desc = current_descriptor(descriptor).map_err(|_| crate::network::NetworkError::SocketNotFound)?;
+    let DescriptorResource::Socket(socket) = desc.resource else {
+        return Err(crate::network::NetworkError::InvalidSocketType);
+    };
+    let handle = socket.lock().handle;
+    crate::network::socket_getsockopt(handle, level, optname)
+}
+
+pub fn is_socket_descriptor(descriptor: u64) -> bool {
+    let Ok(desc) = current_descriptor(descriptor) else {
+        return false;
+    };
+    matches!(desc.resource, DescriptorResource::Socket(_))
+}
+
+pub fn send_socket_current(descriptor: u64, bytes: &[u8]) -> Result<usize, crate::network::NetworkError> {
+    let desc = current_descriptor(descriptor).map_err(|_| crate::network::NetworkError::SocketNotFound)?;
+    let DescriptorResource::Socket(socket) = desc.resource else {
+        return Err(crate::network::NetworkError::InvalidSocketType);
+    };
+    let handle = socket.lock().handle;
+    crate::network::socket_send(handle, bytes)
 }
 
 pub fn duplicate_current(descriptor: u64) -> Result<u64, ()> {
@@ -3157,8 +3242,12 @@ pub fn epoll_wait_current(epfd: u64, maxevents: usize) -> Result<Vec<(u32, u64)>
                 }
             }
             DescriptorResource::Socket(ref sock) => {
-                if sock.lock().connection.is_some() {
-                    revents |= vanta_linuxd::EPOLLIN | vanta_linuxd::EPOLLOUT;
+                let handle = sock.lock().handle;
+                if crate::network::socket_has_pending_data(handle) {
+                    revents |= vanta_linuxd::EPOLLIN;
+                }
+                if crate::network::socket_can_write(handle) {
+                    revents |= vanta_linuxd::EPOLLOUT;
                 }
             }
             DescriptorResource::EventFd(ref efd) => {

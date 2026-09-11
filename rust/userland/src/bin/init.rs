@@ -276,6 +276,15 @@ fn gate_d_acceptance() -> bool {
     print_val(b"[linux] dynamic-net", dyn_net, dyn_net_exit);
     let dyn_net_ok = dyn_net != u64::MAX && dyn_net_exit == 0;
 
+    let http_srv = vanta_userland::spawn_linux(b"/compat/linux/http-server");
+    let http_srv_exit = if http_srv != u64::MAX {
+        vanta_userland::wait(http_srv)
+    } else {
+        999
+    };
+    print_val(b"[linux] http-server", http_srv, http_srv_exit);
+    let http_srv_ok = http_srv != u64::MAX && http_srv_exit == 0;
+
     let dyn_fork = vanta_userland::spawn_linux(b"/compat/linux/dynamic-fork");
     let dyn_fork_exit = if dyn_fork != u64::MAX {
         vanta_userland::wait(dyn_fork)
@@ -401,6 +410,7 @@ fn gate_d_acceptance() -> bool {
         && dyn_signal_ok
         && dyn_threads_ok
         && dyn_net_ok
+        && http_srv_ok
         && dyn_fork_ok
         && dyn_epoll_ok
         && dyn_proc_ok
