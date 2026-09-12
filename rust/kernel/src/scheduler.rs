@@ -2684,20 +2684,20 @@ pub fn socketpair_current(domain: u64, socket_type: u64) -> Result<(u64, u64), (
     Ok((fd_a, fd_b))
 }
 
-pub fn bind_unix_current(descriptor: u64, path: &str) -> Result<(), ()> {
+pub fn bind_unix_current(descriptor: u64, addr: &crate::af_unix::UnixAddress) -> Result<(), ()> {
     let descriptor = current_descriptor(descriptor)?;
     let DescriptorResource::AfUnix(socket) = descriptor.resource else {
         return Err(());
     };
-    crate::af_unix::bind_af_unix(&socket, path)
+    crate::af_unix::bind_af_unix(&socket, addr)
 }
 
-pub fn connect_unix_current(descriptor: u64, path: &str) -> Result<(), ()> {
+pub fn connect_unix_current(descriptor: u64, addr: &crate::af_unix::UnixAddress) -> Result<(), ()> {
     let descriptor = current_descriptor(descriptor)?;
     let DescriptorResource::AfUnix(socket) = descriptor.resource else {
         return Err(());
     };
-    crate::af_unix::connect_af_unix(&socket, path)
+    crate::af_unix::connect_af_unix(&socket, addr)
 }
 
 pub(crate) fn send_unix_current(descriptor: u64, data: &[u8], passed_fds: Vec<FileDescriptor>) -> Result<usize, ()> {
@@ -3224,7 +3224,7 @@ pub fn close_current(descriptor: u64) -> Result<(), ()> {
             }
         }
         DescriptorResource::AfUnix(socket) => {
-            if Arc::strong_count(&socket) == 1 {
+            if Arc::strong_count(&socket) <= 1 {
                 socket.lock().close();
             }
         }

@@ -287,6 +287,195 @@ int main(void) {
     }
     pmsg("[afunix-test] PASS: SCM_RIGHTS file descriptor passing\n");
 
+    /* =========================================================================
+     * Test 5: Linux Abstract Namespace socket bind and connect
+     * ========================================================================= */
+    pmsg("[afunix-test] testing abstract unix socket bind and connect...\n");
+    int alfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (alfd < 0) {
+        pmsg("[afunix-test] FAIL: socket for abstract bind failed\n");
+        return 50;
+    }
+
+    struct sockaddr_un aaddr;
+    memset(&aaddr, 0, sizeof(aaddr));
+    aaddr.sun_family = AF_UNIX;
+    aaddr.sun_path[0] = '\0';
+    const char *abs_name = "vanta-abstract-test";
+    memcpy(aaddr.sun_path + 1, abs_name, strlen(abs_name));
+    socklen_t aaddr_len = sizeof(sa_family_t) + 1 + strlen(abs_name);
+
+    if (bind(alfd, (struct sockaddr *)&aaddr, aaddr_len) < 0) {
+        pmsg("[afunix-test] FAIL: bind to abstract socket failed\n");
+        return 51;
+    }
+
+    if (listen(alfd, 5) < 0) {
+        pmsg("[afunix-test] FAIL: listen on abstract socket failed\n");
+        return 52;
+    }
+
+    /* Verify no filesystem presence: no file named "vanta-abstract-test" or in /tmp */
+    if (access("/vanta-abstract-test", F_OK) == 0 || access("/tmp/vanta-abstract-test", F_OK) == 0) {
+        pmsg("[afunix-test] FAIL: abstract socket created unexpected filesystem node\n");
+        return 53;
+    }
+
+    /* Verify namespace collision: second bind to same abstract name must fail */
+    int alfd_coll = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (bind(alfd_coll, (struct sockaddr *)&aaddr, aaddr_len) == 0) {
+        pmsg("[afunix-test] FAIL: second bind to same abstract name unexpectedly succeeded\n");
+        close(alfd_coll);
+        return 54;
+    }
+    close(alfd_coll);
+
+    /* Fork child to connect to abstract socket */
+    pid_t apid = fork();
+    if (apid < 0) {
+        pmsg("[afunix-test] FAIL: fork for abstract connect failed\n");
+        return 55;
+    }
+
+    if (apid == 0) {
+        close(alfd);
+        int cfd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (cfd < 0) _exit(1);
+        if (connect(cfd, (struct sockaddr *)&aaddr, aaddr_len) < 0) _exit(2);
+
+        const char *ping = "ABSTRACT_PING";
+        if (write(cfd, ping, strlen(ping)) != (ssize_t)strlen(ping)) _exit(3);
+
+        char cbuf[32];
+        memset(cbuf, 0, sizeof(cbuf));
+        ssize_t cn = read(cfd, cbuf, sizeof(cbuf) - 1);
+        if (cn != 13 || strcmp(cbuf, "ABSTRACT_PONG") != 0) _exit(4);
+
+        close(cfd);
+        _exit(0);
+    }
+
+    int a_conn = accept(alfd, NULL, NULL);
+    if (a_conn < 0) {
+        pmsg("[afunix-test] FAIL: accept on abstract socket failed\n");
+        return 56;
+    }
+
+    char abuf[32];
+    memset(abuf, 0, sizeof(abuf));
+    ssize_t an = read(a_conn, abuf, sizeof(abuf) - 1);
+    if (an != 13 || strcmp(abuf, "ABSTRACT_PING") != 0) {
+        pmsg("[afunix-test] FAIL: abstract ping payload mismatched\n");
+        return 57;
+    }
+
+    const char *pong = "ABSTRACT_PONG";
+    if (write(a_conn, pong, strlen(pong)) != (ssize_t)strlen(pong)) {
+        pmsg("[afunix-test] FAIL: abstract pong write failed\n");
+        return 58;
+    }
+
+    close(a_conn);
+
+    int astatus = 0;
+    waitpid(apid, &astatus, 0);
+    if (WEXITSTATUS(astatus) != 0) {
+        pmsg("[afunix-test] FAIL: abstract client exited non-zero\n");
+        return 59;
+    }
+    pmsg("[afunix-test] PASS: abstract unix socket bind and connect\n");
+
+    close(alfd);
+
+    /* Verify automatic release on close: re-binding to same abstract name succeeds now */
+    int alfd_rebind = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (bind(alfd_rebind, (struct sockaddr *)&aaddr, aaddr_len) < 0) {
+        pmsg("[afunix-test] FAIL: re-bind to abstract name after close failed\n");
+        close(alfd_rebind);
+        return 60;
+    }
+    close(alfd_rebind);
+    pmsg("[afunix-test] PASS: abstract socket auto-release on close verified\n");
+
+    /* =========================================================================
+     * Test 6: Raw-byte sequence abstract socket with embedded null (\0abc\0def)
+     * ========================================================================= */
+    pmsg("[afunix-test] testing raw-byte abstract socket with embedded null...\n");
+    struct sockaddr_un emb_addr;
+    memset(&emb_addr, 0, sizeof(emb_addr));
+    emb_addr.sun_family = AF_UNIX;
+    emb_addr.sun_path[0] = '\0';
+    char emb_name[7] = {'a', 'b', 'c', '\0', 'd', 'e', 'f'};
+    memcpy(emb_addr.sun_path + 1, emb_name, 7);
+    socklen_t emb_len = sizeof(sa_family_t) + 1 + 7;
+
+    int emb_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (bind(emb_fd, (struct sockaddr *)&emb_addr, emb_len) < 0) {
+        pmsg("[afunix-test] FAIL: bind to embedded-null abstract socket failed\n");
+        return 61;
+    }
+
+    if (listen(emb_fd, 5) < 0) {
+        pmsg("[afunix-test] FAIL: listen on embedded-null abstract socket failed\n");
+        return 62;
+    }
+
+    /* Verify that a truncated name "\0abc" (len 3) does NOT collide and can bind */
+    struct sockaddr_un trunc_addr;
+    memset(&trunc_addr, 0, sizeof(trunc_addr));
+    trunc_addr.sun_family = AF_UNIX;
+    trunc_addr.sun_path[0] = '\0';
+    memcpy(trunc_addr.sun_path + 1, "abc", 3);
+    socklen_t trunc_len = sizeof(sa_family_t) + 1 + 3;
+
+    int trunc_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (bind(trunc_fd, (struct sockaddr *)&trunc_addr, trunc_len) < 0) {
+        pmsg("[afunix-test] FAIL: bind to truncated prefix unexpectedly collided\n");
+        close(trunc_fd);
+        close(emb_fd);
+        return 63;
+    }
+    close(trunc_fd);
+
+    /* Connect to the embedded-null name and verify data transfer */
+    pid_t emb_pid = fork();
+    if (emb_pid < 0) {
+        pmsg("[afunix-test] FAIL: fork for embedded-null connect failed\n");
+        close(emb_fd);
+        return 64;
+    }
+
+    if (emb_pid == 0) {
+        close(emb_fd);
+        int cfd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (cfd < 0) _exit(1);
+        if (connect(cfd, (struct sockaddr *)&emb_addr, emb_len) < 0) _exit(2);
+        if (write(cfd, "EMB_DATA_OK", 11) != 11) _exit(3);
+        close(cfd);
+        _exit(0);
+    }
+
+    int emb_conn = accept(emb_fd, NULL, NULL);
+    if (emb_conn < 0) {
+        pmsg("[afunix-test] FAIL: accept on embedded null socket failed\n");
+        close(emb_fd);
+        return 65;
+    }
+
+    char emb_buf[16];
+    memset(emb_buf, 0, sizeof(emb_buf));
+    ssize_t en = read(emb_conn, emb_buf, sizeof(emb_buf) - 1);
+    close(emb_conn);
+    close(emb_fd);
+    int emb_status = 0;
+    waitpid(emb_pid, &emb_status, 0);
+
+    if (en != 11 || strcmp(emb_buf, "EMB_DATA_OK") != 0) {
+        pmsg("[afunix-test] FAIL: data over embedded-null socket mismatched\n");
+        return 66;
+    }
+    pmsg("[afunix-test] PASS: abstract socket raw-byte sequence with embedded null\n");
+
     pmsg("[afunix-test] ALL TESTS PASSED\n");
     return 0;
 }

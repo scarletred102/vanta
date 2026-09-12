@@ -18,11 +18,17 @@ use spin::Mutex;
 
 use crate::scheduler::FileDescriptor;
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UnixAddress {
+    Path(String),
+    Abstract(Vec<u8>),
+}
+
 static NEXT_UNIX_SOCKET_ID: AtomicU64 = AtomicU64::new(0x6000_0000);
-static UNIX_REGISTRY: Mutex<BTreeMap<String, Arc<Mutex<AfUnixSocket>>>> = Mutex::new(BTreeMap::new());
+static UNIX_REGISTRY: Mutex<BTreeMap<UnixAddress, Weak<Mutex<AfUnixSocket>>>> = Mutex::new(BTreeMap::new());
 
 pub struct UnixDatagram {
-    pub sender_path: Option<String>,
+    pub sender_addr: Option<UnixAddress>,
     pub data: Vec<u8>,
     pub(crate) fds: Vec<FileDescriptor>,
 }
@@ -36,13 +42,13 @@ pub struct StreamEndpoint {
 }
 
 pub struct DatagramEndpoint {
-    pub bound_path: Option<String>,
+    pub bound_addr: Option<UnixAddress>,
     pub peer: Option<Weak<Mutex<AfUnixSocket>>>,
     pub rx_queue: Vec<UnixDatagram>,
 }
 
 pub struct ListenerEndpoint {
-    pub bound_path: String,
+    pub bound_addr: UnixAddress,
     pub backlog: usize,
     pub accept_queue: Vec<Arc<Mutex<AfUnixSocket>>>,
 }
@@ -78,7 +84,7 @@ impl AfUnixSocket {
         Self {
             id: NEXT_UNIX_SOCKET_ID.fetch_add(1, Ordering::Relaxed),
             kind: AfUnixSocketKind::Datagram(DatagramEndpoint {
-                bound_path: None,
+                bound_addr: None,
                 peer: None,
                 rx_queue: Vec::new(),
             }),
@@ -109,13 +115,13 @@ impl AfUnixSocket {
                 s.peer.as_ref().and_then(|w| w.upgrade())
             }
             AfUnixSocketKind::Datagram(d) => {
-                if let Some(path) = &d.bound_path {
-                    UNIX_REGISTRY.lock().remove(path);
+                if let Some(addr) = &d.bound_addr {
+                    UNIX_REGISTRY.lock().remove(addr);
                 }
                 None
             }
             AfUnixSocketKind::Listener(l) => {
-                UNIX_REGISTRY.lock().remove(&l.bound_path);
+                UNIX_REGISTRY.lock().remove(&l.bound_addr);
                 None
             }
         };
@@ -212,7 +218,7 @@ pub(crate) fn send_af_unix(
         } else {
             if let AfUnixSocketKind::Datagram(pd) = &mut peer.kind {
                 pd.rx_queue.push(UnixDatagram {
-                    sender_path: None,
+                    sender_addr: None,
                     data: data.to_vec(),
                     fds: passed_fds,
                 });
@@ -258,25 +264,27 @@ pub(crate) fn recv_af_unix(
     }
 }
 
-pub fn bind_af_unix(sock: &Arc<Mutex<AfUnixSocket>>, path: &str) -> Result<(), ()> {
+pub fn bind_af_unix(sock: &Arc<Mutex<AfUnixSocket>>, addr: &UnixAddress) -> Result<(), ()> {
     let mut reg = UNIX_REGISTRY.lock();
-    if reg.contains_key(path) {
-        return Err(());
+    if let Some(existing) = reg.get(addr) {
+        if existing.upgrade().is_some() {
+            return Err(());
+        }
     }
     let mut s = sock.lock();
     match &mut s.kind {
         AfUnixSocketKind::Stream(_) => {
             s.kind = AfUnixSocketKind::Listener(ListenerEndpoint {
-                bound_path: String::from(path),
+                bound_addr: addr.clone(),
                 backlog: 128,
                 accept_queue: Vec::new(),
             });
-            reg.insert(String::from(path), Arc::clone(sock));
+            reg.insert(addr.clone(), Arc::downgrade(sock));
             Ok(())
         }
         AfUnixSocketKind::Datagram(d) => {
-            d.bound_path = Some(String::from(path));
-            reg.insert(String::from(path), Arc::clone(sock));
+            d.bound_addr = Some(addr.clone());
+            reg.insert(addr.clone(), Arc::downgrade(sock));
             Ok(())
         }
         AfUnixSocketKind::Listener(_) => Err(()),
@@ -293,10 +301,10 @@ pub fn listen_af_unix(sock: &Arc<Mutex<AfUnixSocket>>, backlog: usize) -> Result
     }
 }
 
-pub fn connect_af_unix(sock: &Arc<Mutex<AfUnixSocket>>, path: &str) -> Result<(), ()> {
+pub fn connect_af_unix(sock: &Arc<Mutex<AfUnixSocket>>, addr: &UnixAddress) -> Result<(), ()> {
     let target = {
         let reg = UNIX_REGISTRY.lock();
-        reg.get(path).cloned().ok_or(())?
+        reg.get(addr).and_then(|w| w.upgrade()).ok_or(())?
     };
     let mut target_guard = target.lock();
     match &mut target_guard.kind {

@@ -2876,14 +2876,28 @@ fn linux_bind_user(descriptor: u64, addr_ptr: u64, addr_len: u64) -> u64 {
     };
     let family = u16::from_ne_bytes([addr_bytes[0], addr_bytes[1]]);
     if family == 1 {
-        let path_bytes = &addr_bytes[2..];
-        let path_len = path_bytes.iter().position(|&b| b == 0).unwrap_or(path_bytes.len());
-        let Ok(path_str) = core::str::from_utf8(&path_bytes[..path_len]) else {
+        let addr = if addr_len > 2 && addr_bytes.len() > 2 && addr_bytes[2] == 0 {
+            let total_len = addr_len.min(addr_bytes.len() as u64) as usize;
+            let abs_name = if total_len > 3 {
+                addr_bytes[3..total_len].to_vec()
+            } else {
+                alloc::vec::Vec::new()
+            };
+            crate::af_unix::UnixAddress::Abstract(abs_name)
+        } else if addr_len > 2 && addr_bytes.len() > 2 {
+            let path_bytes = &addr_bytes[2..];
+            let path_len = path_bytes.iter().position(|&b| b == 0).unwrap_or(path_bytes.len());
+            let Ok(path_str) = core::str::from_utf8(&path_bytes[..path_len]) else {
+                return SYSCALL_ERROR;
+            };
+            crate::af_unix::UnixAddress::Path(alloc::string::String::from(path_str))
+        } else {
             return SYSCALL_ERROR;
         };
-        return crate::scheduler::bind_unix_current(descriptor, path_str)
-            .map(|()| 0)
-            .unwrap_or(SYSCALL_ERROR);
+        return match crate::scheduler::bind_unix_current(descriptor, &addr) {
+            Ok(()) => 0,
+            Err(()) => (-(98 as i64)) as u64, // -EADDRINUSE
+        };
     }
     if family != 2 || addr_len < 8 {
         return SYSCALL_ERROR;
@@ -3161,14 +3175,28 @@ fn connect_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
     };
     let family = u16::from_ne_bytes([address[0], address[1]]);
     if family == 1 {
-        let path_bytes = &address[2..];
-        let path_len = path_bytes.iter().position(|&b| b == 0).unwrap_or(path_bytes.len());
-        let Ok(path_str) = core::str::from_utf8(&path_bytes[..path_len]) else {
+        let addr = if length > 2 && address.len() > 2 && address[2] == 0 {
+            let total_len = length.min(address.len() as u64) as usize;
+            let abs_name = if total_len > 3 {
+                address[3..total_len].to_vec()
+            } else {
+                alloc::vec::Vec::new()
+            };
+            crate::af_unix::UnixAddress::Abstract(abs_name)
+        } else if length > 2 && address.len() > 2 {
+            let path_bytes = &address[2..];
+            let path_len = path_bytes.iter().position(|&b| b == 0).unwrap_or(path_bytes.len());
+            let Ok(path_str) = core::str::from_utf8(&path_bytes[..path_len]) else {
+                return SYSCALL_ERROR;
+            };
+            crate::af_unix::UnixAddress::Path(alloc::string::String::from(path_str))
+        } else {
             return SYSCALL_ERROR;
         };
-        return crate::scheduler::connect_unix_current(descriptor, path_str)
-            .map(|()| 0)
-            .unwrap_or(SYSCALL_ERROR);
+        return match crate::scheduler::connect_unix_current(descriptor, &addr) {
+            Ok(()) => 0,
+            Err(()) => (-(111 as i64)) as u64, // -ECONNREFUSED
+        };
     }
     if family != 2 || length < 8 {
         return SYSCALL_ERROR;

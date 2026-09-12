@@ -211,6 +211,9 @@ $common = @(
     "[afunix-test] PASS: datagram socketpair message boundaries",
     "[afunix-test] PASS: named VFS path bind and connect",
     "[afunix-test] PASS: SCM_RIGHTS file descriptor passing",
+    "[afunix-test] PASS: abstract unix socket bind and connect",
+    "[afunix-test] PASS: abstract socket auto-release on close verified",
+    "[afunix-test] PASS: abstract socket raw-byte sequence with embedded null",
     "[afunix-test] ALL TESTS PASSED",
     "[afunix-receiver] PASS: SCM_RIGHTS file descriptor passing across unrelated processes",
     "[afunix-sender] PASS: receiver confirmed verification of passed fd",
@@ -271,4 +274,4 @@ Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required 
 Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
 
 Write-Host "[test] GPT Gate A, Gate B, Gate C, Gate D, Gate E, and Gate F acceptance passed"
-$first -split "`n" | Where-Object { $_ -match "SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net|http-server|wget" } | ForEach-Object { Write-Host $_ }
+$first -split "`n" | Where-Object { $_ -match "afunix|SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net|http-server|wget" } | ForEach-Object { Write-Host $_ }
