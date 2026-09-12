@@ -9,11 +9,88 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdint.h>
+#include <fcntl.h>
 
 const char __interp[] __attribute__((section(".interp"))) = "/lib/ld-musl-x86_64.so.1";
 
 static void pmsg(const char *msg) {
     write(1, msg, strlen(msg));
+}
+
+static uint16_t csum_fold(uint32_t sum) {
+    while (sum >> 16)
+        sum = (sum & 0xffff) + (sum >> 16);
+    return ~((uint16_t)sum);
+}
+
+static uint16_t ip_csum(const uint8_t *buf, size_t len) {
+    uint32_t sum = 0;
+    for (size_t i = 0; i < len; i += 2) {
+        sum += ((uint32_t)buf[i] << 8) | buf[i + 1];
+    }
+    return csum_fold(sum);
+}
+
+static uint16_t tcp_csum(const uint8_t *src_ip, const uint8_t *dst_ip, const uint8_t *tcp_hdr, size_t tcp_len) {
+    uint32_t sum = 0;
+    sum += ((uint32_t)src_ip[0] << 8) | src_ip[1];
+    sum += ((uint32_t)src_ip[2] << 8) | src_ip[3];
+    sum += ((uint32_t)dst_ip[0] << 8) | dst_ip[1];
+    sum += ((uint32_t)dst_ip[2] << 8) | dst_ip[3];
+    sum += 6; // IP_PROTOCOL_TCP
+    sum += (uint32_t)tcp_len;
+    for (size_t i = 0; i < tcp_len; i += 2) {
+        if (i + 1 < tcp_len) {
+            sum += ((uint32_t)tcp_hdr[i] << 8) | tcp_hdr[i + 1];
+        } else {
+            sum += ((uint32_t)tcp_hdr[i] << 8);
+        }
+    }
+    return csum_fold(sum);
+}
+
+static void build_raw_syn_frame(uint8_t *frame, uint16_t src_port, uint16_t dst_port, uint32_t seq) {
+    memset(frame, 0, 54);
+    // Ethernet header: 14 bytes
+    frame[12] = 0x08;
+    frame[13] = 0x00; // ETHERTYPE_IPV4
+
+    // IPv4 header: 20 bytes (offset 14)
+    frame[14] = 0x45; // Version 4, IHL 5
+    frame[15] = 0x00; // TOS
+    frame[16] = 0x00;
+    frame[17] = 40;   // Total length = 40 (20 IP + 20 TCP)
+    frame[18] = 0x00;
+    frame[19] = 0x01; // ID
+    frame[20] = 0x40;
+    frame[21] = 0x00; // DF flag
+    frame[22] = 64;   // TTL
+    frame[23] = 6;    // Protocol TCP
+    frame[26] = 127; frame[27] = 0; frame[28] = 0; frame[29] = 1; // Src IP 127.0.0.1
+    frame[30] = 127; frame[31] = 0; frame[32] = 0; frame[33] = 1; // Dst IP 127.0.0.1
+    uint16_t ipc = ip_csum(&frame[14], 20);
+    frame[24] = (uint8_t)(ipc >> 8);
+    frame[25] = (uint8_t)(ipc & 0xff);
+
+    // TCP header: 20 bytes (offset 34)
+    frame[34] = (uint8_t)(src_port >> 8);
+    frame[35] = (uint8_t)(src_port & 0xff);
+    frame[36] = (uint8_t)(dst_port >> 8);
+    frame[37] = (uint8_t)(dst_port & 0xff);
+    frame[38] = (uint8_t)((seq >> 24) & 0xff);
+    frame[39] = (uint8_t)((seq >> 16) & 0xff);
+    frame[40] = (uint8_t)((seq >> 8) & 0xff);
+    frame[41] = (uint8_t)(seq & 0xff);
+    frame[46] = 0x50; // Data offset 5 (20 bytes)
+    frame[47] = 0x02; // Flags: TCP_SYN
+    frame[48] = 0xff;
+    frame[49] = 0xff; // Window size 65535
+    uint8_t src_ip[4] = {127, 0, 0, 1};
+    uint8_t dst_ip[4] = {127, 0, 0, 1};
+    uint16_t tc = tcp_csum(src_ip, dst_ip, &frame[34], 20);
+    if (tc == 0) tc = 0xffff;
+    frame[50] = (uint8_t)(tc >> 8);
+    frame[51] = (uint8_t)(tc & 0xff);
 }
 
 int main(void) {
@@ -284,6 +361,208 @@ int main(void) {
         close(a_conns[i]);
     }
     pmsg("[http-server] PASS: 3 concurrent client connections verified\n");
+
+    /* =========================================================================
+     * Test 9: Simultaneous close (CLOSING -> TIME_WAIT -> CLOSED)
+     * ========================================================================= */
+    pmsg("[http-server] testing simultaneous close...\n");
+    int s_sim_listen = socket(AF_INET, SOCK_STREAM, 0);
+    int opt_sim = 1;
+    setsockopt(s_sim_listen, SOL_SOCKET, SO_REUSEADDR, &opt_sim, sizeof(opt_sim));
+    struct sockaddr_in sim_addr;
+    memset(&sim_addr, 0, sizeof(sim_addr));
+    sim_addr.sin_family = AF_INET;
+    sim_addr.sin_port = htons(8081);
+    sim_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(s_sim_listen, (struct sockaddr *)&sim_addr, sizeof(sim_addr)) != 0 ||
+        listen(s_sim_listen, 5) != 0) {
+        pmsg("[http-server] FAIL: simultaneous close listener setup failed\n");
+        return 30;
+    }
+
+    int sim_c = socket(AF_INET, SOCK_STREAM, 0);
+    if (connect(sim_c, (struct sockaddr *)&sim_addr, sizeof(sim_addr)) != 0) {
+        pmsg("[http-server] FAIL: sim_c connect failed\n");
+        return 31;
+    }
+    int sim_a = accept4(s_sim_listen, NULL, NULL, 0);
+    if (sim_a < 0) {
+        pmsg("[http-server] FAIL: sim_a accept4 failed\n");
+        return 32;
+    }
+    close(s_sim_listen);
+
+    // Both endpoints initiate close simultaneously
+    close(sim_c);
+    close(sim_a);
+
+    // Allow loopback exchange of FINs and ACKs: both transition FinWait1 -> Closing -> TimeWait
+    usleep(100000); // 100ms
+
+    // Check /proc/net/tcp for port 8081 in TIME_WAIT
+    int pfd = open("/proc/net/tcp", O_RDONLY);
+    if (pfd >= 0) {
+        char pbuf[2048];
+        memset(pbuf, 0, sizeof(pbuf));
+        read(pfd, pbuf, sizeof(pbuf) - 1);
+        close(pfd);
+        if (strstr(pbuf, "1F91") == NULL) { // 8081 in hex
+            pmsg("[http-server] FAIL: port 8081 socket not found in /proc/net/tcp\n");
+            return 33;
+        }
+    }
+
+    // Wait for 2*MSL (2000ms) timer expiration
+    usleep(2100000); // 2.1s
+
+    // Verify /proc/net/tcp has purged the sockets (transition to CLOSED)
+    pfd = open("/proc/net/tcp", O_RDONLY);
+    if (pfd >= 0) {
+        char pbuf[2048];
+        memset(pbuf, 0, sizeof(pbuf));
+        read(pfd, pbuf, sizeof(pbuf) - 1);
+        close(pfd);
+        if (strstr(pbuf, ":1F91") != NULL) {
+            pmsg("[http-server] FAIL: port 8081 socket still present after 2*MSL\n");
+            return 34;
+        }
+    }
+    pmsg("[http-server] PASS: simultaneous close (CLOSING -> TIME_WAIT -> CLOSED)\n");
+
+    /* =========================================================================
+     * Test 10: SYN queue timeout (purged after 3000ms verified via /proc/net/tcp)
+     * ========================================================================= */
+    pmsg("[http-server] testing SYN queue timeout...\n");
+    int s_to_listen = socket(AF_INET, SOCK_STREAM, 0);
+    int opt_to = 1;
+    setsockopt(s_to_listen, SOL_SOCKET, SO_REUSEADDR, &opt_to, sizeof(opt_to));
+    struct sockaddr_in to_addr;
+    memset(&to_addr, 0, sizeof(to_addr));
+    to_addr.sin_family = AF_INET;
+    to_addr.sin_port = htons(8082);
+    to_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(s_to_listen, (struct sockaddr *)&to_addr, sizeof(to_addr)) != 0 ||
+        listen(s_to_listen, 5) != 0) {
+        pmsg("[http-server] FAIL: SYN timeout listener setup failed\n");
+        return 35;
+    }
+
+    int raw_fd = socket(AF_INET, SOCK_RAW, 0);
+    if (raw_fd < 0) {
+        pmsg("[http-server] FAIL: SOCK_RAW creation failed\n");
+        return 36;
+    }
+
+    uint8_t syn_pkt[54];
+    build_raw_syn_frame(syn_pkt, 18082, 8082, 1000);
+    if (sendto(raw_fd, syn_pkt, sizeof(syn_pkt), 0, (struct sockaddr *)&to_addr, sizeof(to_addr)) != sizeof(syn_pkt)) {
+        pmsg("[http-server] FAIL: raw SYN sendto failed\n");
+        return 37;
+    }
+
+    // Verify /proc/net/tcp shows pending_syns=1 for port 8082 (1F92)
+    pfd = open("/proc/net/tcp", O_RDONLY);
+    if (pfd < 0) {
+        pmsg("[http-server] FAIL: open /proc/net/tcp failed\n");
+        return 38;
+    }
+    char tcp_buf[2048];
+    memset(tcp_buf, 0, sizeof(tcp_buf));
+    read(pfd, tcp_buf, sizeof(tcp_buf) - 1);
+    close(pfd);
+    char *line = strstr(tcp_buf, ":1F92");
+    if (!line || strstr(line, "pending_syns=1") == NULL) {
+        pmsg("[http-server] FAIL: expected pending_syns=1 in /proc/net/tcp\n");
+        return 39;
+    }
+
+    // Sleep 3.2s (> 3000ms timeout)
+    usleep(3200000);
+
+    // Verify /proc/net/tcp shows pending_syns=0 for port 8082 (1F92)
+    pfd = open("/proc/net/tcp", O_RDONLY);
+    if (pfd < 0) {
+        pmsg("[http-server] FAIL: open /proc/net/tcp second time failed\n");
+        return 40;
+    }
+    memset(tcp_buf, 0, sizeof(tcp_buf));
+    read(pfd, tcp_buf, sizeof(tcp_buf) - 1);
+    close(pfd);
+    line = strstr(tcp_buf, ":1F92");
+    if (!line || strstr(line, "pending_syns=0") == NULL) {
+        pmsg("[http-server] FAIL: expected pending_syns=0 after 3000ms timeout in /proc/net/tcp\n");
+        return 41;
+    }
+    close(s_to_listen);
+    pmsg("[http-server] PASS: SYN queue timeout (purged after 3000ms verified via /proc/net/tcp)\n");
+
+    /* =========================================================================
+     * Test 11: SYN cookies under saturated backlog
+     * ========================================================================= */
+    pmsg("[http-server] testing SYN cookies under saturated backlog...\n");
+    int s_cook_listen = socket(AF_INET, SOCK_STREAM, 0);
+    int opt_c = 1;
+    setsockopt(s_cook_listen, SOL_SOCKET, SO_REUSEADDR, &opt_c, sizeof(opt_c));
+    struct sockaddr_in cook_addr;
+    memset(&cook_addr, 0, sizeof(cook_addr));
+    cook_addr.sin_family = AF_INET;
+    cook_addr.sin_port = htons(8083);
+    cook_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    // Backlog = 2
+    if (bind(s_cook_listen, (struct sockaddr *)&cook_addr, sizeof(cook_addr)) != 0 ||
+        listen(s_cook_listen, 2) != 0) {
+        pmsg("[http-server] FAIL: SYN cookie listener setup failed\n");
+        return 42;
+    }
+
+    // Saturate backlog with 2 raw SYNs from different ports
+    build_raw_syn_frame(syn_pkt, 28081, 8083, 2001);
+    sendto(raw_fd, syn_pkt, sizeof(syn_pkt), 0, (struct sockaddr *)&cook_addr, sizeof(cook_addr));
+    build_raw_syn_frame(syn_pkt, 28082, 8083, 2002);
+    sendto(raw_fd, syn_pkt, sizeof(syn_pkt), 0, (struct sockaddr *)&cook_addr, sizeof(cook_addr));
+
+    // Verify /proc/net/tcp shows pending_syns=2 (saturated) for port 8083 (1F93)
+    pfd = open("/proc/net/tcp", O_RDONLY);
+    if (pfd >= 0) {
+        memset(tcp_buf, 0, sizeof(tcp_buf));
+        read(pfd, tcp_buf, sizeof(tcp_buf) - 1);
+        close(pfd);
+        line = strstr(tcp_buf, ":1F93");
+        if (!line || strstr(line, "pending_syns=2") == NULL) {
+            pmsg("[http-server] FAIL: expected pending_syns=2 (backlog saturated)\n");
+            return 43;
+        }
+    }
+
+    // Connect legitimate client while backlog is saturated (must succeed via SYN cookie)
+    int c_cook = socket(AF_INET, SOCK_STREAM, 0);
+    if (connect(c_cook, (struct sockaddr *)&cook_addr, sizeof(cook_addr)) != 0) {
+        pmsg("[http-server] FAIL: connect under saturated backlog failed\n");
+        return 44;
+    }
+
+    int a_cook = accept4(s_cook_listen, NULL, NULL, 0);
+    if (a_cook < 0) {
+        pmsg("[http-server] FAIL: accept4 under saturated backlog failed\n");
+        return 45;
+    }
+
+    // Verify bidirectional data exchange on connection established via SYN cookie
+    const char cmsg[] = "COOKIE_OK\n";
+    write(c_cook, cmsg, strlen(cmsg));
+    char abuf[32];
+    memset(abuf, 0, sizeof(abuf));
+    read(a_cook, abuf, sizeof(abuf) - 1);
+    if (strstr(abuf, "COOKIE_OK") == NULL) {
+        pmsg("[http-server] FAIL: data exchange on SYN cookie socket failed\n");
+        return 46;
+    }
+
+    close(c_cook);
+    close(a_cook);
+    close(s_cook_listen);
+    close(raw_fd);
+    pmsg("[http-server] PASS: SYN cookie protection under saturated backlog verified\n");
 
     close(s_new);
     pmsg("[http-server] ALL TESTS PASSED\n");

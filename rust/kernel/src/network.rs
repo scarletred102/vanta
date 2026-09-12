@@ -40,6 +40,7 @@ pub(crate) struct NetworkState {
     pub(crate) dns_replied: bool,
     pub(crate) tcp_connected: bool,
     pub(crate) sockets: BTreeMap<u32, Socket>,
+    pub(crate) loopback_queue: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -220,6 +221,7 @@ pub fn initialize() -> Result<NetworkInfo, NetworkError> {
         dns_replied,
         tcp_connected: false,
         sockets: BTreeMap::new(),
+        loopback_queue: Vec::new(),
     });
 
     if dns_replied {
@@ -466,6 +468,7 @@ fn check_tcp_timers(state: &mut NetworkState) {
             if tcp.state == TcpState::TimeWait {
                 if let Some(entered) = tcp.time_wait_entered {
                     if current_ticks.saturating_sub(entered) >= 2 * TCP_MSL_TICKS {
+                        crate::serial_println!("[tcp] handle={} state transition: TimeWait -> Closed (2*MSL expired)", handle);
                         to_remove.push(handle);
                     }
                 }
@@ -477,7 +480,11 @@ fn check_tcp_timers(state: &mut NetworkState) {
                 }
             } else if tcp.state == TcpState::Listen {
                 // Purge stale half-open pending_syns older than 3000ms
+                let prev_count = tcp.pending_syns.len();
                 tcp.pending_syns.retain(|syn| current_ticks.saturating_sub(syn.created_tick) < 3000);
+                if tcp.pending_syns.len() < prev_count {
+                    crate::serial_println!("[tcp] handle={} purged stale pending SYN(s) after 3000ms timeout", handle);
+                }
             }
         }
     }
@@ -490,6 +497,14 @@ fn poll_network_locked(state: &mut NetworkState) -> Result<(), NetworkError> {
     while let Some(frame) = state.device.receive()? {
         crate::virtio_net::record_rx_packet();
         process_incoming_frame(state, &frame)?;
+    }
+    let mut iterations = 0;
+    while !state.loopback_queue.is_empty() && iterations < 100 {
+        iterations += 1;
+        let frames = core::mem::take(&mut state.loopback_queue);
+        for frame in frames {
+            let _ = process_incoming_frame(state, &frame);
+        }
     }
     crate::virtio_net::clear_bottom_half_pending();
     check_tcp_timers(state);
@@ -709,14 +724,22 @@ fn handle_incoming_tcp(
                 }
             }
             TcpState::FinWait1 => {
-                if tcp.flags & net::TCP_ACK != 0 && tcp.flags & net::TCP_FIN != 0 {
-                    s.ack_num = s.ack_num.wrapping_add(1);
-                    s.state = TcpState::TimeWait;
-                    s.time_wait_entered = Some(crate::timer::current_tick());
+                let fin_acked = (tcp.flags & net::TCP_ACK != 0) && tcp.acknowledgement == s.seq_num;
+                if tcp.flags & net::TCP_FIN != 0 {
+                    s.ack_num = tcp.sequence.wrapping_add(1);
+                    if fin_acked {
+                        s.state = TcpState::TimeWait;
+                        s.time_wait_entered = Some(crate::timer::current_tick());
+                        crate::serial_println!("[tcp] handle={} state transition: FinWait1 -> TimeWait", handle);
+                    } else {
+                        s.state = TcpState::Closing;
+                        s.time_wait_entered = Some(crate::timer::current_tick());
+                        crate::serial_println!("[tcp] handle={} state transition: FinWait1 -> Closing (simultaneous close)", handle);
+                    }
                     let ack = net::build_tcp_frame(
                         our_mac,
                         src_mac,
-                        our_ip,
+                        dest_ip,
                         src_ip,
                         s.local_port,
                         s.remote_port,
@@ -731,40 +754,21 @@ fn handle_incoming_tcp(
                     } else {
                         let _ = state.device.transmit(&ack);
                     }
-                } else if tcp.flags & net::TCP_ACK != 0 {
+                } else if fin_acked {
                     s.state = TcpState::FinWait2;
-                } else if tcp.flags & net::TCP_FIN != 0 {
-                    s.ack_num = s.ack_num.wrapping_add(1);
-                    s.state = TcpState::Closing;
-                    let ack = net::build_tcp_frame(
-                        our_mac,
-                        src_mac,
-                        our_ip,
-                        src_ip,
-                        s.local_port,
-                        s.remote_port,
-                        s.seq_num,
-                        s.ack_num,
-                        net::TCP_ACK,
-                        DEFAULT_WINDOW_SIZE,
-                        b"",
-                    );
-                    if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
-                        to_reflect.push(ack);
-                    } else {
-                        let _ = state.device.transmit(&ack);
-                    }
+                    crate::serial_println!("[tcp] handle={} state transition: FinWait1 -> FinWait2", handle);
                 }
             }
             TcpState::FinWait2 => {
                 if tcp.flags & net::TCP_FIN != 0 {
-                    s.ack_num = s.ack_num.wrapping_add(1);
+                    s.ack_num = tcp.sequence.wrapping_add(1);
                     s.state = TcpState::TimeWait;
                     s.time_wait_entered = Some(crate::timer::current_tick());
+                    crate::serial_println!("[tcp] handle={} state transition: FinWait2 -> TimeWait", handle);
                     let ack = net::build_tcp_frame(
                         our_mac,
                         src_mac,
-                        our_ip,
+                        dest_ip,
                         src_ip,
                         s.local_port,
                         s.remote_port,
@@ -782,9 +786,10 @@ fn handle_incoming_tcp(
                 }
             }
             TcpState::Closing => {
-                if tcp.flags & net::TCP_ACK != 0 {
+                if tcp.flags & net::TCP_ACK != 0 && tcp.acknowledgement == s.seq_num {
                     s.state = TcpState::TimeWait;
                     s.time_wait_entered = Some(crate::timer::current_tick());
+                    crate::serial_println!("[tcp] handle={} state transition: Closing -> TimeWait", handle);
                 }
             }
             TcpState::LastAck => {
@@ -798,9 +803,7 @@ fn handle_incoming_tcp(
         if let Some(h) = wake_handle {
             crate::scheduler::wake_pipe_waiters(0x5000_0000 | (h as u64));
         }
-        for pkt in to_reflect {
-            let _ = process_incoming_frame(state, &pkt);
-        }
+        state.loopback_queue.extend(to_reflect);
         return Ok(());
     }
 
@@ -950,10 +953,7 @@ fn handle_incoming_tcp(
         }
     }
 
-    for pkt in to_reflect {
-        let _ = process_incoming_frame(state, &pkt);
-    }
-
+    state.loopback_queue.extend(to_reflect);
     Ok(())
 }
 
@@ -1014,6 +1014,7 @@ pub fn socket_create(domain: u32, socket_type: u32, _protocol: u32) -> Result<u3
 pub fn socket_bind(handle: u32, ip: Ipv4Address, port: u16) -> Result<(), NetworkError> {
     let mut state = NETWORK.lock();
     let state = state.as_mut().ok_or(NetworkError::Unavailable)?;
+    let _ = poll_network_locked(state);
 
     let bind_port = if port == 0 {
         NEXT_TCP_PORT.fetch_add(1, Ordering::Relaxed)
@@ -1239,6 +1240,7 @@ pub fn socket_send(handle: u32, bytes: &[u8]) -> Result<usize, NetworkError> {
 
     let mut state = NETWORK.lock();
     let state = state.as_mut().ok_or(NetworkError::Unavailable)?;
+    poll_network_locked(state)?;
 
     enum SendAction {
         Tcp {
@@ -1359,7 +1361,17 @@ pub fn socket_send(handle: u32, bytes: &[u8]) -> Result<usize, NetworkError> {
             state.device.transmit(&frame)?;
             Ok(bytes.len())
         }
-        SendAction::Raw => Ok(bytes.len()),
+        SendAction::Raw => {
+            let is_loopback = bytes.len() >= 34
+                && (bytes[30..34] == [127, 0, 0, 1] || bytes[30..34] == state.configuration.address);
+            if is_loopback {
+                let _ = process_incoming_frame(state, bytes);
+                let _ = poll_network_locked(state);
+            } else {
+                state.device.transmit(bytes)?;
+            }
+            Ok(bytes.len())
+        }
     }
 }
 
@@ -1371,6 +1383,7 @@ pub fn socket_sendto(
 ) -> Result<usize, NetworkError> {
     let mut state = NETWORK.lock();
     let state = state.as_mut().ok_or(NetworkError::Unavailable)?;
+    poll_network_locked(state)?;
 
     enum SendToAction {
         Udp { local_port: u16 },
@@ -1497,7 +1510,12 @@ pub fn socket_sendto(
             Ok(bytes.len())
         }
         SendToAction::Raw => {
-            state.device.transmit(bytes)?;
+            if dest_ip == [127, 0, 0, 1] || dest_ip == state.configuration.address {
+                let _ = process_incoming_frame(state, bytes);
+                let _ = poll_network_locked(state);
+            } else {
+                state.device.transmit(bytes)?;
+            }
             Ok(bytes.len())
         }
     }
@@ -1677,7 +1695,6 @@ pub fn socket_close(handle: u32) -> Result<(), NetworkError> {
     let state = state.as_mut().ok_or(NetworkError::Unavailable)?;
 
     let mut remove_now = true;
-    let mut fin_to_reflect = None;
     if let Some(socket) = state.sockets.get_mut(&handle) {
         if let Socket::Tcp(tcp) = socket {
             let current_ticks = crate::timer::current_tick();
@@ -1701,7 +1718,7 @@ pub fn socket_close(handle: u32) -> Result<(), NetworkError> {
                         b"",
                     );
                     if is_loopback {
-                        fin_to_reflect = Some(fin);
+                        state.loopback_queue.push(fin);
                     } else {
                         let _ = state.device.transmit(&fin);
                     }
@@ -1730,7 +1747,7 @@ pub fn socket_close(handle: u32) -> Result<(), NetworkError> {
                         b"",
                     );
                     if is_loopback {
-                        fin_to_reflect = Some(fin);
+                        state.loopback_queue.push(fin);
                     } else {
                         let _ = state.device.transmit(&fin);
                     }
@@ -1739,14 +1756,10 @@ pub fn socket_close(handle: u32) -> Result<(), NetworkError> {
                     tcp.time_wait_entered = Some(current_ticks);
                     remove_now = false;
                 }
-            } else if tcp.state == TcpState::TimeWait || tcp.state == TcpState::FinWait1 || tcp.state == TcpState::FinWait2 {
+            } else if tcp.state == TcpState::TimeWait || tcp.state == TcpState::FinWait1 || tcp.state == TcpState::FinWait2 || tcp.state == TcpState::Closing {
                 remove_now = false;
             }
         }
-    }
-
-    if let Some(fin) = fin_to_reflect {
-        let _ = process_incoming_frame(state, &fin);
     }
 
     if remove_now {
@@ -1825,3 +1838,43 @@ pub fn tcp_receive(connection: &mut TcpConnection, limit: usize) -> Result<Vec<u
 pub fn tcp_close(connection: TcpConnection) -> Result<(), NetworkError> {
     socket_close(connection.socket_handle)
 }
+
+pub fn generate_proc_net_tcp() -> alloc::string::String {
+    use alloc::format;
+    let mut s = alloc::string::String::from("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode pending_syns\n");
+    let mut state = NETWORK.lock();
+    let Some(state) = state.as_mut() else {
+        return s;
+    };
+    let _ = poll_network_locked(state);
+
+    let mut sl = 0;
+    for (&_handle, sock) in state.sockets.iter() {
+        if let Socket::Tcp(tcp) = sock {
+            let st_hex = match tcp.state {
+                TcpState::Established => 0x01,
+                TcpState::SynSent => 0x02,
+                TcpState::SynReceived => 0x03,
+                TcpState::FinWait1 => 0x04,
+                TcpState::FinWait2 => 0x05,
+                TcpState::TimeWait => 0x06,
+                TcpState::Closed => 0x07,
+                TcpState::CloseWait => 0x08,
+                TcpState::LastAck => 0x09,
+                TcpState::Listen => 0x0A,
+                TcpState::Closing => 0x0B,
+                TcpState::Reset => 0x07,
+            };
+            let rem_ip = u32::from_ne_bytes(tcp.remote_ip);
+            let local_ip = u32::from_ne_bytes(tcp.local_ip);
+            let pending = tcp.pending_syns.len();
+            s.push_str(&format!(
+                "{:4}: {:08X}:{:04X} {:08X}:{:04X} {:02X} 00000000:00000000 00:00000000 00000000     0        0 0 1 pending_syns={}\n",
+                sl, local_ip, tcp.local_port, rem_ip, tcp.remote_port, st_hex, pending
+            ));
+            sl += 1;
+        }
+    }
+    s
+}
+

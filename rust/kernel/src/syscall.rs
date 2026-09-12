@@ -878,6 +878,8 @@ fn generate_procfs_content(path: &str) -> Option<alloc::vec::Vec<u8>> {
         let (queries, hits, entries) = crate::dns::get_dns_stats();
         let s = format!("queries: {}\nhits: {}\nentries: {}\n", queries, hits, entries);
         Some(s.into_bytes())
+    } else if path == "/proc/net/tcp" {
+        Some(crate::network::generate_proc_net_tcp().into_bytes())
     } else if path == "/proc/net/dhcp" {
         if let Some(lease) = crate::dhcp::get_dhcp_lease() {
             let s = format!(
@@ -2844,7 +2846,7 @@ fn pipe_user(pointer: u64, flags: u64) -> u64 {
 
 fn socket_user(domain: u64, socket_type: u64, protocol: u64) -> u64 {
     let raw_type = socket_type & 0xf;
-    if (domain != 1 && domain != 2) || (raw_type != 1 && raw_type != 2) {
+    if (domain != 1 && domain != 2) || (raw_type != 1 && raw_type != 2 && raw_type != 3) {
         return SYSCALL_ERROR;
     }
     crate::scheduler::open_socket_current(domain, raw_type, protocol).unwrap_or(SYSCALL_ERROR)
