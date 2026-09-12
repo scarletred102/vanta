@@ -883,13 +883,14 @@ fn generate_procfs_content(path: &str) -> Option<alloc::vec::Vec<u8>> {
     } else if path == "/proc/net/dhcp" {
         if let Some(lease) = crate::dhcp::get_dhcp_lease() {
             let s = format!(
-                "state: BOUND\nip: {}.{}.{}.{}\nnetmask: {}.{}.{}.{}\ngateway: {}.{}.{}.{}\ndns: {}.{}.{}.{}\nserver_id: {}.{}.{}.{}\nlease_time: {}\n",
+                "state: BOUND\nip: {}.{}.{}.{}\nnetmask: {}.{}.{}.{}\ngateway: {}.{}.{}.{}\ndns: {}.{}.{}.{}\nserver_id: {}.{}.{}.{}\nlease_time: {}\nnak_retries: {}\n",
                 lease.ip[0], lease.ip[1], lease.ip[2], lease.ip[3],
                 lease.netmask[0], lease.netmask[1], lease.netmask[2], lease.netmask[3],
                 lease.gateway[0], lease.gateway[1], lease.gateway[2], lease.gateway[3],
                 lease.dns[0], lease.dns[1], lease.dns[2], lease.dns[3],
                 lease.server_id[0], lease.server_id[1], lease.server_id[2], lease.server_id[3],
                 lease.lease_time,
+                crate::dhcp::get_nak_retry_count(),
             );
             Some(s.into_bytes())
         } else {

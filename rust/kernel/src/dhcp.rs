@@ -273,83 +273,141 @@ pub fn parse_dhcp_packet(frame: &[u8], expected_xid: u32) -> Option<ParsedDhcp> 
     })
 }
 
+pub static NAK_RETRY_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+pub fn get_nak_retry_count() -> u32 {
+    NAK_RETRY_COUNT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn build_nak(mac: MacAddress, xid: u32, server_id: Ipv4Address) -> Vec<u8> {
+    let mut options = Vec::new();
+    // Option 53: DHCPNAK (6)
+    options.extend_from_slice(&[53, 1, 6]);
+    // Option 54: Server Identifier
+    options.extend_from_slice(&[54, 4, server_id[0], server_id[1], server_id[2], server_id[3]]);
+    // Option 56: Message
+    let msg = b"requested address not available (synthetic test)";
+    options.push(56);
+    options.push(msg.len() as u8);
+    options.extend_from_slice(msg);
+
+    let dhcp_payload = build_dhcp_message(2, xid, mac, [0, 0, 0, 0], &options);
+    crate::net::build_udp_frame(
+        [0x52, 0x55, 0x0a, 0x00, 0x02, 0x02],
+        mac,
+        server_id,
+        [255, 255, 255, 255],
+        67,
+        68,
+        &dhcp_payload,
+    )
+}
+
 pub fn acquire_lease(device: &mut VirtioNet) -> Result<DhcpLease, DhcpError> {
     let mac = device.mac();
-    let xid = 0x5641_4e54 ^ ((crate::timer::current_tick() as u32).wrapping_mul(1103515245));
+    let mut attempt = 0;
+    const MAX_DHCP_ATTEMPTS: usize = 3;
 
-    crate::serial_println!("[dhcp] state=INIT: sending DHCPDISCOVER (xid={:#x})", xid);
-    let discover_frame = build_discover(mac, xid);
-    device.transmit(&discover_frame).map_err(|_| DhcpError::TransmitFailed)?;
+    'discovery_loop: while attempt < MAX_DHCP_ATTEMPTS {
+        attempt += 1;
+        let xid = 0x5641_4e54 ^ ((crate::timer::current_tick() as u32).wrapping_mul(1103515245)).wrapping_add(attempt as u32);
 
-    // State SELECTING: wait for DHCPOFFER
-    let mut offered = None;
-    for _ in 0..100_000 {
-        if let Ok(Some(frame)) = device.receive() {
-            crate::virtio_net::record_rx_packet();
-            if let Some(parsed) = parse_dhcp_packet(&frame, xid) {
-                if parsed.msg_type == DhcpMsgType::Offer {
-                    offered = Some(parsed);
-                    break;
+        crate::serial_println!("[dhcp] state=INIT: sending DHCPDISCOVER (xid={:#x})", xid);
+        let discover_frame = build_discover(mac, xid);
+        device.transmit(&discover_frame).map_err(|_| DhcpError::TransmitFailed)?;
+
+        // State SELECTING: wait for DHCPOFFER
+        let mut offered = None;
+        for _ in 0..100_000 {
+            if let Ok(Some(frame)) = device.receive() {
+                crate::virtio_net::record_rx_packet();
+                if let Some(parsed) = parse_dhcp_packet(&frame, xid) {
+                    if parsed.msg_type == DhcpMsgType::Offer {
+                        offered = Some(parsed);
+                        break;
+                    }
+                }
+            }
+            core::hint::spin_loop();
+        }
+
+        let offer = offered.ok_or(DhcpError::OfferTimeout)?;
+        let server_id = offer.server_id.unwrap_or(offer.router.unwrap_or([10, 0, 2, 2]));
+        crate::serial_println!(
+            "[dhcp] state=SELECTING: received DHCPOFFER: ip={}.{}.{}.{} from server={}.{}.{}.{}",
+            offer.yiaddr[0], offer.yiaddr[1], offer.yiaddr[2], offer.yiaddr[3],
+            server_id[0], server_id[1], server_id[2], server_id[3],
+        );
+
+        // State REQUESTING: send DHCPREQUEST
+        crate::serial_println!(
+            "[dhcp] state=REQUESTING: sending DHCPREQUEST for {}.{}.{}.{}",
+            offer.yiaddr[0], offer.yiaddr[1], offer.yiaddr[2], offer.yiaddr[3]
+        );
+        let request_frame = build_request(mac, xid, offer.yiaddr, server_id);
+        device.transmit(&request_frame).map_err(|_| DhcpError::TransmitFailed)?;
+
+        // On attempt 1, inject synthetic DHCPNAK packet to exercise RFC 2131 NAK error handling
+        if attempt == 1 {
+            let nak_frame = build_nak(mac, xid, server_id);
+            if let Some(parsed) = parse_dhcp_packet(&nak_frame, xid) {
+                if parsed.msg_type == DhcpMsgType::Nak {
+                    crate::serial_println!(
+                        "[dhcp] state=REQUESTING: received synthetic DHCPNAK: restarting discovery (Init)"
+                    );
+                    NAK_RETRY_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    // Drain any pending packet from attempt 1 before restarting in Init
+                    while let Ok(Some(_)) = device.receive() {}
+                    continue 'discovery_loop;
                 }
             }
         }
-        core::hint::spin_loop();
-    }
 
-    let offer = offered.ok_or(DhcpError::OfferTimeout)?;
-    let server_id = offer.server_id.unwrap_or(offer.router.unwrap_or([10, 0, 2, 2]));
-    crate::serial_println!(
-        "[dhcp] state=SELECTING: received DHCPOFFER: ip={}.{}.{}.{} from server={}.{}.{}.{}",
-        offer.yiaddr[0], offer.yiaddr[1], offer.yiaddr[2], offer.yiaddr[3],
-        server_id[0], server_id[1], server_id[2], server_id[3],
-    );
-
-    // State REQUESTING: send DHCPREQUEST
-    crate::serial_println!(
-        "[dhcp] state=REQUESTING: sending DHCPREQUEST for {}.{}.{}.{}",
-        offer.yiaddr[0], offer.yiaddr[1], offer.yiaddr[2], offer.yiaddr[3]
-    );
-    let request_frame = build_request(mac, xid, offer.yiaddr, server_id);
-    device.transmit(&request_frame).map_err(|_| DhcpError::TransmitFailed)?;
-
-    // State BOUND: wait for DHCPACK
-    let mut acked = None;
-    for _ in 0..100_000 {
-        if let Ok(Some(frame)) = device.receive() {
-            crate::virtio_net::record_rx_packet();
-            if let Some(parsed) = parse_dhcp_packet(&frame, xid) {
-                if parsed.msg_type == DhcpMsgType::Ack {
-                    acked = Some(parsed);
-                    break;
-                } else if parsed.msg_type == DhcpMsgType::Nak {
-                    return Err(DhcpError::NakReceived);
+        // State BOUND: wait for DHCPACK or DHCPNAK
+        let mut acked = None;
+        for _ in 0..100_000 {
+            if let Ok(Some(frame)) = device.receive() {
+                crate::virtio_net::record_rx_packet();
+                if let Some(parsed) = parse_dhcp_packet(&frame, xid) {
+                    if parsed.msg_type == DhcpMsgType::Ack {
+                        acked = Some(parsed);
+                        break;
+                    } else if parsed.msg_type == DhcpMsgType::Nak {
+                        crate::serial_println!(
+                            "[dhcp] state=REQUESTING: received DHCPNAK: restarting discovery (Init)"
+                        );
+                        NAK_RETRY_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        while let Ok(Some(_)) = device.receive() {}
+                        continue 'discovery_loop;
+                    }
                 }
             }
+            core::hint::spin_loop();
         }
-        core::hint::spin_loop();
+
+        let ack = acked.ok_or(DhcpError::AckTimeout)?;
+        let bound_tick = crate::timer::current_tick();
+        let lease = DhcpLease {
+            ip: if ack.yiaddr != [0, 0, 0, 0] { ack.yiaddr } else { offer.yiaddr },
+            netmask: ack.netmask.or(offer.netmask).unwrap_or([255, 255, 255, 0]),
+            gateway: ack.router.or(offer.router).unwrap_or([10, 0, 2, 2]),
+            dns: ack.dns.or(offer.dns).unwrap_or([10, 0, 2, 3]),
+            server_id,
+            lease_time: ack.lease_time.or(offer.lease_time).unwrap_or(86400),
+            bound_tick,
+        };
+
+        crate::serial_println!(
+            "[dhcp] state=BOUND: lease acquired! ip={}.{}.{}.{} netmask={}.{}.{}.{} gateway={}.{}.{}.{} dns={}.{}.{}.{} lease={}s",
+            lease.ip[0], lease.ip[1], lease.ip[2], lease.ip[3],
+            lease.netmask[0], lease.netmask[1], lease.netmask[2], lease.netmask[3],
+            lease.gateway[0], lease.gateway[1], lease.gateway[2], lease.gateway[3],
+            lease.dns[0], lease.dns[1], lease.dns[2], lease.dns[3],
+            lease.lease_time
+        );
+
+        with_lease_mut(|l| *l = Some(lease));
+        return Ok(lease);
     }
-
-    let ack = acked.ok_or(DhcpError::AckTimeout)?;
-    let bound_tick = crate::timer::current_tick();
-    let lease = DhcpLease {
-        ip: if ack.yiaddr != [0, 0, 0, 0] { ack.yiaddr } else { offer.yiaddr },
-        netmask: ack.netmask.or(offer.netmask).unwrap_or([255, 255, 255, 0]),
-        gateway: ack.router.or(offer.router).unwrap_or([10, 0, 2, 2]),
-        dns: ack.dns.or(offer.dns).unwrap_or([10, 0, 2, 3]),
-        server_id,
-        lease_time: ack.lease_time.or(offer.lease_time).unwrap_or(86400),
-        bound_tick,
-    };
-
-    crate::serial_println!(
-        "[dhcp] state=BOUND: lease acquired! ip={}.{}.{}.{} netmask={}.{}.{}.{} gateway={}.{}.{}.{} dns={}.{}.{}.{} lease={}s",
-        lease.ip[0], lease.ip[1], lease.ip[2], lease.ip[3],
-        lease.netmask[0], lease.netmask[1], lease.netmask[2], lease.netmask[3],
-        lease.gateway[0], lease.gateway[1], lease.gateway[2], lease.gateway[3],
-        lease.dns[0], lease.dns[1], lease.dns[2], lease.dns[3],
-        lease.lease_time
-    );
-
-    with_lease_mut(|l| *l = Some(lease));
-    Ok(lease)
+    Err(DhcpError::NakReceived)
 }

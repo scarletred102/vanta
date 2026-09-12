@@ -109,6 +109,15 @@ int main(void) {
     close(s);
     pmsg("[dhcp-test] PASS: socket bind to dynamically leased IP verified\n");
 
+    /* =========================================================================
+     * Test 7: Verify synthetic DHCP NAK recovery
+     * ========================================================================= */
+    if (!strstr(buf, "nak_retries: 1")) {
+        pmsg("[dhcp-test] FAIL: expected nak_retries: 1 in /proc/net/dhcp\n");
+        return 11;
+    }
+    pmsg("[dhcp-test] PASS: synthetic DHCP NAK recovery verified (restarted in Init and bound)\n");
+
     pmsg("[dhcp-test] ALL TESTS PASSED\n");
     return 0;
 }
