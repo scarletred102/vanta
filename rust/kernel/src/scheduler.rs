@@ -2481,13 +2481,13 @@ pub fn open_socket_current(domain: u64, socket_type: u64, protocol: u64) -> Resu
     )
 }
 
-pub fn bind_current(descriptor: u64, ip: crate::net::Ipv4Address, port: u16) -> Result<(), ()> {
-    let descriptor = current_descriptor(descriptor)?;
+pub fn bind_current(descriptor: u64, ip: crate::net::Ipv4Address, port: u16) -> Result<(), crate::network::NetworkError> {
+    let descriptor = current_descriptor(descriptor).map_err(|_| crate::network::NetworkError::SocketNotFound)?;
     let DescriptorResource::Socket(socket) = descriptor.resource else {
-        return Err(());
+        return Err(crate::network::NetworkError::InvalidSocketType);
     };
     let handle = socket.lock().handle;
-    crate::network::socket_bind(handle, ip, port).map_err(|_| ())
+    crate::network::socket_bind(handle, ip, port)
 }
 
 pub fn sendto_current(

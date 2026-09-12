@@ -27,7 +27,7 @@ const DMA_MIN_PHYSICAL: u64 = 0x10_0000;
 const VIRTIO_NET_HEADER_SIZE: usize = 10;
 const FRAME_BUFFER_SIZE: usize = PAGE_SIZE as usize;
 const RX_BUFFER_COUNT: usize = 128;
-const POLL_ATTEMPTS: usize = 20_000;
+const POLL_ATTEMPTS: usize = 2_000_000;
 const FEATURE_MAC: u32 = 1 << 5;
 const NAPI_BURST_THRESHOLD: u64 = 1000;
 

@@ -1,4 +1,4 @@
-﻿#define _GNU_SOURCE
+#define _GNU_SOURCE
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <netinet/in.h>
@@ -195,21 +195,42 @@ int main(void) {
     close(c2);
 
     /* =========================================================================
-     * Test 7: TIME_WAIT port reuse with SO_REUSEADDR
+     * Test 7: TIME_WAIT port reuse semantics (negative without SO_REUSEADDR, positive with SO_REUSEADDR)
      * ========================================================================= */
     close(s);
+
+    // 7a: bind WITHOUT SO_REUSEADDR to port in TIME_WAIT must fail with EADDRINUSE
+    int s_no_reuse = socket(AF_INET, SOCK_STREAM, 0);
+    if (bind(s_no_reuse, (struct sockaddr *)&saddr, sizeof(saddr)) == 0) {
+        pmsg("[http-server] FAIL: bind without SO_REUSEADDR unexpectedly succeeded on TIME_WAIT port\n");
+        close(s_no_reuse);
+        return 23;
+    }
+    if (errno != EADDRINUSE) {
+        char err_buf[80];
+        snprintf(err_buf, sizeof(err_buf), "[http-server] FAIL: bind failed with errno=%d (expected EADDRINUSE=%d)\n", errno, EADDRINUSE);
+        pmsg(err_buf);
+        close(s_no_reuse);
+        return 24;
+    }
+    close(s_no_reuse);
+    pmsg("[http-server] PASS: bind without SO_REUSEADDR correctly failed with EADDRINUSE\n");
+
+    // 7b: bind WITH SO_REUSEADDR to the same port in TIME_WAIT must succeed
     int s_new = socket(AF_INET, SOCK_STREAM, 0);
     int reuse = 1;
     setsockopt(s_new, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
     if (bind(s_new, (struct sockaddr *)&saddr, sizeof(saddr)) != 0) {
-        pmsg("[http-server] FAIL: immediate port reuse failed\n");
-        return 23;
+        pmsg("[http-server] FAIL: bind with SO_REUSEADDR failed on TIME_WAIT port\n");
+        close(s_new);
+        return 25;
     }
     if (listen(s_new, 128) != 0) {
         pmsg("[http-server] FAIL: re-listen failed\n");
-        return 24;
+        close(s_new);
+        return 26;
     }
-    pmsg("[http-server] PASS: TIME_WAIT port reuse with SO_REUSEADDR\n");
+    pmsg("[http-server] PASS: TIME_WAIT port reuse with SO_REUSEADDR succeeded\n");
 
     /* =========================================================================
      * Test 8: Concurrent Client Connections

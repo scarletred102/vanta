@@ -2887,9 +2887,12 @@ fn linux_bind_user(descriptor: u64, addr_ptr: u64, addr_len: u64) -> u64 {
     }
     let port = u16::from_be_bytes([addr_bytes[2], addr_bytes[3]]);
     let ip = [addr_bytes[4], addr_bytes[5], addr_bytes[6], addr_bytes[7]];
-    crate::scheduler::bind_current(descriptor, ip, port)
-        .map(|()| 0)
-        .unwrap_or(SYSCALL_ERROR)
+    match crate::scheduler::bind_current(descriptor, ip, port) {
+        Ok(()) => 0,
+        Err(crate::network::NetworkError::PortInUse) => (-(98 as i64)) as u64, // -EADDRINUSE
+        Err(crate::network::NetworkError::AlreadyBound) => (-(22 as i64)) as u64, // -EINVAL
+        Err(_) => SYSCALL_ERROR,
+    }
 }
 
 fn linux_sendto_user(

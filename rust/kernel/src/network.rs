@@ -628,9 +628,10 @@ fn handle_incoming_tcp(
                         DEFAULT_WINDOW_SIZE,
                         b"",
                     );
-                    let _ = state.device.transmit(&ack);
                     if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
                         to_reflect.push(ack);
+                    } else {
+                        let _ = state.device.transmit(&ack);
                     }
                 }
             }
@@ -652,9 +653,10 @@ fn handle_incoming_tcp(
                             DEFAULT_WINDOW_SIZE,
                             b"",
                         );
-                        let _ = state.device.transmit(&ack);
                         if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
                             to_reflect.push(ack);
+                        } else {
+                            let _ = state.device.transmit(&ack);
                         }
                         wake_handle = Some(handle);
                     } else if tcp.sequence < s.ack_num {
@@ -671,9 +673,10 @@ fn handle_incoming_tcp(
                             DEFAULT_WINDOW_SIZE,
                             b"",
                         );
-                        let _ = state.device.transmit(&ack);
                         if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
                             to_reflect.push(ack);
+                        } else {
+                            let _ = state.device.transmit(&ack);
                         }
                     }
                 }
@@ -697,9 +700,10 @@ fn handle_incoming_tcp(
                         DEFAULT_WINDOW_SIZE,
                         b"",
                     );
-                    let _ = state.device.transmit(&ack);
                     if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
                         to_reflect.push(ack);
+                    } else {
+                        let _ = state.device.transmit(&ack);
                     }
                     wake_handle = Some(handle);
                 }
@@ -722,9 +726,10 @@ fn handle_incoming_tcp(
                         DEFAULT_WINDOW_SIZE,
                         b"",
                     );
-                    let _ = state.device.transmit(&ack);
                     if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
                         to_reflect.push(ack);
+                    } else {
+                        let _ = state.device.transmit(&ack);
                     }
                 } else if tcp.flags & net::TCP_ACK != 0 {
                     s.state = TcpState::FinWait2;
@@ -744,9 +749,10 @@ fn handle_incoming_tcp(
                         DEFAULT_WINDOW_SIZE,
                         b"",
                     );
-                    let _ = state.device.transmit(&ack);
                     if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
                         to_reflect.push(ack);
+                    } else {
+                        let _ = state.device.transmit(&ack);
                     }
                 }
             }
@@ -768,9 +774,10 @@ fn handle_incoming_tcp(
                         DEFAULT_WINDOW_SIZE,
                         b"",
                     );
-                    let _ = state.device.transmit(&ack);
                     if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
                         to_reflect.push(ack);
+                    } else {
+                        let _ = state.device.transmit(&ack);
                     }
                 }
             }
@@ -857,9 +864,10 @@ fn handle_incoming_tcp(
                 DEFAULT_WINDOW_SIZE,
                 b"",
             );
-            let _ = state.device.transmit(&syn_ack);
             if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
                 to_reflect.push(syn_ack);
+            } else {
+                let _ = state.device.transmit(&syn_ack);
             }
         } else if tcp.flags & net::TCP_ACK != 0 {
             let matching_syn = {
@@ -927,9 +935,10 @@ fn handle_incoming_tcp(
                         DEFAULT_WINDOW_SIZE,
                         b"",
                     );
-                    let _ = state.device.transmit(&ack);
                     if src_ip == [127, 0, 0, 1] || src_ip == our_ip {
                         to_reflect.push(ack);
+                    } else {
+                        let _ = state.device.transmit(&ack);
                     }
                 }
                 state.sockets.insert(new_handle, Socket::Tcp(new_sock));
@@ -1042,9 +1051,13 @@ pub fn socket_bind(handle: u32, ip: Ipv4Address, port: u16) -> Result<(), Networ
         match other_s {
             Socket::Tcp(other_tcp) => {
                 if other_tcp.local_port == bind_port && other_tcp.state.is_active() {
-                    // TIME_WAIT port reuse: allow reusing port if existing socket is in TimeWait
+                    // TIME_WAIT port reuse: allow reusing port if existing socket is in TimeWait ONLY IF new socket has SO_REUSEADDR set
                     if other_tcp.state == TcpState::TimeWait {
-                        continue;
+                        if is_reuse_requested {
+                            continue;
+                        } else {
+                            return Err(NetworkError::PortInUse);
+                        }
                     }
                     if !(is_reuse_requested && (other_tcp.options.reuse_addr || other_tcp.options.reuse_port)) {
                         return Err(NetworkError::PortInUse);
@@ -1175,9 +1188,10 @@ pub fn socket_connect(
                     DEFAULT_WINDOW_SIZE,
                     b"",
                 );
-                state.device.transmit(&syn)?;
                 if remote_ip == [127, 0, 0, 1] || remote_ip == our_ip {
                     let _ = process_incoming_frame(state, &syn);
+                } else {
+                    state.device.transmit(&syn)?;
                 }
             }
             Socket::Udp(udp) => {
@@ -1309,9 +1323,10 @@ pub fn socket_send(handle: u32, bytes: &[u8]) -> Result<usize, NetworkError> {
                     DEFAULT_WINDOW_SIZE,
                     chunk,
                 );
-                state.device.transmit(&frame)?;
                 if is_loopback {
                     to_reflect.push(frame);
+                } else {
+                    state.device.transmit(&frame)?;
                 }
                 seq_num = seq_num.wrapping_add(chunk_len as u32);
                 offset += chunk_len;
@@ -1430,9 +1445,10 @@ pub fn socket_sendto(
                 dest_port,
                 bytes,
             );
-            state.device.transmit(&frame)?;
             if dest_ip == our_ip || dest_ip == [127, 0, 0, 1] {
                 let _ = process_incoming_frame(state, &frame);
+            } else {
+                state.device.transmit(&frame)?;
             }
             Ok(bytes.len())
         }
@@ -1461,9 +1477,10 @@ pub fn socket_sendto(
                     DEFAULT_WINDOW_SIZE,
                     chunk,
                 );
-                state.device.transmit(&frame)?;
                 if is_loopback {
                     to_reflect.push(frame);
+                } else {
+                    state.device.transmit(&frame)?;
                 }
                 seq_num = seq_num.wrapping_add(chunk_len as u32);
                 offset += chunk_len;
@@ -1683,9 +1700,10 @@ pub fn socket_close(handle: u32) -> Result<(), NetworkError> {
                         DEFAULT_WINDOW_SIZE,
                         b"",
                     );
-                    let _ = state.device.transmit(&fin);
                     if is_loopback {
                         fin_to_reflect = Some(fin);
+                    } else {
+                        let _ = state.device.transmit(&fin);
                     }
                     tcp.seq_num = tcp.seq_num.wrapping_add(1);
                     tcp.state = TcpState::FinWait1;
@@ -1711,9 +1729,10 @@ pub fn socket_close(handle: u32) -> Result<(), NetworkError> {
                         DEFAULT_WINDOW_SIZE,
                         b"",
                     );
-                    let _ = state.device.transmit(&fin);
                     if is_loopback {
                         fin_to_reflect = Some(fin);
+                    } else {
+                        let _ = state.device.transmit(&fin);
                     }
                     tcp.seq_num = tcp.seq_num.wrapping_add(1);
                     tcp.state = TcpState::LastAck;
