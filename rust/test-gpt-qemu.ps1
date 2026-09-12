@@ -65,6 +65,7 @@ function Invoke-GptBoot {
         "-device", "virtio-blk-pci,disable-modern=on,ioeventfd=off,drive=vd0",
         "-netdev", "user,id=net0",
         "-device", "virtio-net-pci,disable-modern=on,ioeventfd=off,netdev=net0",
+        "-device", "virtio-rng-pci",
         "-serial", "file:$log",
         "-smp", "2",
         "-m", "256M",
@@ -96,6 +97,7 @@ function Invoke-GptBoot {
 }
 
 $common = @(
+    "[rng] hardware entropy source: virtio-rng",
     "[storage] RedoxFS root mounted",
     "[storage] RedoxFS persistence check: true",
     "[swap] watermark reached: evicting page 0x50000000 to slot 0",

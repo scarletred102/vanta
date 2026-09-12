@@ -143,30 +143,88 @@ fn quarter_round(x: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
     x[b] = x[b].rotate_left(7);
 }
 
-/// Gathers hardware entropy from x86 RDRAND and TSC cycle jitter.
-fn get_hardware_entropy() -> u64 {
-    let mut val: u64 = 0;
-    let mut ok: u8 = 0;
+use crate::virtio_rng::VirtioRng;
 
-    // Check CPUID for RDRAND support (Leaf 1, ECX bit 30)
-    let has_rdrand = {
-        let ecx: u32;
-        unsafe {
-            core::arch::asm!(
-                "push rbx",
-                "mov eax, 1",
-                "cpuid",
-                "pop rbx",
-                out("ecx") ecx,
-                out("eax") _,
-                out("edx") _,
-                options(nomem)
-            );
+static VIRTIO_RNG: Mutex<Option<VirtioRng>> = Mutex::new(None);
+static ENTROPY_SOURCE: Mutex<EntropySource> = Mutex::new(EntropySource::RdtscFallback);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntropySource {
+    VirtioRng,
+    RdRand,
+    RdtscFallback,
+}
+
+pub fn active_entropy_source() -> EntropySource {
+    *ENTROPY_SOURCE.lock()
+}
+
+pub fn init() {
+    match VirtioRng::probe() {
+        Ok(rng) => {
+            *VIRTIO_RNG.lock() = Some(rng);
+            *ENTROPY_SOURCE.lock() = EntropySource::VirtioRng;
+            crate::serial_println!("[rng] hardware entropy source: virtio-rng");
         }
-        (ecx & (1 << 30)) != 0
-    };
+        Err(_) => {
+            if has_rdrand_support() {
+                *ENTROPY_SOURCE.lock() = EntropySource::RdRand;
+                crate::serial_println!("[rng] hardware entropy source: rdrand");
+            } else {
+                *ENTROPY_SOURCE.lock() = EntropySource::RdtscFallback;
+                crate::serial_println!("[rng] hardware entropy source: rdtsc-fallback");
+            }
+        }
+    }
 
-    if has_rdrand {
+    CSPRNG.lock().seed_with_entropy();
+}
+
+fn has_rdrand_support() -> bool {
+    let ecx: u32;
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 1",
+            "cpuid",
+            "pop rbx",
+            out("ecx") ecx,
+            out("eax") _,
+            out("edx") _,
+            options(nomem)
+        );
+    }
+    (ecx & (1 << 30)) != 0
+}
+
+fn read_rdtsc() -> u64 {
+    let lo: u32;
+    let hi: u32;
+    unsafe {
+        core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack));
+    }
+    ((hi as u64) << 32) | (lo as u64)
+}
+
+/// Gathers hardware entropy prioritizing: VirtIO-RNG > RDRAND > RDTSC fallback.
+fn get_hardware_entropy() -> u64 {
+    // 1. VirtIO-RNG (host hypervisor entropy)
+    {
+        let mut guard = VIRTIO_RNG.lock();
+        if let Some(rng) = guard.as_mut() {
+            let mut buf = [0u8; 8];
+            if let Ok(n) = rng.get_entropy(&mut buf) {
+                if n == 8 {
+                    return u64::from_le_bytes(buf);
+                }
+            }
+        }
+    }
+
+    // 2. x86 RDRAND instruction (CPU hardware entropy)
+    if has_rdrand_support() {
+        let mut val: u64 = 0;
+        let mut ok: u8 = 0;
         unsafe {
             core::arch::asm!(
                 "rdrand {0}",
@@ -181,28 +239,20 @@ fn get_hardware_entropy() -> u64 {
                 options(nomem, nostack)
             );
         }
+        if ok != 0 && val != 0 && val != u64::MAX {
+            let tsc = read_rdtsc();
+            return val ^ tsc.rotate_left(13);
+        }
     }
 
-    let tsc: u64;
-    unsafe {
-        let mut lo: u32;
-        let mut hi: u32;
-        core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack));
-        tsc = ((hi as u64) << 32) | (lo as u64);
-    }
-
-    if ok != 0 && val != 0 && val != u64::MAX {
-        // Mix RDRAND with TSC
-        val ^ tsc.rotate_left(13)
-    } else {
-        // Fallback: splitmix64 on TSC jitter + atomic counter
-        static JITTER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0xdeadbeef12345678);
-        let seq = JITTER.fetch_add(0x9e3779b97f4a7c15, core::sync::atomic::Ordering::Relaxed);
-        let mut z = tsc ^ seq;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
-        z ^ (z >> 31)
-    }
+    // 3. Fallback: splitmix64 on TSC jitter + atomic counter
+    let tsc = read_rdtsc();
+    static JITTER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0xdeadbeef12345678);
+    let seq = JITTER.fetch_add(0x9e3779b97f4a7c15, core::sync::atomic::Ordering::Relaxed);
+    let mut z = tsc ^ seq;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+    z ^ (z >> 31)
 }
 
 static CSPRNG: Mutex<ChaCha20Csprng> = Mutex::new(ChaCha20Csprng::new());

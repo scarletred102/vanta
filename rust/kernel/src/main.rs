@@ -41,6 +41,7 @@ pub mod timer;
 mod vfs;
 mod virtio;
 mod virtio_net;
+pub mod virtio_rng;
 mod vma;
 pub mod socket;
 pub mod dns;
@@ -444,6 +445,8 @@ extern "C" fn bootstrap_main() -> ! {
         pci_devices.len(),
         virtio_block_present
     );
+
+    random::init();
 
     let smp = smp::bootstrap(MP_REQUEST.response(), prepared_cpus);
     serial_println!(
