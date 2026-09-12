@@ -555,6 +555,9 @@ fn process_incoming_frame(state: &mut NetworkState, frame: &[u8]) -> Result<(), 
                 }
                 net::IP_PROTOCOL_UDP => {
                     if let Some((udp, udp_data)) = net::parse_udp(ip_payload, ip.src_ip, ip.dest_ip) {
+                        if (ip.src_ip == state.configuration.dns || ip.src_ip == [10, 0, 2, 3]) && udp.src_port == 53 {
+                            crate::dns::record_dns_response(udp_data);
+                        }
                         for (&handle, socket) in state.sockets.iter_mut() {
                             if let Socket::Udp(udp_sock) = socket {
                                 if udp_sock.bound && (udp_sock.local_port == udp.dest_port || udp_sock.local_port == 0) {

@@ -313,7 +313,7 @@ pub(crate) fn handle_dns_datagram(
     query_bytes: &[u8],
     state: &mut crate::network::NetworkState,
 ) -> Option<Vec<u8>> {
-    let (tx_id, hostname, qtype, qclass) = decode_query_name(query_bytes).ok()?;
+    let (_tx_id, hostname, qtype, qclass) = decode_query_name(query_bytes).ok()?;
     if qtype != 1 || qclass != 1 {
         return None;
     }
@@ -357,62 +357,39 @@ pub(crate) fn handle_dns_datagram(
         qname_lower, OUTBOUND_QUERIES.load(Ordering::Relaxed)
     );
 
-    let our_mac = state.device.mac();
-    let gateway_mac = state.gateway_mac.unwrap_or(our_mac);
-    let our_ip = state.configuration.address;
-    let dns_ip = state.configuration.dns;
-
-    let udp_frame = crate::net::build_udp_frame(
-        our_mac,
-        gateway_mac,
-        our_ip,
-        dns_ip,
-        49152 + (tx_id % 10000),
-        53,
-        query_bytes,
-    );
-
-    if state.device.transmit(&udp_frame).is_err() {
-        return None;
-    }
-
-    // Wait for response from DNS server
-    for _ in 0..20_000 {
-        if let Ok(Some(frame)) = state.device.receive() {
-            crate::virtio_net::record_rx_packet();
-            if let Some((eth, eth_payload)) = crate::net::parse_ethernet(&frame) {
-                if eth.ethertype == crate::net::ETHERTYPE_IPV4 {
-                    if let Some((ip_hdr, ip_payload)) = crate::net::parse_ipv4(eth_payload) {
-                        if ip_hdr.protocol == crate::net::IP_PROTOCOL_UDP && ip_hdr.src_ip == dns_ip {
-                            if let Some((udp_hdr, udp_payload)) = crate::net::parse_udp(ip_payload, ip_hdr.src_ip, ip_hdr.dest_ip) {
-                                if udp_hdr.src_port == 53 && udp_payload.len() >= 12 {
-                                    let resp_id = u16::from_be_bytes([udp_payload[0], udp_payload[1]]);
-                                    if resp_id == tx_id {
-                                        // Valid DNS response received!
-                                        if let Ok((resolved_ip, ttl)) = decode_response(udp_payload, Some(tx_id)) {
-                                            crate::serial_println!(
-                                                "[dns] resolved {}: {}.{}.{}.{} (ttl={}s)",
-                                                qname_lower, resolved_ip[0], resolved_ip[1], resolved_ip[2], resolved_ip[3], ttl
-                                            );
-                                            with_cache(|cache| {
-                                                cache.insert(qname_lower.clone(), DnsCacheEntry {
-                                                    ip: resolved_ip,
-                                                    ttl,
-                                                    expire_tick: current_ticks + (ttl.max(5) as u64) * 1000,
-                                                });
-                                            });
-                                        }
-                                        return Some(udp_payload.to_vec());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        core::hint::spin_loop();
-    }
-
     None
+}
+
+/// Records an incoming DNS response into the local TTL cache.
+pub fn record_dns_response(packet: &[u8]) {
+    if packet.len() < 12 {
+        return;
+    }
+    let flags = u16::from_be_bytes([packet[2], packet[3]]);
+    let qr = (flags >> 15) & 1;
+    if qr != 1 {
+        return; // Not a response
+    }
+    let rcode = flags & 0x0f;
+    if rcode != 0 {
+        return; // Non-zero rcode (e.g. NXDOMAIN), do not cache as positive A record
+    }
+    if let Ok((_tx_id, hostname, _qtype, _qclass)) = decode_query_name(packet) {
+        if let Ok((resolved_ip, ttl)) = decode_response(packet, None) {
+            let mut qname_lower = hostname;
+            qname_lower.make_ascii_lowercase();
+            let current_ticks = crate::timer::current_tick();
+            crate::serial_println!(
+                "[dns] resolved {}: {}.{}.{}.{} (ttl={}s)",
+                qname_lower, resolved_ip[0], resolved_ip[1], resolved_ip[2], resolved_ip[3], ttl
+            );
+            with_cache(|cache| {
+                cache.insert(qname_lower, DnsCacheEntry {
+                    ip: resolved_ip,
+                    ttl,
+                    expire_tick: current_ticks + (ttl.max(5) as u64) * 1000,
+                });
+            });
+        }
+    }
 }
