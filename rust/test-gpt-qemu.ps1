@@ -63,7 +63,7 @@ function Invoke-GptBoot {
         "-drive", "if=pflash,format=raw,readonly=on,file=`"$ovmf`"",
         "-drive", "file=`"$DiskImage`",if=none,format=raw,cache=writethrough,id=vd0",
         "-device", "virtio-blk-pci,disable-modern=on,ioeventfd=off,drive=vd0",
-        "-netdev", "user,id=net0",
+        "-netdev", "user,id=net0,hostfwd=tcp::8080-:8080",
         "-device", "virtio-net-pci,disable-modern=on,ioeventfd=off,netdev=net0",
         "-device", "virtio-rng-pci",
         "-serial", "file:$log",
@@ -75,10 +75,26 @@ function Invoke-GptBoot {
     try {
         $output = ""
         $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        $hostCurlAttempted = $false
         while ((Get-Date) -lt $deadline) {
             if (Test-Path -LiteralPath $log) {
                 $output = Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue
                 if ($null -eq $output) { $output = "" }
+                if (!$hostCurlAttempted -and $output.Contains("waiting for host curl request on port 8080")) {
+                    $hostCurlAttempted = $true
+                    Start-Sleep -Milliseconds 500
+                    for ($attempt = 1; $attempt -le 5; $attempt++) {
+                        try {
+                            $resp = & curl.exe -s --max-time 3 http://localhost:8080
+                            if ($resp -match "Hello Vanta!") {
+                                Write-Host "[test] host curl verified: '$resp'"
+                                break
+                            }
+                        } catch {
+                            Start-Sleep -Milliseconds 500
+                        }
+                    }
+                }
                 if (($Required | Where-Object { !$output.Contains($_) }).Count -eq 0) {
                     Write-Host "[test] GPT $Label passed"
                     return $output
@@ -168,10 +184,11 @@ $common = @(
     "[http-server] PASS: EPIPE delivered on closed socket write",
     "[http-server] PASS: bind without SO_REUSEADDR correctly failed with EADDRINUSE",
     "[http-server] PASS: TIME_WAIT port reuse with SO_REUSEADDR succeeded",
-    "[http-server] PASS: 3 concurrent client connections verified",
+    "[http-server] PASS: 3 concurrent client connections verified (concurrent data in flight across 3 active sockets)",
     "[http-server] PASS: simultaneous close (CLOSING -> TIME_WAIT -> CLOSED)",
     "[http-server] PASS: SYN queue timeout (purged after 3000ms verified via /proc/net/tcp)",
     "[http-server] PASS: SYN cookie protection under saturated backlog verified",
+    "[http-server] PASS: host curl request served successfully with 'Hello Vanta!'",
     "[http-server] ALL TESTS PASSED",
     "[dns-test] starting RFC 1035 DNS resolver test suite...",
     "[dns-test] PASS: static resolution (localhost -> 127.0.0.1)",

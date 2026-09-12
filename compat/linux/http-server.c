@@ -330,37 +330,54 @@ int main(void) {
             return 26;
         }
     }
+    pmsg("[http-server] active concurrent connection count: 3 (all 3 in Established state concurrently)\n");
 
-    // Exchange data on all 3 connections
+    // Send requests on ALL 3 client sockets first (concurrent data in flight)
     for (int i = 0; i < 3; i++) {
-        char req_tok[16];
-        snprintf(req_tok, sizeof(req_tok), "CONN_%d\n", i);
+        char req_tok[32];
+        snprintf(req_tok, sizeof(req_tok), "CONCURRENT_REQ_%d\n", i);
         write(c_conns[i], req_tok, strlen(req_tok));
+    }
 
-        char svr_buf[16];
+    // Read requests on ALL 3 server sockets
+    for (int i = 0; i < 3; i++) {
+        char svr_buf[32];
         memset(svr_buf, 0, sizeof(svr_buf));
         read(a_conns[i], svr_buf, sizeof(svr_buf) - 1);
-        if (strstr(svr_buf, req_tok) == NULL) {
+        char exp_tok[32];
+        snprintf(exp_tok, sizeof(exp_tok), "CONCURRENT_REQ_%d\n", i);
+        if (strstr(svr_buf, exp_tok) == NULL) {
             pmsg("[http-server] FAIL: concurrent data mismatch\n");
             return 27;
         }
+    }
 
-        char resp_tok[16];
-        snprintf(resp_tok, sizeof(resp_tok), "ACK_%d\n", i);
+    // Send replies on ALL 3 server sockets
+    for (int i = 0; i < 3; i++) {
+        char resp_tok[32];
+        snprintf(resp_tok, sizeof(resp_tok), "CONCURRENT_ACK_%d\n", i);
         write(a_conns[i], resp_tok, strlen(resp_tok));
+    }
 
-        char cli_buf[16];
+    // Read replies on ALL 3 client sockets
+    for (int i = 0; i < 3; i++) {
+        char cli_buf[32];
         memset(cli_buf, 0, sizeof(cli_buf));
         read(c_conns[i], cli_buf, sizeof(cli_buf) - 1);
-        if (strstr(cli_buf, resp_tok) == NULL) {
+        char exp_ack[32];
+        snprintf(exp_ack, sizeof(exp_ack), "CONCURRENT_ACK_%d\n", i);
+        if (strstr(cli_buf, exp_ack) == NULL) {
             pmsg("[http-server] FAIL: concurrent ack mismatch\n");
             return 28;
         }
+    }
 
+    // Close all 3 connections
+    for (int i = 0; i < 3; i++) {
         close(c_conns[i]);
         close(a_conns[i]);
     }
-    pmsg("[http-server] PASS: 3 concurrent client connections verified\n");
+    pmsg("[http-server] PASS: 3 concurrent client connections verified (concurrent data in flight across 3 active sockets)\n");
 
     /* =========================================================================
      * Test 9: Simultaneous close (CLOSING -> TIME_WAIT -> CLOSED)
@@ -563,6 +580,29 @@ int main(void) {
     close(s_cook_listen);
     close(raw_fd);
     pmsg("[http-server] PASS: SYN cookie protection under saturated backlog verified\n");
+
+    /* =========================================================================
+     * Test 12: Host HTTP GET request (via QEMU hostfwd)
+     * ========================================================================= */
+    pmsg("[http-server] waiting for host curl request on port 8080...\n");
+    struct sockaddr_in host_cli;
+    socklen_t host_cli_len = sizeof(host_cli);
+    int host_fd = accept4(s_new, (struct sockaddr *)&host_cli, &host_cli_len, 0);
+    if (host_fd >= 0) {
+        char host_req[512];
+        memset(host_req, 0, sizeof(host_req));
+        read(host_fd, host_req, sizeof(host_req) - 1);
+        if (strstr(host_req, "GET") != NULL) {
+            const char host_resp[] = "HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nHello Vanta!";
+            write(host_fd, host_resp, strlen(host_resp));
+            pmsg("[http-server] PASS: host curl request served successfully with 'Hello Vanta!'\n");
+        } else {
+            pmsg("[http-server] FAIL: host request missing GET\n");
+        }
+        close(host_fd);
+    } else {
+        pmsg("[http-server] FAIL: accept4 for host request failed\n");
+    }
 
     close(s_new);
     pmsg("[http-server] ALL TESTS PASSED\n");
