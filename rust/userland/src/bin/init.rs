@@ -393,6 +393,15 @@ fn gate_d_acceptance() -> bool {
     print_val(b"[linux] mount-test", mount_test, mount_test_exit);
     let mount_test_ok = mount_test != u64::MAX && mount_test_exit == 0;
 
+    let symlink_test = vanta_userland::spawn_linux(b"/compat/linux/symlink-test");
+    let symlink_test_exit = if symlink_test != u64::MAX {
+        vanta_userland::wait(symlink_test)
+    } else {
+        999
+    };
+    print_val(b"[linux] symlink-test", symlink_test, symlink_test_exit);
+    let symlink_test_ok = symlink_test != u64::MAX && symlink_test_exit == 0;
+
     let dyn_shlib = vanta_userland::spawn_linux(b"/compat/linux/dynamic-shlib");
     let dyn_shlib_exit = if dyn_shlib != u64::MAX {
         vanta_userland::wait(dyn_shlib)
@@ -496,6 +505,7 @@ fn gate_d_acceptance() -> bool {
         && dyn_epoll_ok
         && dyn_proc_ok
         && mount_test_ok
+        && symlink_test_ok
         && dyn_shlib_ok
         && displayd_ok
         && desktop_ok

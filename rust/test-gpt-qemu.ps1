@@ -249,6 +249,20 @@ $common = @(
     "[mount-test] PASS: memory completely reclaimed verified",
     "[mount-test] PASS: /mnt/ram unmounted and inaccessible",
     "[mount-test] ALL TESTS PASSED",
+    "[symlink-test] starting Symbolic Links & Dentry Cache Verification (Phase 4 Unit 2)...",
+    "[symlink-test] PASS: symlink(/tmp/sym_target.txt, /tmp/sym_link) succeeded",
+    "[symlink-test] PASS: readlink() returned exact target string",
+    "[symlink-test] PASS: lstat (S_IFLNK) vs stat (S_IFREG) verified",
+    "[symlink-test] PASS: bit-for-bit read through symlink verified",
+    "[symlink-test] PASS: cross-mount symlink read and write verified",
+    "[symlink-test] PASS: reverse cross-mount (tmpfs -> root) verified",
+    "[symlink-test] PASS: exact 40-hop symlink chain succeeded",
+    "[symlink-test] PASS: exact 41-hop chain returned ELOOP (40)",
+    "[symlink-test] PASS: circular symlink loop returned ELOOP",
+    "[symlink-test] PASS: broken symlink returned ENOENT on open, S_ISLNK on lstat",
+    "[symlink-test] PASS: 200 repeated lookups hit dentry cache successfully",
+    "[symlink-test] PASS: dentry cache invalidation on unlink verified",
+    "[symlink-test] ALL TESTS PASSED SUCCESSFULLY (Exit Code 0)",
     "desktop: GUI window surface composition verified",
     "audiod: PCM audio stream playback verified",
     "[orbital] window compositor initialized",
@@ -283,4 +297,4 @@ Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required 
 Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
 
 Write-Host "[test] GPT Gate A, Gate B, Gate C, Gate D, Gate E, and Gate F acceptance passed"
-$first -split "`n" | Where-Object { $_ -match "afunix|SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net|http-server|wget|mount-test" } | ForEach-Object { Write-Host $_ }
+$first -split "`n" | Where-Object { $_ -match "afunix|SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net|http-server|wget|mount-test|symlink-test" } | ForEach-Object { Write-Host $_ }

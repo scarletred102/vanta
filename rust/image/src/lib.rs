@@ -209,6 +209,7 @@ fn build_redoxfs(
             .create_node(TreePtr::root(), "home", Node::MODE_DIR | 0o755, 0, 0)?
             .ptr();
         tx.create_node_with_owner(home, "vanta", Node::MODE_DIR | 0o755, 1000, 1000, 0, 0)?;
+        tx.create_node(TreePtr::root(), "mnt", Node::MODE_DIR | 0o755, 0, 0)?;
         let config = tx
             .create_node(etc, "config", Node::MODE_FILE | 0o644, 0, 0)?
             .ptr();

@@ -1,9 +1,11 @@
 //! Writable VantaFS volume and root VFS mount.
 
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 use vanta_abi::Credentials;
 use vanta_gpt::RootPartition;
@@ -91,6 +93,7 @@ pub enum VfsError {
     RedoxFs,
     PermissionDenied,
     ReadOnlyFilesystem,
+    Loop,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -297,25 +300,35 @@ pub fn normalize_mount_target(target: &str) -> String {
 }
 
 pub struct MountPoint {
+    pub id: usize,
     pub prefix: String,
     pub fs: Arc<dyn Filesystem>,
     pub flags: u32,
 }
 
 pub struct MountTable {
+    next_id: usize,
     mounts: Vec<MountPoint>,
 }
 
 impl MountTable {
     pub const fn new() -> Self {
-        Self { mounts: Vec::new() }
+        Self {
+            next_id: 1,
+            mounts: Vec::new(),
+        }
     }
 
     pub fn mount(&mut self, target: &str, fs: Arc<dyn Filesystem>, flags: u32) -> Result<(), VfsError> {
         let norm_target = normalize_mount_target(target);
         if let Some(pos) = self.mounts.iter().position(|m| m.prefix == norm_target) {
             if (flags & mount_flags::MS_REMOUNT) != 0 || norm_target == "/" {
+                let old_id = self.mounts[pos].id;
+                DCACHE.lock().invalidate_fs(old_id);
+                let id = self.next_id;
+                self.next_id += 1;
                 self.mounts[pos] = MountPoint {
+                    id,
                     prefix: norm_target,
                     fs,
                     flags,
@@ -325,7 +338,10 @@ impl MountTable {
                 return Err(VfsError::AlreadyExists);
             }
         }
+        let id = self.next_id;
+        self.next_id += 1;
         self.mounts.push(MountPoint {
+            id,
             prefix: norm_target,
             fs,
             flags,
@@ -340,7 +356,8 @@ impl MountTable {
             return Err(VfsError::InvalidPath);
         }
         if let Some(pos) = self.mounts.iter().position(|m| m.prefix == norm_target) {
-            self.mounts.remove(pos);
+            let m = self.mounts.remove(pos);
+            DCACHE.lock().invalidate_fs(m.id);
             Ok(())
         } else {
             Err(VfsError::NotFound)
@@ -398,6 +415,203 @@ impl MountTable {
             }
         }
         children
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DentryValue {
+    pub ino: u64,
+    pub mode: u32,
+}
+
+pub struct DentryCache {
+    entries: BTreeMap<(usize, u64, String), DentryValue>,
+    keys: VecDeque<(usize, u64, String)>,
+    max_entries: usize,
+    hits: AtomicU64,
+    misses: AtomicU64,
+}
+
+impl DentryCache {
+    pub const fn new(max_entries: usize) -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            keys: VecDeque::new(),
+            max_entries,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+        }
+    }
+
+    pub fn lookup(&self, fs_id: usize, parent: u64, name: &str) -> Option<DentryValue> {
+        let key = (fs_id, parent, String::from(name));
+        if let Some(val) = self.entries.get(&key) {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            Some(*val)
+        } else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+    }
+
+    pub fn insert(&mut self, fs_id: usize, parent: u64, name: &str, val: DentryValue) {
+        let key = (fs_id, parent, String::from(name));
+        if self.entries.contains_key(&key) {
+            self.entries.insert(key, val);
+            return;
+        }
+        while self.entries.len() >= self.max_entries {
+            if let Some(old_key) = self.keys.pop_front() {
+                self.entries.remove(&old_key);
+            } else {
+                break;
+            }
+        }
+        self.keys.push_back(key.clone());
+        self.entries.insert(key, val);
+    }
+
+    pub fn invalidate(&mut self, fs_id: usize, parent: u64, name: &str) {
+        let key = (fs_id, parent, String::from(name));
+        self.entries.remove(&key);
+    }
+
+    pub fn invalidate_fs(&mut self, fs_id: usize) {
+        self.entries.retain(|k, _| k.0 != fs_id);
+        self.keys.retain(|k| k.0 != fs_id);
+    }
+
+    pub fn stats(&self) -> (u64, u64) {
+        (self.hits.load(Ordering::Relaxed), self.misses.load(Ordering::Relaxed))
+    }
+}
+
+pub static DCACHE: Mutex<DentryCache> = Mutex::new(DentryCache::new(4096));
+
+pub fn lookup_in_fs(mount_id: usize, fs: &Arc<dyn Filesystem>, rel: &str) -> Result<u64, VfsError> {
+    let mut curr = fs.root_inode();
+    for comp in rel.split('/').filter(|s| !s.is_empty() && *s != ".") {
+        let cached = {
+            let dcache = DCACHE.lock();
+            dcache.lookup(mount_id, curr, comp)
+        };
+        if let Some(val) = cached {
+            curr = val.ino;
+        } else {
+            let child = fs.lookup(curr, comp)?;
+            let meta = fs.read_inode(child)?;
+            let mut dcache = DCACHE.lock();
+            dcache.insert(mount_id, curr, comp, DentryValue { ino: child, mode: meta.mode });
+            curr = child;
+        }
+    }
+    Ok(curr)
+}
+
+pub fn resolve_path_vfs(
+    start_path: &str,
+    follow_final_symlink: bool,
+) -> Result<(usize, Arc<dyn Filesystem>, u64, InodeMetadata, String), VfsError> {
+    let table = MOUNT_TABLE.lock();
+    let mut hops = 0;
+
+    let mut curr_dir = String::from("/");
+    let mut remaining: VecDeque<String> = start_path
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .map(String::from)
+        .collect();
+
+    loop {
+        let Some(comp) = remaining.pop_front() else {
+            let (mount, rel) = table.resolve(&curr_dir)?;
+            let ino = if rel.is_empty() {
+                mount.fs.root_inode()
+            } else {
+                lookup_in_fs(mount.id, &mount.fs, rel)?
+            };
+            let meta = mount.fs.read_inode(ino)?;
+            return Ok((mount.id, mount.fs.clone(), ino, meta, curr_dir));
+        };
+
+        if comp == ".." {
+            if curr_dir != "/" {
+                if let Some(idx) = curr_dir.rfind('/') {
+                    if idx == 0 {
+                        curr_dir = String::from("/");
+                    } else {
+                        curr_dir.truncate(idx);
+                    }
+                }
+            }
+            continue;
+        }
+
+        let is_last = remaining.is_empty();
+        let candidate = if curr_dir == "/" {
+            alloc::format!("/{}", comp)
+        } else {
+            alloc::format!("{}/{}", curr_dir, comp)
+        };
+
+        if let Some(mount) = table.find_mount(&candidate) {
+            let ino = mount.fs.root_inode();
+            let _meta = mount.fs.read_inode(ino)?;
+            curr_dir = candidate;
+            continue;
+        }
+
+        let candidate_slash = alloc::format!("{}/", candidate);
+        if table.mounts.iter().any(|m| m.prefix.starts_with(&candidate_slash)) {
+            curr_dir = candidate;
+            continue;
+        }
+
+        let (mount, rel) = table.resolve(&candidate)?;
+        let ino = lookup_in_fs(mount.id, &mount.fs, rel)?;
+        let meta = mount.fs.read_inode(ino)?;
+
+        if (meta.mode & 0o170000) == 0o120000 {
+            if is_last && !follow_final_symlink {
+                return Ok((mount.id, mount.fs.clone(), ino, meta, candidate));
+            }
+            hops += 1;
+            if hops > 40 {
+                return Err(VfsError::Loop);
+            }
+            let target = mount.fs.readlink(ino)?;
+            if target.starts_with('/') {
+                curr_dir = String::from("/");
+                let target_comps: Vec<String> = target
+                    .split('/')
+                    .filter(|s| !s.is_empty() && *s != ".")
+                    .map(String::from)
+                    .collect();
+                for c in target_comps.into_iter().rev() {
+                    remaining.push_front(c);
+                }
+            } else {
+                let target_comps: Vec<String> = target
+                    .split('/')
+                    .filter(|s| !s.is_empty() && *s != ".")
+                    .map(String::from)
+                    .collect();
+                for c in target_comps.into_iter().rev() {
+                    remaining.push_front(c);
+                }
+            }
+            continue;
+        }
+
+        if is_last {
+            return Ok((mount.id, mount.fs.clone(), ino, meta, candidate));
+        }
+
+        if (meta.mode & 0o170000) != 0o040000 {
+            return Err(VfsError::NotDirectory);
+        }
+
+        curr_dir = candidate;
     }
 }
 
@@ -1073,10 +1287,18 @@ impl Filesystem for RedoxFsAdapter {
         let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
         backend.filesystem.tx(|tx| {
             let node: redoxfs::TreeData<redoxfs::Node> = tx.read_tree(redoxfs::TreePtr::new(ino as u32))?;
+            let raw_mode = node.data().mode();
+            let mode = if (raw_mode & redoxfs::Node::MODE_TYPE) == redoxfs::Node::MODE_SYMLINK {
+                0o120000 | (raw_mode as u32 & 0o777)
+            } else if (raw_mode & redoxfs::Node::MODE_TYPE) == redoxfs::Node::MODE_DIR {
+                0o040000 | (raw_mode as u32 & 0o777)
+            } else {
+                0o100000 | (raw_mode as u32 & 0o777)
+            };
             Ok(InodeMetadata {
                 ino,
                 size: node.data().size(),
-                mode: node.data().mode() as u32,
+                mode,
                 uid: node.data().uid(),
                 gid: node.data().gid(),
                 atime: 0,
@@ -1122,8 +1344,11 @@ impl Filesystem for RedoxFsAdapter {
         backend.filesystem.tx(|tx| {
             let parent_ptr = redoxfs::TreePtr::new(parent as u32);
             let node = tx.find_node(parent_ptr, name)?;
-            let mode = if node.data().is_dir() {
+            let raw_mode = node.data().mode();
+            let mode = if (raw_mode & redoxfs::Node::MODE_TYPE) == redoxfs::Node::MODE_DIR {
                 redoxfs::Node::MODE_DIR
+            } else if (raw_mode & redoxfs::Node::MODE_TYPE) == redoxfs::Node::MODE_SYMLINK {
+                redoxfs::Node::MODE_SYMLINK
             } else {
                 redoxfs::Node::MODE_FILE
             };
@@ -1136,12 +1361,34 @@ impl Filesystem for RedoxFsAdapter {
         self.unlink(parent, name)
     }
 
-    fn symlink(&self, _parent: u64, _name: &str, _target: &str) -> Result<u64, VfsError> {
-        Err(VfsError::RedoxFs)
+    fn symlink(&self, parent: u64, name: &str, target: &str) -> Result<u64, VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        backend.filesystem.tx(|tx| {
+            let parent_ptr = redoxfs::TreePtr::new(parent as u32);
+            let node = tx.create_node(
+                parent_ptr,
+                name,
+                redoxfs::Node::MODE_SYMLINK | 0o777,
+                0,
+                0,
+            )?;
+            tx.write_node(node.ptr(), 0, target.as_bytes(), 0, 0)?;
+            Ok(node.ptr().id() as u64)
+        }).map_err(|_| VfsError::NoSpace)
     }
 
-    fn readlink(&self, _ino: u64) -> Result<String, VfsError> {
-        Err(VfsError::NotFound)
+    fn readlink(&self, ino: u64) -> Result<String, VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        let bytes = backend.filesystem.tx(|tx| {
+            let node: redoxfs::TreeData<redoxfs::Node> = tx.read_tree(redoxfs::TreePtr::new(ino as u32))?;
+            let size = node.data().size() as usize;
+            let mut buf = alloc::vec![0u8; size];
+            tx.read_node(node.ptr(), 0, &mut buf, 0, 0)?;
+            Ok(buf)
+        }).map_err(|_| VfsError::NotFound)?;
+        String::from_utf8(bytes).map_err(|_| VfsError::InvalidPath)
     }
 
     fn rename(&self, old_parent: u64, old_name: &str, new_parent: u64, new_name: &str) -> Result<(), VfsError> {
@@ -1321,6 +1568,11 @@ pub fn remount_root() -> Result<(), VfsError> {
             };
             let new_backend = RedoxFsBackend::open(device, partition).map_err(|_| VfsError::RedoxFs)?;
             *backend_guard = Some(new_backend);
+            let table = MOUNT_TABLE.lock();
+            if let Some(m) = table.find_mount("/") {
+                DCACHE.lock().invalidate_fs(m.id);
+            }
+            drop(table);
             return Ok(());
         }
     }
@@ -1331,6 +1583,11 @@ pub fn remount_root() -> Result<(), VfsError> {
         let filesystem = vfs.unmount_root()?;
         let remounted = VantaFs::mount(filesystem.into_device())?;
         vfs.mount_root(remounted)?;
+        let table = MOUNT_TABLE.lock();
+        if let Some(m) = table.find_mount("/") {
+            DCACHE.lock().invalidate_fs(m.id);
+        }
+        drop(table);
         return Ok(());
     }
     Err(VfsError::NotMounted)
@@ -1442,9 +1699,10 @@ pub fn read_root(path: &str) -> Result<Vec<u8>, VfsError> {
 }
 
 pub fn read_root_as(path: &str, _credentials: &Credentials) -> Result<Vec<u8>, VfsError> {
-    let table = MOUNT_TABLE.lock();
-    let (mount, rel) = table.resolve(path)?;
-    mount.fs.read_file_path(rel)
+    let (_, fs, ino, meta, _) = resolve_path_vfs(path, true)?;
+    let mut data = alloc::vec![0u8; meta.size as usize];
+    fs.read(ino, 0, &mut data)?;
+    Ok(data)
 }
 
 pub fn write_root(path: &str, data: &[u8]) -> Result<(), VfsError> {
@@ -1452,12 +1710,47 @@ pub fn write_root(path: &str, data: &[u8]) -> Result<(), VfsError> {
 }
 
 pub fn write_root_as(path: &str, data: &[u8], _credentials: &Credentials) -> Result<(), VfsError> {
-    let table = MOUNT_TABLE.lock();
-    let (mount, rel) = table.resolve(path)?;
-    if (mount.flags & mount_flags::MS_RDONLY) != 0 {
-        return Err(VfsError::ReadOnlyFilesystem);
+    match resolve_path_vfs(path, true) {
+        Ok((mount_id, fs, ino, meta, _)) => {
+            if (meta.mode & 0o170000) == 0o040000 {
+                return Err(VfsError::IsDirectory);
+            }
+            let table = MOUNT_TABLE.lock();
+            if let Some(m) = table.mounts.iter().find(|m| m.id == mount_id) {
+                if (m.flags & mount_flags::MS_RDONLY) != 0 {
+                    return Err(VfsError::ReadOnlyFilesystem);
+                }
+            }
+            drop(table);
+            fs.truncate(ino, 0)?;
+            fs.write(ino, 0, data)?;
+            Ok(())
+        }
+        Err(VfsError::NotFound) => {
+            let norm = normalize_mount_target(path);
+            let (parent_path, file_name) = match norm.rfind('/') {
+                Some(0) => ("/", &norm[1..]),
+                Some(idx) => (&norm[..idx], &norm[idx + 1..]),
+                None => ("/", norm.as_str()),
+            };
+            let (mount_id, fs, p_ino, _, _) = resolve_path_vfs(parent_path, true)?;
+            let table = MOUNT_TABLE.lock();
+            if let Some(m) = table.mounts.iter().find(|m| m.id == mount_id) {
+                if (m.flags & mount_flags::MS_RDONLY) != 0 {
+                    return Err(VfsError::ReadOnlyFilesystem);
+                }
+            }
+            drop(table);
+            let ino = fs.create(p_ino, file_name, 0o644)?;
+            let mut dcache = DCACHE.lock();
+            dcache.insert(mount_id, p_ino, file_name, DentryValue { ino, mode: 0o100644 });
+            drop(dcache);
+            fs.truncate(ino, 0)?;
+            fs.write(ino, 0, data)?;
+            Ok(())
+        }
+        Err(e) => Err(e),
     }
-    mount.fs.write_file_path(rel, data)
 }
 
 pub fn read_root_at(path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, VfsError> {
@@ -1465,9 +1758,8 @@ pub fn read_root_at(path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Vf
 }
 
 pub fn read_root_at_as(path: &str, offset: u64, buf: &mut [u8], _credentials: &Credentials) -> Result<usize, VfsError> {
-    let table = MOUNT_TABLE.lock();
-    let (mount, rel) = table.resolve(path)?;
-    mount.fs.read_at_path(rel, offset, buf)
+    let (_, fs, ino, _, _) = resolve_path_vfs(path, true)?;
+    fs.read(ino, offset, buf)
 }
 
 pub fn write_root_at(path: &str, offset: u64, buf: &[u8]) -> Result<usize, VfsError> {
@@ -1475,12 +1767,18 @@ pub fn write_root_at(path: &str, offset: u64, buf: &[u8]) -> Result<usize, VfsEr
 }
 
 pub fn write_root_at_as(path: &str, offset: u64, buf: &[u8], _credentials: &Credentials) -> Result<usize, VfsError> {
-    let table = MOUNT_TABLE.lock();
-    let (mount, rel) = table.resolve(path)?;
-    if (mount.flags & mount_flags::MS_RDONLY) != 0 {
-        return Err(VfsError::ReadOnlyFilesystem);
+    let (mount_id, fs, ino, meta, _) = resolve_path_vfs(path, true)?;
+    if (meta.mode & 0o170000) == 0o040000 {
+        return Err(VfsError::IsDirectory);
     }
-    mount.fs.write_at_path(rel, offset, buf)
+    let table = MOUNT_TABLE.lock();
+    if let Some(m) = table.mounts.iter().find(|m| m.id == mount_id) {
+        if (m.flags & mount_flags::MS_RDONLY) != 0 {
+            return Err(VfsError::ReadOnlyFilesystem);
+        }
+    }
+    drop(table);
+    fs.write(ino, offset, buf)
 }
 
 pub fn truncate_root(path: &str, size: u64) -> Result<(), VfsError> {
@@ -1488,12 +1786,18 @@ pub fn truncate_root(path: &str, size: u64) -> Result<(), VfsError> {
 }
 
 pub fn truncate_root_as(path: &str, size: u64, _credentials: &Credentials) -> Result<(), VfsError> {
-    let table = MOUNT_TABLE.lock();
-    let (mount, rel) = table.resolve(path)?;
-    if (mount.flags & mount_flags::MS_RDONLY) != 0 {
-        return Err(VfsError::ReadOnlyFilesystem);
+    let (mount_id, fs, ino, meta, _) = resolve_path_vfs(path, true)?;
+    if (meta.mode & 0o170000) == 0o040000 {
+        return Err(VfsError::IsDirectory);
     }
-    mount.fs.truncate_path(rel, size)
+    let table = MOUNT_TABLE.lock();
+    if let Some(m) = table.mounts.iter().find(|m| m.id == mount_id) {
+        if (m.flags & mount_flags::MS_RDONLY) != 0 {
+            return Err(VfsError::ReadOnlyFilesystem);
+        }
+    }
+    drop(table);
+    fs.truncate(ino, size)
 }
 
 pub fn open_path(
@@ -1501,19 +1805,20 @@ pub fn open_path(
     writable: bool,
     append: bool,
 ) -> Result<(Arc<dyn Filesystem>, u64, usize), VfsError> {
-    let table = MOUNT_TABLE.lock();
-    let (mount, rel) = table.resolve(path)?;
-    if writable && (mount.flags & mount_flags::MS_RDONLY) != 0 {
-        return Err(VfsError::ReadOnlyFilesystem);
-    }
-    let ino = mount.fs.resolve_path(rel)?;
-    let meta = mount.fs.read_inode(ino)?;
+    let (mount_id, fs, ino, meta, _) = resolve_path_vfs(path, true)?;
     if (meta.mode & 0o170000) == 0o040000 {
         return Err(VfsError::IsDirectory);
     }
-    mount.fs.open_inode(ino);
+    let table = MOUNT_TABLE.lock();
+    if let Some(m) = table.mounts.iter().find(|m| m.id == mount_id) {
+        if writable && (m.flags & mount_flags::MS_RDONLY) != 0 {
+            return Err(VfsError::ReadOnlyFilesystem);
+        }
+    }
+    drop(table);
+    fs.open_inode(ino);
     let initial_offset = if append { meta.size as usize } else { 0 };
-    Ok((mount.fs.clone(), ino, initial_offset))
+    Ok((fs, ino, initial_offset))
 }
 
 pub fn list_root() -> Result<Vec<String>, VfsError> {
@@ -1525,15 +1830,13 @@ pub fn list_dir_root(path: &str) -> Result<Vec<String>, VfsError> {
 }
 
 pub fn list_dir_root_as(path: &str, _credentials: &Credentials) -> Result<Vec<String>, VfsError> {
+    let (_, fs, ino, meta, canon_path) = resolve_path_vfs(path, true)?;
+    if (meta.mode & 0o170000) != 0o040000 {
+        return Err(VfsError::NotDirectory);
+    }
+    let mut names = fs.read_dir(ino)?;
     let table = MOUNT_TABLE.lock();
-    let norm = normalize_mount_target(path);
-    let mut names = if let Some(mount) = table.find_mount(&norm) {
-        mount.fs.list_dir_path("")?
-    } else {
-        let (mount, rel) = table.resolve(path)?;
-        mount.fs.list_dir_path(rel)?
-    };
-    for child in table.child_mount_names(path) {
+    for child in table.child_mount_names(&canon_path) {
         if !names.contains(&child) {
             names.push(child);
         }
@@ -1547,16 +1850,39 @@ pub fn remove_root(path: &str) -> Result<(), VfsError> {
 }
 
 pub fn remove_root_as(path: &str, _credentials: &Credentials) -> Result<(), VfsError> {
-    let table = MOUNT_TABLE.lock();
     let norm = normalize_mount_target(path);
+    if norm == "/" {
+        return Err(VfsError::InvalidPath);
+    }
+    let table = MOUNT_TABLE.lock();
     if table.find_mount(&norm).is_some() {
         return Err(VfsError::IsDirectory);
     }
-    let (mount, rel) = table.resolve(path)?;
-    if (mount.flags & mount_flags::MS_RDONLY) != 0 {
-        return Err(VfsError::ReadOnlyFilesystem);
+    drop(table);
+
+    let (parent_path, file_name) = match norm.rfind('/') {
+        Some(0) => ("/", &norm[1..]),
+        Some(idx) => (&norm[..idx], &norm[idx + 1..]),
+        None => ("/", norm.as_str()),
+    };
+    let (mount_id, fs, p_ino, _, _) = resolve_path_vfs(parent_path, true)?;
+    let table = MOUNT_TABLE.lock();
+    if let Some(m) = table.mounts.iter().find(|m| m.id == mount_id) {
+        if (m.flags & mount_flags::MS_RDONLY) != 0 {
+            return Err(VfsError::ReadOnlyFilesystem);
+        }
     }
-    mount.fs.remove_file_path(rel)
+    drop(table);
+
+    let child_ino = fs.lookup(p_ino, file_name)?;
+    let meta = fs.read_inode(child_ino)?;
+    if (meta.mode & 0o170000) == 0o040000 {
+        fs.rmdir(p_ino, file_name)?;
+    } else {
+        fs.unlink(p_ino, file_name)?;
+    }
+    DCACHE.lock().invalidate(mount_id, p_ino, file_name);
+    Ok(())
 }
 
 pub fn rename_root(old_path: &str, new_path: &str) -> Result<(), VfsError> {
@@ -1568,16 +1894,69 @@ pub fn rename_root_as(
     new_path: &str,
     _credentials: &Credentials,
 ) -> Result<(), VfsError> {
+    let old_norm = normalize_mount_target(old_path);
+    let new_norm = normalize_mount_target(new_path);
+    let (old_parent_path, old_name) = match old_norm.rfind('/') {
+        Some(0) => ("/", &old_norm[1..]),
+        Some(idx) => (&old_norm[..idx], &old_norm[idx + 1..]),
+        None => ("/", old_norm.as_str()),
+    };
+    let (new_parent_path, new_name) = match new_norm.rfind('/') {
+        Some(0) => ("/", &new_norm[1..]),
+        Some(idx) => (&new_norm[..idx], &new_norm[idx + 1..]),
+        None => ("/", new_norm.as_str()),
+    };
+    let (old_m_id, old_fs, old_p_ino, _, _) = resolve_path_vfs(old_parent_path, true)?;
+    let (new_m_id, new_fs, new_p_ino, _, _) = resolve_path_vfs(new_parent_path, true)?;
+    if !Arc::ptr_eq(&old_fs, &new_fs) {
+        return Err(VfsError::InvalidPath); // EXDEV
+    }
     let table = MOUNT_TABLE.lock();
-    let (old_mount, old_rel) = table.resolve(old_path)?;
-    let (new_mount, new_rel) = table.resolve(new_path)?;
-    if !Arc::ptr_eq(&old_mount.fs, &new_mount.fs) {
+    if let Some(m) = table.mounts.iter().find(|m| m.id == new_m_id) {
+        if (m.flags & mount_flags::MS_RDONLY) != 0 {
+            return Err(VfsError::ReadOnlyFilesystem);
+        }
+    }
+    drop(table);
+    old_fs.rename(old_p_ino, old_name, new_p_ino, new_name)?;
+    let mut dcache = DCACHE.lock();
+    dcache.invalidate(old_m_id, old_p_ino, old_name);
+    dcache.invalidate(new_m_id, new_p_ino, new_name);
+    Ok(())
+}
+
+pub fn symlink_root(linkpath: &str, target: &str, _credentials: &Credentials) -> Result<(), VfsError> {
+    let norm = normalize_mount_target(linkpath);
+    let (parent_path, file_name) = match norm.rfind('/') {
+        Some(0) => ("/", &norm[1..]),
+        Some(idx) => (&norm[..idx], &norm[idx + 1..]),
+        None => ("/", norm.as_str()),
+    };
+    if file_name.is_empty() {
         return Err(VfsError::InvalidPath);
     }
-    if (new_mount.flags & mount_flags::MS_RDONLY) != 0 {
-        return Err(VfsError::ReadOnlyFilesystem);
+    let (mount_id, fs, p_ino, p_meta, _) = resolve_path_vfs(parent_path, true)?;
+    if (p_meta.mode & 0o170000) != 0o040000 {
+        return Err(VfsError::NotDirectory);
     }
-    old_mount.fs.rename_path(old_rel, new_rel)
+    let table = MOUNT_TABLE.lock();
+    if let Some(m) = table.mounts.iter().find(|m| m.id == mount_id) {
+        if (m.flags & mount_flags::MS_RDONLY) != 0 {
+            return Err(VfsError::ReadOnlyFilesystem);
+        }
+    }
+    drop(table);
+    let ino = fs.symlink(p_ino, file_name, target)?;
+    DCACHE.lock().insert(mount_id, p_ino, file_name, DentryValue { ino, mode: 0o120777 });
+    Ok(())
+}
+
+pub fn readlink_root(path: &str, _credentials: &Credentials) -> Result<String, VfsError> {
+    let (_, fs, ino, meta, _) = resolve_path_vfs(path, false)?;
+    if (meta.mode & 0o170000) != 0o120000 {
+        return Err(VfsError::InvalidPath); // POSIX EINVAL
+    }
+    fs.readlink(ino)
 }
 
 pub fn file_info_root(path: &str) -> Result<FileInfo, VfsError> {
@@ -1585,33 +1964,29 @@ pub fn file_info_root(path: &str) -> Result<FileInfo, VfsError> {
 }
 
 pub fn file_info_root_as(path: &str, _credentials: &Credentials) -> Result<FileInfo, VfsError> {
-    let table = MOUNT_TABLE.lock();
-    let norm = normalize_mount_target(path);
-    if let Some(mount) = table.find_mount(&norm) {
-        if let Ok(meta) = mount.fs.read_inode(mount.fs.root_inode()) {
-            return Ok(FileInfo {
-                length: meta.size as usize,
-                allocated_sectors: 0,
-                is_directory: true,
-                uid: meta.uid,
-                gid: meta.gid,
-                mode: meta.mode as u16,
-            });
-        }
-    }
-    let (mount, rel) = table.resolve(path)?;
-    if rel.is_empty() {
-        let meta = mount.fs.read_inode(mount.fs.root_inode())?;
-        return Ok(FileInfo {
-            length: meta.size as usize,
-            allocated_sectors: 0,
-            is_directory: true,
-            uid: meta.uid,
-            gid: meta.gid,
-            mode: meta.mode as u16,
-        });
-    }
-    mount.fs.file_info_path(rel)
+    let (_, _, _, meta, _) = resolve_path_vfs(path, true)?;
+    let length = meta.size as usize;
+    Ok(FileInfo {
+        length,
+        allocated_sectors: if length == 0 { 0 } else { ((length + 511) / 512) as u32 },
+        is_directory: (meta.mode & 0o170000) == 0o040000,
+        uid: meta.uid,
+        gid: meta.gid,
+        mode: meta.mode as u16,
+    })
+}
+
+pub fn file_info_root_nofollow_as(path: &str, _credentials: &Credentials) -> Result<FileInfo, VfsError> {
+    let (_, _, _, meta, _) = resolve_path_vfs(path, false)?;
+    let length = meta.size as usize;
+    Ok(FileInfo {
+        length,
+        allocated_sectors: if length == 0 { 0 } else { ((length + 511) / 512) as u32 },
+        is_directory: (meta.mode & 0o170000) == 0o040000,
+        uid: meta.uid,
+        gid: meta.gid,
+        mode: meta.mode as u16,
+    })
 }
 
 pub fn create_dir_root(path: &str) -> Result<(), VfsError> {

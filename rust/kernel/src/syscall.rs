@@ -456,11 +456,22 @@ fn dispatch_linux(
             syscall: vanta_abi::Syscall::FStat,
             ..
         } => {
-            if number == 4 || number == 6 {
+            if number == 4 {
                 linux_stat_user(arg1, arg2)
+            } else if number == 6 {
+                linux_lstat_user(arg1, arg2)
             } else if number == 262 {
                 if arg2 != 0 {
-                    linux_stat_user(arg2, arg3)
+                    let flags = arg4;
+                    let follow = (flags & 0x100) == 0;
+                    let Ok(path_bytes) = copy_cstring(arg2, 256) else {
+                        return (-(14 as i64)) as u64;
+                    };
+                    let Ok(path_str) = core::str::from_utf8(&path_bytes) else {
+                        return (-(22 as i64)) as u64;
+                    };
+                    let full_path = resolve_vfs_path(arg1, path_str);
+                    linux_stat_helper(&full_path, follow, arg3)
                 } else {
                     linux_fstat_user(arg1, arg3)
                 }
@@ -948,61 +959,55 @@ fn linux_openat_user(directory_fd: u64, path_pointer: u64, flags: u64) -> u64 {
             .unwrap_or(SYSCALL_ERROR);
         }
     }
-    if let Ok(entries) = crate::vfs::list_dir_root(path) {
-        return crate::scheduler::open_directory_current(alloc::string::String::from(path), entries).unwrap_or(SYSCALL_ERROR);
-    }
     let writable = flags & 3 != 0;
     let create = flags & 64 != 0;
     let trunc = flags & 512 != 0;
     let append = flags & 1024 != 0;
 
-    let mut final_path = alloc::string::String::from(path);
-    if let Ok(info) = crate::vfs::file_info_root(path) {
-        if !info.is_directory && info.length < 512 {
-            let mut prefix_buf = [0u8; 16];
-            if let Ok(n) = crate::vfs::read_root_at(path, 0, &mut prefix_buf) {
-                if n >= 9 && &prefix_buf[..9] == b"#symlink:" {
-                    if let Ok(full) = crate::vfs::read_root(path) {
-                        let symlink_target = core::str::from_utf8(&full[9..]).unwrap_or("");
-                        final_path = resolve_vfs_path(u64::MAX - 99, symlink_target);
-                    }
+    let res = crate::vfs::open_path(path, writable, append);
+    match res {
+        Ok((fs, ino, _initial_offset)) => {
+            if writable {
+                if !crate::scheduler::can_mutate_path(path) {
+                    return (-(13 as i64)) as u64; // EACCES
+                }
+                if trunc {
+                    let _ = fs.truncate(ino, 0);
                 }
             }
-        }
-    }
-
-    let target_path = final_path.as_str();
-    let exists = crate::vfs::file_info_root(target_path).is_ok();
-    if !exists {
-        let credentials = crate::scheduler::current_credentials();
-        if writable && create && crate::scheduler::can_mutate_path(target_path) {
-            if crate::vfs::write_root_as(target_path, &[], &credentials).is_err() {
-                return SYSCALL_ERROR;
-            }
-            return crate::scheduler::open_vfs_current(
-                alloc::string::String::from(target_path),
+            crate::scheduler::open_vfs_current(
+                alloc::string::String::from(path),
                 writable,
                 append,
             )
-            .unwrap_or(SYSCALL_ERROR);
+            .unwrap_or(SYSCALL_ERROR)
         }
-        return (-(2 as i64)) as u64; // ENOENT
-    }
-    if writable {
-        if !crate::scheduler::can_mutate_path(target_path) {
-            return (-(13 as i64)) as u64; // EACCES
+        Err(crate::vfs::VfsError::Loop) => (-(40 as i64)) as u64, // ELOOP
+        Err(crate::vfs::VfsError::IsDirectory) => {
+            if let Ok(entries) = crate::vfs::list_dir_root(path) {
+                crate::scheduler::open_directory_current(alloc::string::String::from(path), entries).unwrap_or(SYSCALL_ERROR)
+            } else {
+                (-(21 as i64)) as u64 // EISDIR
+            }
         }
-        if trunc {
+        Err(crate::vfs::VfsError::NotFound) => {
             let credentials = crate::scheduler::current_credentials();
-            let _ = crate::vfs::truncate_root_as(target_path, 0, &credentials);
+            if writable && create && crate::scheduler::can_mutate_path(path) {
+                if crate::vfs::write_root_as(path, &[], &credentials).is_err() {
+                    return (-(13 as i64)) as u64;
+                }
+                return crate::scheduler::open_vfs_current(
+                    alloc::string::String::from(path),
+                    writable,
+                    append,
+                )
+                .unwrap_or(SYSCALL_ERROR);
+            }
+            (-(2 as i64)) as u64 // ENOENT
         }
+        Err(crate::vfs::VfsError::ReadOnlyFilesystem) => (-(30 as i64)) as u64, // EROFS
+        Err(_) => (-(2 as i64)) as u64, // ENOENT
     }
-    crate::scheduler::open_vfs_current(
-        alloc::string::String::from(target_path),
-        writable,
-        append,
-    )
-    .unwrap_or(SYSCALL_ERROR)
 }
 
 fn linux_fstat_user(descriptor: u64, pointer: u64) -> u64 {
@@ -1015,13 +1020,10 @@ fn linux_fstat_user(descriptor: u64, pointer: u64) -> u64 {
     0
 }
 
-fn linux_stat_user(path_pointer: u64, pointer: u64) -> u64 {
-    let Ok(path_bytes) = copy_cstring(path_pointer, 256) else {
-        return SYSCALL_ERROR;
-    };
-    let Ok(path_str) = core::str::from_utf8(&path_bytes) else {
-        return SYSCALL_ERROR;
-    };
+fn linux_stat_helper(path_str: &str, follow: bool, pointer: u64) -> u64 {
+    if pointer == 0 || pointer >= USER_ADDRESS_LIMIT {
+        return (-(14 as i64)) as u64;
+    }
     let resolved = resolve_vfs_path(u64::MAX - 99, path_str);
     let path = resolved.as_str();
     if path.starts_with("/proc/") || path.starts_with("/sys/") {
@@ -1045,16 +1047,25 @@ fn linux_stat_user(path_pointer: u64, pointer: u64) -> u64 {
         stat[56..64].copy_from_slice(&blksize.to_ne_bytes());
         stat[64..72].copy_from_slice(&blocks.to_ne_bytes());
         if copy_to_user(pointer, &stat).is_err() {
-            return SYSCALL_ERROR;
+            return (-(14 as i64)) as u64;
         }
         return 0;
     }
     let credentials = crate::scheduler::current_credentials();
-    let Ok(info) = crate::vfs::file_info_root_as(path, &credentials) else {
-        return SYSCALL_ERROR;
+    let res = if follow {
+        crate::vfs::file_info_root_as(path, &credentials)
+    } else {
+        crate::vfs::file_info_root_nofollow_as(path, &credentials)
+    };
+    let info = match res {
+        Ok(i) => i,
+        Err(crate::vfs::VfsError::Loop) => return (-(40 as i64)) as u64, // ELOOP
+        Err(_) => return (-(2 as i64)) as u64, // ENOENT
     };
     let mut stat = [0u8; 144];
-    let mode = if info.is_directory {
+    let mode = if info.mode != 0 {
+        info.mode as u32
+    } else if info.is_directory {
         0o040755u32
     } else {
         0o100644u32
@@ -1063,8 +1074,8 @@ fn linux_stat_user(path_pointer: u64, pointer: u64) -> u64 {
     let dev = 1u64;
     let ino = 1u64;
     let nlink = 1u64;
-    let uid = 1000u32;
-    let gid = 1000u32;
+    let uid = info.uid;
+    let gid = info.gid;
     let blksize = 4096i64;
     let blocks = (size + 511) / 512;
     stat[0..8].copy_from_slice(&dev.to_ne_bytes());
@@ -1077,9 +1088,29 @@ fn linux_stat_user(path_pointer: u64, pointer: u64) -> u64 {
     stat[56..64].copy_from_slice(&blksize.to_ne_bytes());
     stat[64..72].copy_from_slice(&blocks.to_ne_bytes());
     if copy_to_user(pointer, &stat).is_err() {
-        return SYSCALL_ERROR;
+        return (-(14 as i64)) as u64;
     }
     0
+}
+
+fn linux_stat_user(path_pointer: u64, pointer: u64) -> u64 {
+    let Ok(path_bytes) = copy_cstring(path_pointer, 256) else {
+        return (-(14 as i64)) as u64;
+    };
+    let Ok(path_str) = core::str::from_utf8(&path_bytes) else {
+        return (-(22 as i64)) as u64;
+    };
+    linux_stat_helper(path_str, true, pointer)
+}
+
+fn linux_lstat_user(path_pointer: u64, pointer: u64) -> u64 {
+    let Ok(path_bytes) = copy_cstring(path_pointer, 256) else {
+        return (-(14 as i64)) as u64;
+    };
+    let Ok(path_str) = core::str::from_utf8(&path_bytes) else {
+        return (-(22 as i64)) as u64;
+    };
+    linux_stat_helper(path_str, false, pointer)
 }
 
 fn linux_getdents64_user(descriptor: u64, pointer: u64, length: u64) -> u64 {
@@ -1431,6 +1462,9 @@ fn linux_symlinkat_user(target_ptr: u64, newdirfd: u64, linkpath_ptr: u64) -> u6
     let Ok(target_bytes) = copy_cstring(target_ptr, 512) else {
         return (-(14 as i64)) as u64;
     };
+    let Ok(target_str) = core::str::from_utf8(&target_bytes) else {
+        return (-(14 as i64)) as u64;
+    };
     let Ok(link_bytes) = copy_cstring(linkpath_ptr, 256) else {
         return (-(14 as i64)) as u64;
     };
@@ -1439,18 +1473,26 @@ fn linux_symlinkat_user(target_ptr: u64, newdirfd: u64, linkpath_ptr: u64) -> u6
     };
     let full_link = resolve_vfs_path(newdirfd, link_str);
     let credentials = crate::scheduler::current_credentials();
-    let mut payload = alloc::vec::Vec::from(b"#symlink:".as_slice());
-    payload.extend_from_slice(&target_bytes);
-    if crate::vfs::write_root_as(&full_link, &payload, &credentials).is_ok() {
-        0
-    } else {
-        (-(13 as i64)) as u64 // EACCES
+    match crate::vfs::symlink_root(&full_link, target_str, &credentials) {
+        Ok(()) => 0,
+        Err(crate::vfs::VfsError::AlreadyExists) => (-(17 as i64)) as u64, // EEXIST
+        Err(crate::vfs::VfsError::NotFound) => (-(2 as i64)) as u64, // ENOENT
+        Err(crate::vfs::VfsError::NotDirectory) => (-(20 as i64)) as u64, // ENOTDIR
+        Err(crate::vfs::VfsError::ReadOnlyFilesystem) => (-(30 as i64)) as u64, // EROFS
+        Err(crate::vfs::VfsError::NoSpace) => (-(28 as i64)) as u64, // ENOSPC
+        Err(crate::vfs::VfsError::PermissionDenied) => (-(13 as i64)) as u64, // EACCES
+        Err(crate::vfs::VfsError::Loop) => (-(40 as i64)) as u64, // ELOOP
+        Err(crate::vfs::VfsError::InvalidPath) | Err(crate::vfs::VfsError::NameTooLong) => (-(22 as i64)) as u64, // EINVAL
+        Err(_) => (-(13 as i64)) as u64,
     }
 }
 
 fn linux_readlinkat_user(dirfd: u64, path_ptr: u64, buf_ptr: u64, bufsiz: u64) -> u64 {
     if buf_ptr == 0 || buf_ptr >= USER_ADDRESS_LIMIT {
         return (-(14 as i64)) as u64;
+    }
+    if bufsiz == 0 {
+        return (-(22 as i64)) as u64;
     }
     let Ok(path_bytes) = copy_cstring(path_ptr, 256) else {
         return (-(14 as i64)) as u64;
@@ -1460,16 +1502,17 @@ fn linux_readlinkat_user(dirfd: u64, path_ptr: u64, buf_ptr: u64, bufsiz: u64) -
     };
     let full_path = resolve_vfs_path(dirfd, path_str);
     let credentials = crate::scheduler::current_credentials();
-    let Ok(contents) = crate::vfs::read_root_as(&full_path, &credentials) else {
-        return (-(2 as i64)) as u64; // ENOENT
-    };
-    let target = if contents.starts_with(b"#symlink:") {
-        &contents[9..]
-    } else {
-        return (-(22 as i64)) as u64; // EINVAL
+    let target = match crate::vfs::readlink_root(&full_path, &credentials) {
+        Ok(t) => t,
+        Err(crate::vfs::VfsError::NotFound) => return (-(2 as i64)) as u64, // ENOENT
+        Err(crate::vfs::VfsError::NotDirectory) => return (-(20 as i64)) as u64, // ENOTDIR
+        Err(crate::vfs::VfsError::InvalidPath) => return (-(22 as i64)) as u64, // EINVAL
+        Err(crate::vfs::VfsError::Loop) => return (-(40 as i64)) as u64, // ELOOP
+        Err(crate::vfs::VfsError::PermissionDenied) => return (-(13 as i64)) as u64, // EACCES
+        Err(_) => return (-(22 as i64)) as u64,
     };
     let count = (target.len() as u64).min(bufsiz);
-    if copy_to_user(buf_ptr, &target[..count as usize]).is_err() {
+    if copy_to_user(buf_ptr, &target.as_bytes()[..count as usize]).is_err() {
         return (-(14 as i64)) as u64;
     }
     count
