@@ -49,6 +49,7 @@ pub mod dhcp;
 pub mod af_unix;
 pub mod random;
 mod swap;
+pub mod tmpfs;
 
 #[used]
 #[link_section = ".requests"]

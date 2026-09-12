@@ -238,11 +238,36 @@ pub struct PtyState {
     pub raw: bool,
 }
 
+enum FileBackend {
+    Vfs {
+        path: String,
+        fs: Arc<dyn crate::vfs::Filesystem>,
+        ino: u64,
+    },
+    Buffer { contents: Vec<u8> },
+}
+
 struct OpenFile {
-    path: String,
-    contents: Vec<u8>,
+    backend: FileBackend,
     offset: usize,
     writable: bool,
+}
+
+impl Drop for OpenFile {
+    fn drop(&mut self) {
+        if let FileBackend::Vfs { ref fs, ino, .. } = self.backend {
+            fs.close_inode(ino);
+        }
+    }
+}
+
+impl OpenFile {
+    fn path(&self) -> &str {
+        match &self.backend {
+            FileBackend::Vfs { path, .. } => path.as_str(),
+            FileBackend::Buffer { .. } => "",
+        }
+    }
 }
 
 struct OpenDirectory {
@@ -1642,11 +1667,7 @@ pub fn can_mutate_path(path: &str) -> bool {
         return false;
     };
     let credentials = scheduler.tasks[scheduler.current].credentials;
-    credentials.is_root()
-        || path == "/tmp"
-        || path.starts_with("/tmp/")
-        || path == "/home/vanta"
-        || path.starts_with("/home/vanta/")
+    crate::vfs::can_user_mutate(path, &credentials)
 }
 
 pub fn spawn_current(process: Box<Process>) -> Result<u64, ()> {
@@ -2400,8 +2421,12 @@ pub fn open_current(contents: Vec<u8>) -> Result<u64, ()> {
     open_native_current(String::new(), contents, false, false)
 }
 
+pub fn open_buffer_current(contents: Vec<u8>) -> Result<u64, ()> {
+    open_native_current(String::new(), contents, false, false)
+}
+
 pub fn open_native_current(
-    path: String,
+    _path: String,
     contents: Vec<u8>,
     writable: bool,
     append: bool,
@@ -2420,8 +2445,34 @@ pub fn open_native_current(
             capability: allocate_capability(),
             rights,
             resource: DescriptorResource::File(Arc::new(Mutex::new(OpenFile {
-                path,
-                contents,
+                backend: FileBackend::Buffer { contents },
+                offset: initial_offset,
+                writable,
+            }))),
+        },
+    )
+}
+
+pub fn open_vfs_current(
+    path: String,
+    writable: bool,
+    append: bool,
+) -> Result<u64, ()> {
+    let (fs, ino, initial_offset) = crate::vfs::open_path(&path, writable, append).map_err(|_| ())?;
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
+    let mut rights = Rights::READ | Rights::TRANSFER;
+    if writable {
+        rights |= Rights::WRITE;
+    }
+    install_descriptor(
+        &mut descriptors,
+        FileDescriptor {
+            capability: allocate_capability(),
+            rights,
+            resource: DescriptorResource::File(Arc::new(Mutex::new(OpenFile {
+                backend: FileBackend::Vfs { path, fs, ino },
                 offset: initial_offset,
                 writable,
             }))),
@@ -2775,7 +2826,16 @@ pub fn stat_linux_current(descriptor: u64) -> Result<[u8; 144], ()> {
     let descriptor = current_descriptor(descriptor)?;
     let mut stat = [0u8; 144];
     let (mode, size, is_char) = match descriptor.resource {
-        DescriptorResource::File(file) => (0o100644u32, file.lock().contents.len() as i64, false),
+        DescriptorResource::File(file) => {
+            let file = file.lock();
+            let size = match &file.backend {
+                FileBackend::Buffer { contents } => contents.len() as i64,
+                FileBackend::Vfs { fs, ino, .. } => {
+                    fs.read_inode(*ino).map(|i| i.size as i64).unwrap_or(0)
+                }
+            };
+            (0o100644u32, size, false)
+        }
         DescriptorResource::Directory(_) => (0o040755u32, 4096i64, false),
         DescriptorResource::Tty | DescriptorResource::Serial => (0o020666u32, 0i64, true),
         DescriptorResource::PipeRead(_) | DescriptorResource::PipeWrite(_) => {
@@ -3022,10 +3082,16 @@ pub fn seek_current(descriptor: u64, offset: i64, whence: u64) -> Result<u64, ()
         return Err(());
     };
     let mut file = file.lock();
+    let current_size = match &file.backend {
+        FileBackend::Buffer { contents } => contents.len(),
+        FileBackend::Vfs { fs, ino, .. } => {
+            fs.read_inode(*ino).map(|i| i.size as usize).unwrap_or(0)
+        }
+    };
     let base = match whence {
         0 => 0,
         1 => file.offset,
-        2 => file.contents.len(),
+        2 => current_size,
         _ => return Err(()),
     };
     let magnitude: usize = offset.unsigned_abs().try_into().map_err(|_| ())?;
@@ -3034,9 +3100,6 @@ pub fn seek_current(descriptor: u64, offset: i64, whence: u64) -> Result<u64, ()
     } else {
         base.checked_add(magnitude).ok_or(())?
     };
-    if position > file.contents.len() {
-        return Err(());
-    }
     file.offset = position;
     Ok(position as u64)
 }
@@ -3047,7 +3110,16 @@ pub fn stat_current(descriptor: u64) -> Result<(u64, u64), ()> {
         return Err(());
     }
     match descriptor.resource {
-        DescriptorResource::File(file) => Ok((file.lock().contents.len() as u64, 0o100644)),
+        DescriptorResource::File(file) => {
+            let file = file.lock();
+            let size = match &file.backend {
+                FileBackend::Buffer { contents } => contents.len() as u64,
+                FileBackend::Vfs { fs, ino, .. } => {
+                    fs.read_inode(*ino).map(|i| i.size).unwrap_or(0)
+                }
+            };
+            Ok((size, 0o100644))
+        }
         DescriptorResource::Directory(_) => Ok((0, 0o040755)),
         _ => Err(()),
     }
@@ -3081,10 +3153,22 @@ pub fn read_current(descriptor: u64, length: usize) -> Result<Vec<u8>, ()> {
     match descriptor.resource {
         DescriptorResource::File(file) => {
             let mut file = file.lock();
-            let end = file.offset.saturating_add(length).min(file.contents.len());
-            let bytes = file.contents[file.offset..end].to_vec();
-            file.offset = end;
-            Ok(bytes)
+            let offset = file.offset;
+            match &mut file.backend {
+                FileBackend::Buffer { contents } => {
+                    let end = offset.saturating_add(length).min(contents.len());
+                    let bytes = contents[offset..end].to_vec();
+                    file.offset = end;
+                    Ok(bytes)
+                }
+                FileBackend::Vfs { fs, ino, .. } => {
+                    let mut buf = alloc::vec![0u8; length];
+                    let read_len = fs.read(*ino, offset as u64, &mut buf).map_err(|_| ())?;
+                    buf.truncate(read_len);
+                    file.offset = offset.saturating_add(read_len);
+                    Ok(buf)
+                }
+            }
         }
         DescriptorResource::Directory(directory) => {
             let mut directory = directory.lock();
@@ -3274,17 +3358,25 @@ pub fn write_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
                 return Err(());
             }
             let offset = file.offset;
-            if offset > file.contents.len() {
-                file.contents.resize(offset, 0);
+            match &mut file.backend {
+                FileBackend::Buffer { contents } => {
+                    if offset > contents.len() {
+                        contents.resize(offset, 0);
+                    }
+                    let end = offset.saturating_add(bytes.len());
+                    if end > contents.len() {
+                        contents.resize(end, 0);
+                    }
+                    contents[offset..end].copy_from_slice(bytes);
+                    file.offset = end;
+                    Ok(())
+                }
+                FileBackend::Vfs { fs, ino, .. } => {
+                    let written = fs.write(*ino, offset as u64, bytes).map_err(|_| ())?;
+                    file.offset = file.offset.saturating_add(written);
+                    Ok(())
+                }
             }
-            let end = offset.saturating_add(bytes.len());
-            if end > file.contents.len() {
-                file.contents.resize(end, 0);
-            }
-            file.contents[offset..end].copy_from_slice(bytes);
-            file.offset = end;
-            let credentials = current_credentials();
-            crate::vfs::write_root_as(&file.path, &file.contents, &credentials).map_err(|_| ())
         }
         DescriptorResource::EventFd(eventfd) => {
             if bytes.len() < 8 {
@@ -3562,7 +3654,7 @@ pub fn descriptor_dir_path(descriptor: u64) -> Result<String, ()> {
     let desc = current_descriptor(descriptor)?;
     match desc.resource {
         DescriptorResource::Directory(ref d) => Ok(d.lock().path.clone()),
-        DescriptorResource::File(ref f) => Ok(f.lock().path.clone()),
+        DescriptorResource::File(ref f) => Ok(String::from(f.lock().path())),
         _ => Err(()),
     }
 }
@@ -3620,7 +3712,10 @@ pub fn canonicalize_path(base: &str, relative: &str) -> alloc::string::String {
 pub fn chdir_current(path: &str) -> Result<(), ()> {
     let cur = current_cwd();
     let target = canonicalize_path(&cur, path);
-    if target == "/" || target == "/tmp" || target.starts_with("/tmp/") || crate::vfs::list_dir_root(&target).is_ok() {
+    if target == "/"
+        || crate::vfs::file_info_root(&target).map(|info| info.is_directory).unwrap_or(false)
+        || crate::vfs::list_dir_root(&target).is_ok()
+    {
         set_current_cwd(target);
         Ok(())
     } else {
@@ -3637,8 +3732,8 @@ pub fn fchdir_current(descriptor: u64) -> Result<(), ()> {
             Ok(())
         }
         DescriptorResource::File(ref file) => {
-            let path = file.lock().path.clone();
-            if crate::vfs::list_dir_root(&path).is_ok() {
+            let path = String::from(file.lock().path());
+            if !path.is_empty() && crate::vfs::list_dir_root(&path).is_ok() {
                 set_current_cwd(path);
                 Ok(())
             } else {
@@ -3731,9 +3826,19 @@ pub fn pread_current(descriptor: u64, length: usize, offset: u64) -> Result<Vec<
     match desc.resource {
         DescriptorResource::File(file) => {
             let file = file.lock();
-            let start = (offset as usize).min(file.contents.len());
-            let end = start.saturating_add(length).min(file.contents.len());
-            Ok(file.contents[start..end].to_vec())
+            match &file.backend {
+                FileBackend::Buffer { contents } => {
+                    let start = (offset as usize).min(contents.len());
+                    let end = start.saturating_add(length).min(contents.len());
+                    Ok(contents[start..end].to_vec())
+                }
+                FileBackend::Vfs { fs, ino, .. } => {
+                    let mut buf = alloc::vec![0u8; length];
+                    let read_len = fs.read(*ino, offset, &mut buf).map_err(|_| ())?;
+                    buf.truncate(read_len);
+                    Ok(buf)
+                }
+            }
         }
         _ => Err(()),
     }
@@ -3750,15 +3855,21 @@ pub fn pwrite_current(descriptor: u64, bytes: &[u8], offset: u64) -> Result<usiz
             if !file.writable {
                 return Err(());
             }
-            let start = offset as usize;
-            let end = start.checked_add(bytes.len()).ok_or(())?;
-            if end > file.contents.len() {
-                file.contents.resize(end, 0);
+            match &mut file.backend {
+                FileBackend::Buffer { contents } => {
+                    let start = offset as usize;
+                    let end = start.checked_add(bytes.len()).ok_or(())?;
+                    if end > contents.len() {
+                        contents.resize(end, 0);
+                    }
+                    contents[start..end].copy_from_slice(bytes);
+                    Ok(bytes.len())
+                }
+                FileBackend::Vfs { fs, ino, .. } => {
+                    let written = fs.write(*ino, offset, bytes).map_err(|_| ())?;
+                    Ok(written)
+                }
             }
-            file.contents[start..end].copy_from_slice(bytes);
-            let credentials = current_credentials();
-            let _ = crate::vfs::write_root_as(&file.path, &file.contents, &credentials);
-            Ok(bytes.len())
         }
         _ => Err(()),
     }
@@ -3775,9 +3886,15 @@ pub fn truncate_current(descriptor: u64, length: u64) -> Result<(), ()> {
             if !file.writable {
                 return Err(());
             }
-            file.contents.resize(length as usize, 0);
-            let credentials = current_credentials();
-            crate::vfs::write_root_as(&file.path, &file.contents, &credentials).map_err(|_| ())
+            match &mut file.backend {
+                FileBackend::Buffer { contents } => {
+                    contents.resize(length as usize, 0);
+                    Ok(())
+                }
+                FileBackend::Vfs { fs, ino, .. } => {
+                    fs.truncate(*ino, length).map_err(|_| ())
+                }
+            }
         }
         _ => Err(()),
     }

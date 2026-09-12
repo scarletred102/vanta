@@ -264,6 +264,7 @@ fn build_default_image() -> Result<(), String> {
     let linux_dynamic_fork = read_file(root.join("target/compat/linux/dynamic-fork"))?;
     let linux_dynamic_epoll = read_file(root.join("target/compat/linux/dynamic-epoll"))?;
     let linux_dynamic_proc = read_file(root.join("target/compat/linux/dynamic-proc"))?;
+    let linux_mount_test = read_file(root.join("target/compat/linux/mount-test"))?;
     let busybox = read_file(root.join("target/compat/linux/busybox"))?;
     let lua = read_file(root.join("target/compat/linux/lua"))?;
     let linux_wget = read_file(root.join("target/x86_64-unknown-linux-musl/release/wget"))?;
@@ -707,6 +708,13 @@ fn build_default_image() -> Result<(), String> {
             gid: 0,
         },
         RootFile {
+            path: "/compat/linux/mount-test",
+            contents: &linux_mount_test,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
             path: "/bin/busybox",
             contents: &busybox,
             mode: 0o755,
@@ -1099,6 +1107,7 @@ fn build_linux_samples(root: &Path) -> Result<(), String> {
         ("dynamic-fork.c", "dynamic-fork"),
         ("dynamic-epoll.c", "dynamic-epoll"),
         ("dynamic-proc.c", "dynamic-proc"),
+        ("mount-test.c", "mount-test"),
     ] {
         let sample_output = output.join(executable);
         let status = Command::new("zig")

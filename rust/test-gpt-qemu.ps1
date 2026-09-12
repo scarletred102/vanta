@@ -240,6 +240,15 @@ $common = @(
     "[proc] destroy_address_space space=",
     "[linux-epoll] epoll and eventfd multiplexing verified",
     "[linux-proc] /proc virtual filesystem verified",
+    "[mount-test] starting Dynamic Multi-Mount Verification (Test Vector 1)...",
+    "[mount-test] PASS: mounted secondary tmpfs at /mnt/ram",
+    "[mount-test] PASS: wrote 10 MiB to /mnt/ram/test_10mb.bin",
+    "[mount-test] PASS: memory dropped by at least 10 MiB verified",
+    "[mount-test] PASS: 10 MiB data verified bit-for-bit",
+    "[mount-test] PASS: umount2(/mnt/ram) succeeded",
+    "[mount-test] PASS: memory completely reclaimed verified",
+    "[mount-test] PASS: /mnt/ram unmounted and inaccessible",
+    "[mount-test] ALL TESTS PASSED",
     "desktop: GUI window surface composition verified",
     "audiod: PCM audio stream playback verified",
     "[orbital] window compositor initialized",
@@ -274,4 +283,4 @@ Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required 
 Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
 
 Write-Host "[test] GPT Gate A, Gate B, Gate C, Gate D, Gate E, and Gate F acceptance passed"
-$first -split "`n" | Where-Object { $_ -match "afunix|SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net|http-server|wget" } | ForEach-Object { Write-Host $_ }
+$first -split "`n" | Where-Object { $_ -match "afunix|SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net|http-server|wget|mount-test" } | ForEach-Object { Write-Host $_ }

@@ -384,6 +384,15 @@ fn gate_d_acceptance() -> bool {
     print_val(b"[linux] dynamic-proc", dyn_proc, dyn_proc_exit);
     let dyn_proc_ok = dyn_proc != u64::MAX && dyn_proc_exit == 0;
 
+    let mount_test = vanta_userland::spawn_linux(b"/compat/linux/mount-test");
+    let mount_test_exit = if mount_test != u64::MAX {
+        vanta_userland::wait(mount_test)
+    } else {
+        999
+    };
+    print_val(b"[linux] mount-test", mount_test, mount_test_exit);
+    let mount_test_ok = mount_test != u64::MAX && mount_test_exit == 0;
+
     let dyn_shlib = vanta_userland::spawn_linux(b"/compat/linux/dynamic-shlib");
     let dyn_shlib_exit = if dyn_shlib != u64::MAX {
         vanta_userland::wait(dyn_shlib)
@@ -486,6 +495,7 @@ fn gate_d_acceptance() -> bool {
         && dyn_fork_ok
         && dyn_epoll_ok
         && dyn_proc_ok
+        && mount_test_ok
         && dyn_shlib_ok
         && displayd_ok
         && desktop_ok

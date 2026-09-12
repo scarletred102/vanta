@@ -1,12 +1,13 @@
 //! Writable VantaFS volume and root VFS mount.
 
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 use vanta_abi::Credentials;
 use vanta_gpt::RootPartition;
-use vanta_redoxfs_adapter::{RedoxFsBackend, SectorError, SectorIo};
+use vanta_redoxfs_adapter::{redoxfs, RedoxFsBackend, SectorError, SectorIo};
 
 use crate::storage::{BlockDevice, RamDisk, StorageError, SECTOR_SIZE};
 use crate::virtio::VirtioBlock;
@@ -19,9 +20,9 @@ const MAX_DIRECTORY_ENTRIES: usize = 8;
 const DIRECTORY_ENTRY_SIZE: usize = 64;
 const MAX_PATH_LENGTH: usize = 48;
 
-static ROOT: Mutex<Vfs<RootDevice>> = Mutex::new(Vfs::new());
-static REDOX_ROOT: Mutex<Option<RedoxFsBackend<RootDevice>>> = Mutex::new(None);
-static TMP: Mutex<Option<VantaFs<RamDisk>>> = Mutex::new(None);
+static ROOT: Mutex<Option<Arc<VantaFsAdapter>>> = Mutex::new(None);
+static REDOX_ROOT: Mutex<Option<Arc<RedoxFsAdapter>>> = Mutex::new(None);
+static MOUNT_TABLE: Mutex<MountTable> = Mutex::new(MountTable::new());
 
 pub enum RootDevice {
     Ram(RamDisk),
@@ -83,10 +84,321 @@ pub enum VfsError {
     NotFound,
     AlreadyExists,
     IsDirectory,
+    NotDirectory,
     NotEmpty,
     NoSpace,
     FileTooLarge,
     RedoxFs,
+    PermissionDenied,
+    ReadOnlyFilesystem,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InodeMetadata {
+    pub ino: u64,
+    pub size: u64,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub atime: u64,
+    pub mtime: u64,
+    pub ctime: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StatFs {
+    pub f_type: u64,
+    pub f_bsize: u64,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    pub f_bavail: u64,
+    pub f_files: u64,
+    pub f_ffree: u64,
+}
+
+pub mod mount_flags {
+    pub const MS_RDONLY: u32 = 1;
+    pub const MS_NOSUID: u32 = 2;
+    pub const MS_NODEV: u32 = 4;
+    pub const MS_NOEXEC: u32 = 8;
+    pub const MS_SYNCHRONOUS: u32 = 16;
+    pub const MS_REMOUNT: u32 = 32;
+    pub const MS_MANDLOCK: u32 = 64;
+    pub const MS_DIRSYNC: u32 = 128;
+    pub const MS_NOATIME: u32 = 1024;
+    pub const MS_NODIRATIME: u32 = 2048;
+    pub const MS_BIND: u32 = 4096;
+}
+
+pub mod umount_flags {
+    pub const MNT_FORCE: u32 = 1;
+    pub const MNT_DETACH: u32 = 2;
+    pub const MNT_EXPIRE: u32 = 4;
+    pub const UMOUNT_NOFOLLOW: u32 = 8;
+}
+
+pub trait Filesystem: Send + Sync {
+    fn root_inode(&self) -> u64;
+    fn lookup(&self, parent: u64, name: &str) -> Result<u64, VfsError>;
+    fn read_inode(&self, ino: u64) -> Result<InodeMetadata, VfsError>;
+    fn create(&self, parent: u64, name: &str, mode: u32) -> Result<u64, VfsError>;
+    fn mkdir(&self, parent: u64, name: &str, mode: u32) -> Result<u64, VfsError>;
+    fn unlink(&self, parent: u64, name: &str) -> Result<(), VfsError>;
+    fn rmdir(&self, parent: u64, name: &str) -> Result<(), VfsError>;
+    fn symlink(&self, parent: u64, name: &str, target: &str) -> Result<u64, VfsError>;
+    fn readlink(&self, ino: u64) -> Result<String, VfsError>;
+    fn rename(&self, old_parent: u64, old_name: &str, new_parent: u64, new_name: &str) -> Result<(), VfsError>;
+    fn read(&self, ino: u64, offset: u64, buf: &mut [u8]) -> Result<usize, VfsError>;
+    fn write(&self, ino: u64, offset: u64, buf: &[u8]) -> Result<usize, VfsError>;
+    fn truncate(&self, ino: u64, size: u64) -> Result<(), VfsError>;
+    fn statfs(&self) -> Result<StatFs, VfsError>;
+    fn sync(&self) -> Result<(), VfsError>;
+    fn read_dir(&self, ino: u64) -> Result<Vec<String>, VfsError>;
+    fn open_inode(&self, _ino: u64) {}
+    fn close_inode(&self, _ino: u64) {}
+
+    fn resolve_path(&self, path: &str) -> Result<u64, VfsError> {
+        let mut curr = self.root_inode();
+        let path = path.trim_matches('/');
+        if path.is_empty() {
+            return Ok(curr);
+        }
+        for component in path.split('/') {
+            if component.is_empty() || component == "." {
+                continue;
+            }
+            curr = self.lookup(curr, component)?;
+        }
+        Ok(curr)
+    }
+
+    fn read_file_path(&self, path: &str) -> Result<Vec<u8>, VfsError> {
+        let ino = self.resolve_path(path)?;
+        let meta = self.read_inode(ino)?;
+        let mut data = alloc::vec![0u8; meta.size as usize];
+        self.read(ino, 0, &mut data)?;
+        Ok(data)
+    }
+
+    fn write_file_path(&self, path: &str, data: &[u8]) -> Result<(), VfsError> {
+        let path = path.trim_matches('/');
+        let (parent_path, file_name) = match path.rfind('/') {
+            Some(idx) => (&path[..idx], &path[idx + 1..]),
+            None => ("", path),
+        };
+        let parent_ino = self.resolve_path(parent_path)?;
+        let ino = match self.lookup(parent_ino, file_name) {
+            Ok(existing) => existing,
+            Err(VfsError::NotFound) => self.create(parent_ino, file_name, 0o644)?,
+            Err(e) => return Err(e),
+        };
+        self.truncate(ino, 0)?;
+        self.write(ino, 0, data)?;
+        Ok(())
+    }
+
+    fn remove_file_path(&self, path: &str) -> Result<(), VfsError> {
+        let path = path.trim_matches('/');
+        let (parent_path, file_name) = match path.rfind('/') {
+            Some(idx) => (&path[..idx], &path[idx + 1..]),
+            None => ("", path),
+        };
+        let parent_ino = self.resolve_path(parent_path)?;
+        let ino = self.lookup(parent_ino, file_name)?;
+        let meta = self.read_inode(ino)?;
+        if (meta.mode & 0o170000) == 0o040000 {
+            self.rmdir(parent_ino, file_name)
+        } else {
+            self.unlink(parent_ino, file_name)
+        }
+    }
+
+    fn rename_path(&self, old_path: &str, new_path: &str) -> Result<(), VfsError> {
+        let old_path = old_path.trim_matches('/');
+        let (old_parent_path, old_name) = match old_path.rfind('/') {
+            Some(idx) => (&old_path[..idx], &old_path[idx + 1..]),
+            None => ("", old_path),
+        };
+        let new_path = new_path.trim_matches('/');
+        let (new_parent_path, new_name) = match new_path.rfind('/') {
+            Some(idx) => (&new_path[..idx], &new_path[idx + 1..]),
+            None => ("", new_path),
+        };
+        let old_parent_ino = self.resolve_path(old_parent_path)?;
+        let new_parent_ino = self.resolve_path(new_parent_path)?;
+        self.rename(old_parent_ino, old_name, new_parent_ino, new_name)
+    }
+
+    fn create_dir_path(&self, path: &str) -> Result<(), VfsError> {
+        let path = path.trim_matches('/');
+        if path.is_empty() {
+            return Ok(());
+        }
+        let mut curr = self.root_inode();
+        for component in path.split('/') {
+            if component.is_empty() || component == "." {
+                continue;
+            }
+            curr = match self.lookup(curr, component) {
+                Ok(ino) => ino,
+                Err(VfsError::NotFound) => self.mkdir(curr, component, 0o755)?,
+                Err(e) => return Err(e),
+            };
+        }
+        Ok(())
+    }
+
+    fn list_dir_path(&self, path: &str) -> Result<Vec<String>, VfsError> {
+        let ino = self.resolve_path(path)?;
+        self.read_dir(ino)
+    }
+
+    fn file_info_path(&self, path: &str) -> Result<FileInfo, VfsError> {
+        let ino = self.resolve_path(path)?;
+        let meta = self.read_inode(ino)?;
+        let length = meta.size as usize;
+        Ok(FileInfo {
+            length,
+            allocated_sectors: if length == 0 { 0 } else { ((length + 511) / 512) as u32 },
+            is_directory: (meta.mode & 0o170000) == 0o040000,
+            uid: meta.uid,
+            gid: meta.gid,
+            mode: meta.mode as u16,
+        })
+    }
+
+    fn read_at_path(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, VfsError> {
+        let ino = self.resolve_path(path)?;
+        self.read(ino, offset, buf)
+    }
+
+    fn write_at_path(&self, path: &str, offset: u64, buf: &[u8]) -> Result<usize, VfsError> {
+        let ino = self.resolve_path(path)?;
+        self.write(ino, offset, buf)
+    }
+
+    fn truncate_path(&self, path: &str, size: u64) -> Result<(), VfsError> {
+        let ino = self.resolve_path(path)?;
+        self.truncate(ino, size)
+    }
+}
+
+pub fn normalize_mount_target(target: &str) -> String {
+    let t = target.trim();
+    if t.is_empty() || t == "/" {
+        return String::from("/");
+    }
+    let mut s = String::new();
+    if !t.starts_with('/') {
+        s.push('/');
+    }
+    s.push_str(t.trim_end_matches('/'));
+    s
+}
+
+pub struct MountPoint {
+    pub prefix: String,
+    pub fs: Arc<dyn Filesystem>,
+    pub flags: u32,
+}
+
+pub struct MountTable {
+    mounts: Vec<MountPoint>,
+}
+
+impl MountTable {
+    pub const fn new() -> Self {
+        Self { mounts: Vec::new() }
+    }
+
+    pub fn mount(&mut self, target: &str, fs: Arc<dyn Filesystem>, flags: u32) -> Result<(), VfsError> {
+        let norm_target = normalize_mount_target(target);
+        if let Some(pos) = self.mounts.iter().position(|m| m.prefix == norm_target) {
+            if (flags & mount_flags::MS_REMOUNT) != 0 || norm_target == "/" {
+                self.mounts[pos] = MountPoint {
+                    prefix: norm_target,
+                    fs,
+                    flags,
+                };
+                return Ok(());
+            } else {
+                return Err(VfsError::AlreadyExists);
+            }
+        }
+        self.mounts.push(MountPoint {
+            prefix: norm_target,
+            fs,
+            flags,
+        });
+        self.mounts.sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
+        Ok(())
+    }
+
+    pub fn umount(&mut self, target: &str, _flags: u32) -> Result<(), VfsError> {
+        let norm_target = normalize_mount_target(target);
+        if norm_target == "/" {
+            return Err(VfsError::InvalidPath);
+        }
+        if let Some(pos) = self.mounts.iter().position(|m| m.prefix == norm_target) {
+            self.mounts.remove(pos);
+            Ok(())
+        } else {
+            Err(VfsError::NotFound)
+        }
+    }
+
+    pub fn resolve<'a>(&'a self, path: &'a str) -> Result<(&'a MountPoint, &'a str), VfsError> {
+        let norm_path = if path.is_empty() { "/" } else { path };
+        for mount in &self.mounts {
+            if mount.prefix == "/" {
+                continue;
+            }
+            if norm_path == mount.prefix {
+                return Ok((mount, ""));
+            }
+            if let Some(rest) = norm_path.strip_prefix(&mount.prefix) {
+                if rest.starts_with('/') {
+                    return Ok((mount, rest.trim_start_matches('/')));
+                }
+            }
+        }
+        for mount in &self.mounts {
+            if mount.prefix == "/" {
+                let rel = norm_path.trim_start_matches('/');
+                return Ok((mount, rel));
+            }
+        }
+        Err(VfsError::NotMounted)
+    }
+
+    pub fn find_mount(&self, target: &str) -> Option<&MountPoint> {
+        let norm = normalize_mount_target(target);
+        self.mounts.iter().find(|m| m.prefix == norm)
+    }
+
+    pub fn child_mount_names(&self, parent_dir: &str) -> Vec<String> {
+        let parent = normalize_mount_target(parent_dir);
+        let prefix = if parent == "/" {
+            String::from("/")
+        } else {
+            let mut s = parent.clone();
+            s.push('/');
+            s
+        };
+        let mut children = Vec::new();
+        for mount in &self.mounts {
+            if mount.prefix == "/" {
+                continue;
+            }
+            if let Some(rest) = mount.prefix.strip_prefix(&prefix) {
+                let name = rest.split('/').next().unwrap_or("");
+                if !name.is_empty() && !children.iter().any(|c| c == name) {
+                    children.push(String::from(name));
+                }
+            }
+        }
+        children
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -537,175 +849,693 @@ impl<D: BlockDevice> Vfs<D> {
     }
 }
 
+pub struct VantaFsAdapter {
+    inner: Mutex<Vfs<RootDevice>>,
+}
+
+impl VantaFsAdapter {
+    pub fn new(inner: Vfs<RootDevice>) -> Self {
+        Self {
+            inner: Mutex::new(inner),
+        }
+    }
+}
+
+impl Filesystem for VantaFsAdapter {
+    fn root_inode(&self) -> u64 {
+        1
+    }
+
+    fn lookup(&self, _parent: u64, _name: &str) -> Result<u64, VfsError> {
+        Ok(1)
+    }
+
+    fn read_inode(&self, _ino: u64) -> Result<InodeMetadata, VfsError> {
+        Ok(InodeMetadata {
+            ino: 1,
+            size: 0,
+            mode: 0o040755,
+            uid: 0,
+            gid: 0,
+            atime: 0,
+            mtime: 0,
+            ctime: 0,
+        })
+    }
+
+    fn create(&self, _parent: u64, _name: &str, _mode: u32) -> Result<u64, VfsError> {
+        Ok(1)
+    }
+
+    fn mkdir(&self, _parent: u64, _name: &str, _mode: u32) -> Result<u64, VfsError> {
+        Ok(1)
+    }
+
+    fn unlink(&self, _parent: u64, _name: &str) -> Result<(), VfsError> {
+        Ok(())
+    }
+
+    fn rmdir(&self, _parent: u64, _name: &str) -> Result<(), VfsError> {
+        Ok(())
+    }
+
+    fn symlink(&self, _parent: u64, _name: &str, _target: &str) -> Result<u64, VfsError> {
+        Err(VfsError::InvalidPath)
+    }
+
+    fn readlink(&self, _ino: u64) -> Result<String, VfsError> {
+        Err(VfsError::NotFound)
+    }
+
+    fn rename(&self, _old_parent: u64, _old_name: &str, _new_parent: u64, _new_name: &str) -> Result<(), VfsError> {
+        Ok(())
+    }
+
+    fn read(&self, _ino: u64, _offset: u64, _buf: &mut [u8]) -> Result<usize, VfsError> {
+        Ok(0)
+    }
+
+    fn write(&self, _ino: u64, _offset: u64, _buf: &[u8]) -> Result<usize, VfsError> {
+        Ok(0)
+    }
+
+    fn truncate(&self, _ino: u64, _size: u64) -> Result<(), VfsError> {
+        Ok(())
+    }
+
+    fn statfs(&self) -> Result<StatFs, VfsError> {
+        Ok(StatFs {
+            f_type: 0x56414e54,
+            f_bsize: 512,
+            f_blocks: 1000,
+            f_bfree: 500,
+            f_bavail: 500,
+            f_files: 100,
+            f_ffree: 50,
+        })
+    }
+
+    fn sync(&self) -> Result<(), VfsError> {
+        Ok(())
+    }
+
+    fn read_dir(&self, _ino: u64) -> Result<Vec<String>, VfsError> {
+        self.inner.lock().list()
+    }
+
+    fn read_file_path(&self, path: &str) -> Result<Vec<u8>, VfsError> {
+        self.inner.lock().read(path)
+    }
+
+    fn write_file_path(&self, path: &str, data: &[u8]) -> Result<(), VfsError> {
+        self.inner.lock().write(path, data)
+    }
+
+    fn remove_file_path(&self, path: &str) -> Result<(), VfsError> {
+        self.inner.lock().remove(path)
+    }
+
+    fn rename_path(&self, old_path: &str, new_path: &str) -> Result<(), VfsError> {
+        self.inner.lock().rename(old_path, new_path)
+    }
+
+    fn create_dir_path(&self, path: &str) -> Result<(), VfsError> {
+        self.inner.lock().create_dir(path)
+    }
+
+    fn list_dir_path(&self, path: &str) -> Result<Vec<String>, VfsError> {
+        let prefix = if path == "/" || path.is_empty() {
+            String::from("/")
+        } else {
+            let mut p = String::from("/");
+            p.push_str(path.trim_matches('/'));
+            p.push('/');
+            p
+        };
+        let mut names = Vec::new();
+        for entry in self.inner.lock().list()? {
+            if let Some(name) = entry.strip_prefix(&prefix) {
+                if !name.is_empty() && !name.contains('/') {
+                    names.push(name.trim_end_matches('/').into());
+                }
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    fn file_info_path(&self, path: &str) -> Result<FileInfo, VfsError> {
+        self.inner.lock().info(path)
+    }
+
+    fn read_at_path(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, VfsError> {
+        let full = self.inner.lock().read(path)?;
+        let start = (offset as usize).min(full.len());
+        let end = start.saturating_add(buf.len()).min(full.len());
+        let count = end - start;
+        buf[..count].copy_from_slice(&full[start..end]);
+        Ok(count)
+    }
+
+    fn write_at_path(&self, path: &str, offset: u64, buf: &[u8]) -> Result<usize, VfsError> {
+        let mut inner = self.inner.lock();
+        let mut full = inner.read(path).unwrap_or_default();
+        let start = offset as usize;
+        let end = start.saturating_add(buf.len());
+        if end > full.len() {
+            full.resize(end, 0);
+        }
+        full[start..end].copy_from_slice(buf);
+        inner.write(path, &full)?;
+        Ok(buf.len())
+    }
+
+    fn truncate_path(&self, path: &str, size: u64) -> Result<(), VfsError> {
+        let mut inner = self.inner.lock();
+        let mut full = inner.read(path).unwrap_or_default();
+        full.resize(size as usize, 0);
+        inner.write(path, &full)
+    }
+}
+
+fn ensure_absolute(path: &str) -> String {
+    let mut s = String::from("/");
+    s.push_str(path.trim_start_matches('/'));
+    s
+}
+
+pub struct RedoxFsAdapter {
+    backend: Mutex<Option<RedoxFsBackend<RootDevice>>>,
+}
+
+impl RedoxFsAdapter {
+    pub fn new(backend: RedoxFsBackend<RootDevice>) -> Self {
+        Self {
+            backend: Mutex::new(Some(backend)),
+        }
+    }
+
+    pub fn read_raw_sector(&self, sector: u64, buffer: &mut [u8; 512]) -> Result<(), StorageError> {
+        let mut guard = self.backend.lock();
+        if let Some(backend) = guard.as_mut() {
+            backend.read_raw_sector(sector, buffer).map_err(|_| StorageError::IoFailed)
+        } else {
+            Err(StorageError::DeviceUnavailable)
+        }
+    }
+
+    pub fn write_raw_sector(&self, sector: u64, buffer: &[u8; 512]) -> Result<(), StorageError> {
+        let mut guard = self.backend.lock();
+        if let Some(backend) = guard.as_mut() {
+            backend.write_raw_sector(sector, buffer).map_err(|_| StorageError::IoFailed)
+        } else {
+            Err(StorageError::DeviceUnavailable)
+        }
+    }
+}
+
+impl Filesystem for RedoxFsAdapter {
+    fn root_inode(&self) -> u64 {
+        1
+    }
+
+    fn lookup(&self, parent: u64, name: &str) -> Result<u64, VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        backend.filesystem.tx(|tx| {
+            let node = tx.find_node(redoxfs::TreePtr::new(parent as u32), name)?;
+            Ok(node.ptr().id() as u64)
+        }).map_err(|_| VfsError::NotFound)
+    }
+
+    fn read_inode(&self, ino: u64) -> Result<InodeMetadata, VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        backend.filesystem.tx(|tx| {
+            let node: redoxfs::TreeData<redoxfs::Node> = tx.read_tree(redoxfs::TreePtr::new(ino as u32))?;
+            Ok(InodeMetadata {
+                ino,
+                size: node.data().size(),
+                mode: node.data().mode() as u32,
+                uid: node.data().uid(),
+                gid: node.data().gid(),
+                atime: 0,
+                mtime: node.data().mtime().0,
+                ctime: node.data().ctime().0,
+            })
+        }).map_err(|_| VfsError::NotFound)
+    }
+
+    fn create(&self, parent: u64, name: &str, mode: u32) -> Result<u64, VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        backend.filesystem.tx(|tx| {
+            let node = tx.create_node(
+                redoxfs::TreePtr::new(parent as u32),
+                name,
+                redoxfs::Node::MODE_FILE | (mode as u16 & 0o777),
+                0,
+                0,
+            )?;
+            Ok(node.ptr().id() as u64)
+        }).map_err(|_| VfsError::NoSpace)
+    }
+
+    fn mkdir(&self, parent: u64, name: &str, mode: u32) -> Result<u64, VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        backend.filesystem.tx(|tx| {
+            let node = tx.create_node(
+                redoxfs::TreePtr::new(parent as u32),
+                name,
+                redoxfs::Node::MODE_DIR | (mode as u16 & 0o777),
+                0,
+                0,
+            )?;
+            Ok(node.ptr().id() as u64)
+        }).map_err(|_| VfsError::NoSpace)
+    }
+
+    fn unlink(&self, parent: u64, name: &str) -> Result<(), VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        backend.filesystem.tx(|tx| {
+            let parent_ptr = redoxfs::TreePtr::new(parent as u32);
+            let node = tx.find_node(parent_ptr, name)?;
+            let mode = if node.data().is_dir() {
+                redoxfs::Node::MODE_DIR
+            } else {
+                redoxfs::Node::MODE_FILE
+            };
+            tx.remove_node(parent_ptr, name, mode)?;
+            Ok(())
+        }).map_err(|_| VfsError::NotFound)
+    }
+
+    fn rmdir(&self, parent: u64, name: &str) -> Result<(), VfsError> {
+        self.unlink(parent, name)
+    }
+
+    fn symlink(&self, _parent: u64, _name: &str, _target: &str) -> Result<u64, VfsError> {
+        Err(VfsError::RedoxFs)
+    }
+
+    fn readlink(&self, _ino: u64) -> Result<String, VfsError> {
+        Err(VfsError::NotFound)
+    }
+
+    fn rename(&self, old_parent: u64, old_name: &str, new_parent: u64, new_name: &str) -> Result<(), VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        backend.filesystem.tx(|tx| {
+            tx.rename_node_no_replace(
+                redoxfs::TreePtr::new(old_parent as u32),
+                old_name,
+                redoxfs::TreePtr::new(new_parent as u32),
+                new_name,
+            )
+        }).map_err(|_| VfsError::RedoxFs)
+    }
+
+    fn read(&self, ino: u64, offset: u64, buf: &mut [u8]) -> Result<usize, VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        backend.filesystem.tx(|tx| {
+            tx.read_node(redoxfs::TreePtr::new(ino as u32), offset, buf, 0, 0)
+        }).map_err(|_| VfsError::Storage(StorageError::IoFailed))
+    }
+
+    fn write(&self, ino: u64, offset: u64, buf: &[u8]) -> Result<usize, VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        backend.filesystem.tx(|tx| {
+            tx.write_node(redoxfs::TreePtr::new(ino as u32), offset, buf, 0, 0)
+        }).map_err(|_| VfsError::Storage(StorageError::IoFailed))
+    }
+
+    fn truncate(&self, ino: u64, size: u64) -> Result<(), VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        backend.filesystem.tx(|tx| {
+            tx.truncate_node(redoxfs::TreePtr::new(ino as u32), size, 0, 0)
+        }).map_err(|_| VfsError::RedoxFs)
+    }
+
+    fn statfs(&self) -> Result<StatFs, VfsError> {
+        Ok(StatFs {
+            f_type: 0x56414e54,
+            f_bsize: 4096,
+            f_blocks: 262144,
+            f_bfree: 200000,
+            f_bavail: 200000,
+            f_files: 65536,
+            f_ffree: 65000,
+        })
+    }
+
+    fn sync(&self) -> Result<(), VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        backend.filesystem.tx(|tx| {
+            tx.sync(true)?;
+            Ok(())
+        }).map_err(|_| VfsError::Storage(StorageError::IoFailed))
+    }
+
+    fn read_dir(&self, ino: u64) -> Result<Vec<String>, VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        backend.filesystem.tx(|tx| {
+            let mut children = Vec::new();
+            tx.child_nodes(redoxfs::TreePtr::new(ino as u32), &mut children)?;
+            let mut names = children
+                .iter()
+                .filter_map(|entry| entry.name())
+                .map(String::from)
+                .collect::<Vec<_>>();
+            names.sort();
+            Ok(names)
+        }).map_err(|_| VfsError::NotFound)
+    }
+
+    fn read_file_path(&self, path: &str) -> Result<Vec<u8>, VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        backend.read_file(&ensure_absolute(path)).map_err(|_| VfsError::RedoxFs)
+    }
+
+    fn write_file_path(&self, path: &str, data: &[u8]) -> Result<(), VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        backend.write_file(&ensure_absolute(path), data).map_err(|_| VfsError::RedoxFs)
+    }
+
+    fn remove_file_path(&self, path: &str) -> Result<(), VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        backend.remove_file(&ensure_absolute(path)).map_err(|_| VfsError::RedoxFs)
+    }
+
+    fn rename_path(&self, old_path: &str, new_path: &str) -> Result<(), VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        backend.rename(&ensure_absolute(old_path), &ensure_absolute(new_path)).map_err(|_| VfsError::RedoxFs)
+    }
+
+    fn create_dir_path(&self, path: &str) -> Result<(), VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        backend.create_dir_all(&ensure_absolute(path)).map_err(|_| VfsError::RedoxFs)
+    }
+
+    fn list_dir_path(&self, path: &str) -> Result<Vec<String>, VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        backend.list_dir(&ensure_absolute(path)).map_err(|_| VfsError::RedoxFs)
+    }
+
+    fn file_info_path(&self, path: &str) -> Result<FileInfo, VfsError> {
+        let mut guard = self.backend.lock();
+        let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
+        let info = backend.file_info(&ensure_absolute(path)).map_err(|_| VfsError::RedoxFs)?;
+        let length: usize = info.length.try_into().map_err(|_| VfsError::FileTooLarge)?;
+        Ok(FileInfo {
+            length,
+            allocated_sectors: if length == 0 { 0 } else { ((length + 511) / 512) as u32 },
+            is_directory: info.is_directory,
+            uid: info.uid,
+            gid: info.gid,
+            mode: info.mode,
+        })
+    }
+}
+
 pub fn initialize_root(sectors: u64) -> Result<(), VfsError> {
     let disk = RamDisk::new(sectors).map_err(VfsError::Storage)?;
     let filesystem = VantaFs::format(RootDevice::Ram(disk))?;
-    ROOT.lock().mount_root(filesystem)?;
-    let tmp_disk = RamDisk::new(32).map_err(VfsError::Storage)?;
-    *TMP.lock() = Some(VantaFs::format(tmp_disk)?);
+    let mut vfs = Vfs::new();
+    vfs.mount_root(filesystem)?;
+    let adapter = Arc::new(VantaFsAdapter::new(vfs));
+    *ROOT.lock() = Some(adapter.clone());
+    let mut table = MOUNT_TABLE.lock();
+    table.mount("/", adapter, 0)?;
+
+    let tmpfs = Arc::new(crate::tmpfs::TmpFs::new());
+    table.mount("/tmp", tmpfs, 0)?;
     Ok(())
 }
 
 pub fn mount_virtio_root(device: VirtioBlock) -> Result<bool, VfsError> {
     let (filesystem, existed) = VantaFs::mount_or_format(RootDevice::Virtio(device))?;
-    ROOT.lock().replace_root(filesystem);
+    let mut vfs = Vfs::new();
+    vfs.mount_root(filesystem)?;
+    let adapter = Arc::new(VantaFsAdapter::new(vfs));
+    *ROOT.lock() = Some(adapter.clone());
+    MOUNT_TABLE.lock().mount("/", adapter, mount_flags::MS_REMOUNT)?;
     Ok(existed)
 }
 
-/// Mount a validated GPT partition as the persistent RedoxFS root.
-///
-/// The RAM VantaFS mount remains intact as the recovery fallback until this
-/// succeeds. RedoxFS owns the block device after a successful mount.
 pub fn mount_virtio_redox_root(
     device: VirtioBlock,
     partition: RootPartition,
 ) -> Result<(), VfsError> {
     let backend = RedoxFsBackend::open(RootDevice::Virtio(device), partition)
         .map_err(|_| VfsError::RedoxFs)?;
-    *REDOX_ROOT.lock() = Some(backend);
+    let adapter = Arc::new(RedoxFsAdapter::new(backend));
+    *REDOX_ROOT.lock() = Some(adapter.clone());
+    MOUNT_TABLE.lock().mount("/", adapter, mount_flags::MS_REMOUNT)?;
     Ok(())
 }
 
 pub fn remount_root() -> Result<(), VfsError> {
-    let mut redox_root = REDOX_ROOT.lock();
-    if let Some(backend) = redox_root.take() {
-        let device = backend.into_inner();
-        let partition = match &device {
-            RootDevice::Ram(_) => return Err(VfsError::RedoxFs),
-            RootDevice::Virtio(_) => {
-                // The RedoxFS root is always mounted from the validated GPT
-                // partition, which is retained by the backend disk.
-                // Re-discover it before reopening so remount validates media.
-                crate::storage::discover_vanta_root(&device).map_err(VfsError::Storage)?
-            }
-        };
-        *redox_root = Some(RedoxFsBackend::open(device, partition).map_err(|_| VfsError::RedoxFs)?);
+    let redox_guard = REDOX_ROOT.lock();
+    if let Some(adapter) = redox_guard.as_ref() {
+        let mut backend_guard = adapter.backend.lock();
+        if let Some(backend) = backend_guard.take() {
+            let device = backend.into_inner();
+            let partition = match &device {
+                RootDevice::Ram(_) => return Err(VfsError::RedoxFs),
+                RootDevice::Virtio(_) => {
+                    crate::storage::discover_vanta_root(&device).map_err(VfsError::Storage)?
+                }
+            };
+            let new_backend = RedoxFsBackend::open(device, partition).map_err(|_| VfsError::RedoxFs)?;
+            *backend_guard = Some(new_backend);
+            return Ok(());
+        }
+    }
+    drop(redox_guard);
+    let root_guard = ROOT.lock();
+    if let Some(adapter) = root_guard.as_ref() {
+        let mut vfs = adapter.inner.lock();
+        let filesystem = vfs.unmount_root()?;
+        let remounted = VantaFs::mount(filesystem.into_device())?;
+        vfs.mount_root(remounted)?;
         return Ok(());
     }
-    drop(redox_root);
-    let mut root = ROOT.lock();
-    let filesystem = root.unmount_root()?;
-    root.mount_root(VantaFs::mount(filesystem.into_device())?)
+    Err(VfsError::NotMounted)
 }
 
 pub fn read_block_sector(sector: u64, buffer: &mut [u8; 512]) -> Result<(), StorageError> {
-    if let Some(root) = REDOX_ROOT.lock().as_mut() {
-        root.read_raw_sector(sector, buffer)
-            .map_err(|_| StorageError::IoFailed)
+    if let Some(adapter) = REDOX_ROOT.lock().as_ref() {
+        adapter.read_raw_sector(sector, buffer)
     } else {
         Err(StorageError::DeviceUnavailable)
     }
 }
 
 pub fn write_block_sector(sector: u64, buffer: &[u8; 512]) -> Result<(), StorageError> {
-    if let Some(root) = REDOX_ROOT.lock().as_mut() {
-        root.write_raw_sector(sector, buffer)
-            .map_err(|_| StorageError::IoFailed)
+    if let Some(adapter) = REDOX_ROOT.lock().as_ref() {
+        adapter.write_raw_sector(sector, buffer)
     } else {
         Err(StorageError::DeviceUnavailable)
     }
+}
+
+pub fn mount_filesystem(target: &str, fs: Arc<dyn Filesystem>, flags: u32) -> Result<(), VfsError> {
+    MOUNT_TABLE.lock().mount(target, fs, flags)
+}
+
+pub fn unmount_filesystem(target: &str, flags: u32) -> Result<(), VfsError> {
+    MOUNT_TABLE.lock().umount(target, flags)
+}
+
+pub fn is_writable_mount(path: &str) -> bool {
+    let table = MOUNT_TABLE.lock();
+    if let Ok((mount, _)) = table.resolve(path) {
+        (mount.flags & mount_flags::MS_RDONLY) == 0
+    } else {
+        false
+    }
+}
+
+pub fn can_user_mutate(path: &str, credentials: &Credentials) -> bool {
+    if credentials.is_root() {
+        return is_writable_mount(path);
+    }
+    let table = MOUNT_TABLE.lock();
+    let Ok((mount, rel)) = table.resolve(path) else {
+        return false;
+    };
+    if (mount.flags & mount_flags::MS_RDONLY) != 0 {
+        return false;
+    }
+
+    // World-writable mount root (e.g. /tmp, /mnt/ram tmpfs)
+    if let Ok(root_meta) = mount.fs.read_inode(mount.fs.root_inode()) {
+        if (root_meta.mode & 0o002) != 0 {
+            return true;
+        }
+    }
+
+    // Home directory of user
+    if path == "/home/vanta" || path.starts_with("/home/vanta/") {
+        return true;
+    }
+
+    // Parent directory permissions
+    let parent_path = match rel.rfind('/') {
+        Some(idx) => &rel[..idx],
+        None => "",
+    };
+    if let Ok(parent_info) = if parent_path.is_empty() {
+        mount.fs.read_inode(mount.fs.root_inode()).map(|m| FileInfo {
+            length: m.size as usize,
+            allocated_sectors: 0,
+            is_directory: true,
+            uid: m.uid,
+            gid: m.gid,
+            mode: m.mode as u16,
+        })
+    } else {
+        mount.fs.file_info_path(parent_path)
+    } {
+        if parent_info.uid == credentials.uid && (parent_info.mode & 0o200) != 0 {
+            return true;
+        }
+        if parent_info.gid == credentials.gid && (parent_info.mode & 0o020) != 0 {
+            return true;
+        }
+        if (parent_info.mode & 0o002) != 0 {
+            return true;
+        }
+    }
+
+    // File's own permissions if it exists
+    if let Ok(info) = mount.fs.file_info_path(rel) {
+        if info.uid == credentials.uid && (info.mode & 0o200) != 0 {
+            return true;
+        }
+        if info.gid == credentials.gid && (info.mode & 0o020) != 0 {
+            return true;
+        }
+        if (info.mode & 0o002) != 0 {
+            return true;
+        }
+    }
+
+    false
 }
 
 pub fn read_root(path: &str) -> Result<Vec<u8>, VfsError> {
     read_root_as(path, &Credentials::root())
 }
 
-pub fn read_root_as(path: &str, credentials: &Credentials) -> Result<Vec<u8>, VfsError> {
-    if let Some(path) = tmp_path(path) {
-        return TMP
-            .lock()
-            .as_mut()
-            .ok_or(VfsError::NotMounted)?
-            .read_file(path);
-    }
-    if let Some(root) = REDOX_ROOT.lock().as_mut() {
-        return root
-            .read_file_as(path, credentials)
-            .map_err(|_| VfsError::RedoxFs);
-    }
-    ROOT.lock().read(path)
+pub fn read_root_as(path: &str, _credentials: &Credentials) -> Result<Vec<u8>, VfsError> {
+    let table = MOUNT_TABLE.lock();
+    let (mount, rel) = table.resolve(path)?;
+    mount.fs.read_file_path(rel)
 }
 
 pub fn write_root(path: &str, data: &[u8]) -> Result<(), VfsError> {
     write_root_as(path, data, &Credentials::root())
 }
 
-pub fn write_root_as(path: &str, data: &[u8], credentials: &Credentials) -> Result<(), VfsError> {
-    if let Some(path) = tmp_path(path) {
-        return TMP
-            .lock()
-            .as_mut()
-            .ok_or(VfsError::NotMounted)?
-            .write_file(path, data);
+pub fn write_root_as(path: &str, data: &[u8], _credentials: &Credentials) -> Result<(), VfsError> {
+    let table = MOUNT_TABLE.lock();
+    let (mount, rel) = table.resolve(path)?;
+    if (mount.flags & mount_flags::MS_RDONLY) != 0 {
+        return Err(VfsError::ReadOnlyFilesystem);
     }
-    if let Some(root) = REDOX_ROOT.lock().as_mut() {
-        return root
-            .write_file_as(path, data, credentials)
-            .map_err(|_| VfsError::RedoxFs);
+    mount.fs.write_file_path(rel, data)
+}
+
+pub fn read_root_at(path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, VfsError> {
+    read_root_at_as(path, offset, buf, &Credentials::root())
+}
+
+pub fn read_root_at_as(path: &str, offset: u64, buf: &mut [u8], _credentials: &Credentials) -> Result<usize, VfsError> {
+    let table = MOUNT_TABLE.lock();
+    let (mount, rel) = table.resolve(path)?;
+    mount.fs.read_at_path(rel, offset, buf)
+}
+
+pub fn write_root_at(path: &str, offset: u64, buf: &[u8]) -> Result<usize, VfsError> {
+    write_root_at_as(path, offset, buf, &Credentials::root())
+}
+
+pub fn write_root_at_as(path: &str, offset: u64, buf: &[u8], _credentials: &Credentials) -> Result<usize, VfsError> {
+    let table = MOUNT_TABLE.lock();
+    let (mount, rel) = table.resolve(path)?;
+    if (mount.flags & mount_flags::MS_RDONLY) != 0 {
+        return Err(VfsError::ReadOnlyFilesystem);
     }
-    ROOT.lock().write(path, data)
+    mount.fs.write_at_path(rel, offset, buf)
+}
+
+pub fn truncate_root(path: &str, size: u64) -> Result<(), VfsError> {
+    truncate_root_as(path, size, &Credentials::root())
+}
+
+pub fn truncate_root_as(path: &str, size: u64, _credentials: &Credentials) -> Result<(), VfsError> {
+    let table = MOUNT_TABLE.lock();
+    let (mount, rel) = table.resolve(path)?;
+    if (mount.flags & mount_flags::MS_RDONLY) != 0 {
+        return Err(VfsError::ReadOnlyFilesystem);
+    }
+    mount.fs.truncate_path(rel, size)
+}
+
+pub fn open_path(
+    path: &str,
+    writable: bool,
+    append: bool,
+) -> Result<(Arc<dyn Filesystem>, u64, usize), VfsError> {
+    let table = MOUNT_TABLE.lock();
+    let (mount, rel) = table.resolve(path)?;
+    if writable && (mount.flags & mount_flags::MS_RDONLY) != 0 {
+        return Err(VfsError::ReadOnlyFilesystem);
+    }
+    let ino = mount.fs.resolve_path(rel)?;
+    let meta = mount.fs.read_inode(ino)?;
+    if (meta.mode & 0o170000) == 0o040000 {
+        return Err(VfsError::IsDirectory);
+    }
+    mount.fs.open_inode(ino);
+    let initial_offset = if append { meta.size as usize } else { 0 };
+    Ok((mount.fs.clone(), ino, initial_offset))
 }
 
 pub fn list_root() -> Result<Vec<String>, VfsError> {
-    let mut paths = if let Some(root) = REDOX_ROOT.lock().as_mut() {
-        root.list_dir("/")
-            .map_err(|_| VfsError::RedoxFs)?
-            .into_iter()
-            .map(|name| {
-                let mut path = String::from("/");
-                path.push_str(&name);
-                path
-            })
-            .collect()
-    } else {
-        ROOT.lock().list()?
-    };
-    paths.push(String::from("/tmp/"));
-    let mut tmp = TMP.lock();
-    for path in tmp.as_mut().ok_or(VfsError::NotMounted)?.list_files()? {
-        let mut mounted = String::from("/tmp/");
-        mounted.push_str(path.trim_start_matches('/'));
-        paths.push(mounted);
-    }
-    Ok(paths)
+    list_dir_root("/")
 }
 
 pub fn list_dir_root(path: &str) -> Result<Vec<String>, VfsError> {
     list_dir_root_as(path, &Credentials::root())
 }
 
-pub fn list_dir_root_as(path: &str, credentials: &Credentials) -> Result<Vec<String>, VfsError> {
-    if path == "/tmp" || path == "/tmp/" {
-        let mut tmp = TMP.lock();
-        return tmp.as_mut().ok_or(VfsError::NotMounted)?.list_files();
-    }
-    if let Some(sub) = tmp_path(path) {
-        let mut tmp = TMP.lock();
-        let tmp = tmp.as_mut().ok_or(VfsError::NotMounted)?;
-        let info = tmp.file_info(sub)?;
-        if !info.is_directory {
-            return Err(VfsError::InvalidFormat);
-        }
-        return tmp.list_files();
-    }
-    if let Some(root) = REDOX_ROOT.lock().as_mut() {
-        return root
-            .list_dir_as(path, credentials)
-            .map_err(|_| VfsError::RedoxFs);
-    }
-    let prefix = if path == "/" {
-        String::from("/")
+pub fn list_dir_root_as(path: &str, _credentials: &Credentials) -> Result<Vec<String>, VfsError> {
+    let table = MOUNT_TABLE.lock();
+    let norm = normalize_mount_target(path);
+    let mut names = if let Some(mount) = table.find_mount(&norm) {
+        mount.fs.list_dir_path("")?
     } else {
-        let mut prefix = String::from(path.trim_end_matches('/'));
-        prefix.push('/');
-        prefix
+        let (mount, rel) = table.resolve(path)?;
+        mount.fs.list_dir_path(rel)?
     };
-    let mut names = Vec::new();
-    for entry in ROOT.lock().list()? {
-        if let Some(name) = entry.strip_prefix(&prefix) {
-            if !name.is_empty() && !name.contains('/') {
-                names.push(name.trim_end_matches('/').into());
-            }
+    for child in table.child_mount_names(path) {
+        if !names.contains(&child) {
+            names.push(child);
         }
     }
     names.sort();
@@ -716,20 +1546,17 @@ pub fn remove_root(path: &str) -> Result<(), VfsError> {
     remove_root_as(path, &Credentials::root())
 }
 
-pub fn remove_root_as(path: &str, credentials: &Credentials) -> Result<(), VfsError> {
-    if let Some(path) = tmp_path(path) {
-        return TMP
-            .lock()
-            .as_mut()
-            .ok_or(VfsError::NotMounted)?
-            .remove_file(path);
+pub fn remove_root_as(path: &str, _credentials: &Credentials) -> Result<(), VfsError> {
+    let table = MOUNT_TABLE.lock();
+    let norm = normalize_mount_target(path);
+    if table.find_mount(&norm).is_some() {
+        return Err(VfsError::IsDirectory);
     }
-    if let Some(root) = REDOX_ROOT.lock().as_mut() {
-        return root
-            .remove_file_as(path, credentials)
-            .map_err(|_| VfsError::RedoxFs);
+    let (mount, rel) = table.resolve(path)?;
+    if (mount.flags & mount_flags::MS_RDONLY) != 0 {
+        return Err(VfsError::ReadOnlyFilesystem);
     }
-    ROOT.lock().remove(path)
+    mount.fs.remove_file_path(rel)
 }
 
 pub fn rename_root(old_path: &str, new_path: &str) -> Result<(), VfsError> {
@@ -739,91 +1566,72 @@ pub fn rename_root(old_path: &str, new_path: &str) -> Result<(), VfsError> {
 pub fn rename_root_as(
     old_path: &str,
     new_path: &str,
-    credentials: &Credentials,
+    _credentials: &Credentials,
 ) -> Result<(), VfsError> {
-    match (tmp_path(old_path), tmp_path(new_path)) {
-        (Some(old_path), Some(new_path)) => {
-            return TMP
-                .lock()
-                .as_mut()
-                .ok_or(VfsError::NotMounted)?
-                .rename_file(old_path, new_path)
-        }
-        (Some(_), None) | (None, Some(_)) => return Err(VfsError::InvalidPath),
-        (None, None) => {}
+    let table = MOUNT_TABLE.lock();
+    let (old_mount, old_rel) = table.resolve(old_path)?;
+    let (new_mount, new_rel) = table.resolve(new_path)?;
+    if !Arc::ptr_eq(&old_mount.fs, &new_mount.fs) {
+        return Err(VfsError::InvalidPath);
     }
-    if let Some(root) = REDOX_ROOT.lock().as_mut() {
-        return root
-            .rename_as(old_path, new_path, credentials)
-            .map_err(|_| VfsError::RedoxFs);
+    if (new_mount.flags & mount_flags::MS_RDONLY) != 0 {
+        return Err(VfsError::ReadOnlyFilesystem);
     }
-    ROOT.lock().rename(old_path, new_path)
+    old_mount.fs.rename_path(old_rel, new_rel)
 }
 
 pub fn file_info_root(path: &str) -> Result<FileInfo, VfsError> {
     file_info_root_as(path, &Credentials::root())
 }
 
-pub fn file_info_root_as(path: &str, credentials: &Credentials) -> Result<FileInfo, VfsError> {
-    if path == "/tmp" || path == "/tmp/" {
+pub fn file_info_root_as(path: &str, _credentials: &Credentials) -> Result<FileInfo, VfsError> {
+    let table = MOUNT_TABLE.lock();
+    let norm = normalize_mount_target(path);
+    if let Some(mount) = table.find_mount(&norm) {
+        if let Ok(meta) = mount.fs.read_inode(mount.fs.root_inode()) {
+            return Ok(FileInfo {
+                length: meta.size as usize,
+                allocated_sectors: 0,
+                is_directory: true,
+                uid: meta.uid,
+                gid: meta.gid,
+                mode: meta.mode as u16,
+            });
+        }
+    }
+    let (mount, rel) = table.resolve(path)?;
+    if rel.is_empty() {
+        let meta = mount.fs.read_inode(mount.fs.root_inode())?;
         return Ok(FileInfo {
-            length: 0,
+            length: meta.size as usize,
             allocated_sectors: 0,
             is_directory: true,
-            uid: 0,
-            gid: 0,
-            mode: 0o040777,
+            uid: meta.uid,
+            gid: meta.gid,
+            mode: meta.mode as u16,
         });
     }
-    if let Some(path) = tmp_path(path) {
-        return TMP
-            .lock()
-            .as_mut()
-            .ok_or(VfsError::NotMounted)?
-            .file_info(path);
-    }
-    if let Some(root) = REDOX_ROOT.lock().as_mut() {
-        let info = root
-            .file_info_as(path, credentials)
-            .map_err(|_| VfsError::RedoxFs)?;
-        return Ok(FileInfo {
-            length: info.length.try_into().map_err(|_| VfsError::FileTooLarge)?,
-            allocated_sectors: 0,
-            is_directory: info.is_directory,
-            uid: info.uid,
-            gid: info.gid,
-            mode: info.mode,
-        });
-    }
-    ROOT.lock().info(path)
+    mount.fs.file_info_path(rel)
 }
 
 pub fn create_dir_root(path: &str) -> Result<(), VfsError> {
     create_dir_root_as(path, &Credentials::root())
 }
 
-pub fn create_dir_root_as(path: &str, credentials: &Credentials) -> Result<(), VfsError> {
-    if path == "/tmp" || path == "/tmp/" {
+pub fn create_dir_root_as(path: &str, _credentials: &Credentials) -> Result<(), VfsError> {
+    let table = MOUNT_TABLE.lock();
+    let norm = normalize_mount_target(path);
+    if table.find_mount(&norm).is_some() {
         return Ok(());
     }
-    if let Some(path) = tmp_path(path) {
-        return TMP
-            .lock()
-            .as_mut()
-            .ok_or(VfsError::NotMounted)?
-            .create_dir(path);
+    let (mount, rel) = table.resolve(path)?;
+    if (mount.flags & mount_flags::MS_RDONLY) != 0 {
+        return Err(VfsError::ReadOnlyFilesystem);
     }
-    if let Some(root) = REDOX_ROOT.lock().as_mut() {
-        return root
-            .create_dir_all_as(path, credentials)
-            .map_err(|_| VfsError::RedoxFs);
+    if rel.is_empty() {
+        return Ok(());
     }
-    ROOT.lock().create_dir(path)
-}
-
-fn tmp_path(path: &str) -> Option<&str> {
-    path.strip_prefix("/tmp/")
-        .or_else(|| path.strip_prefix("tmp/"))
+    mount.fs.create_dir_path(rel)
 }
 
 fn normalize_path(path: &str) -> Result<&[u8], VfsError> {

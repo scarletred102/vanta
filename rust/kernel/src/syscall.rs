@@ -627,6 +627,7 @@ fn dispatch_linux(
             vanta_linuxd::LinuxOp::ReadLinkAt => linux_readlinkat_user(arg1, arg2, arg3, arg4),
             vanta_linuxd::LinuxOp::SymLink => linux_symlinkat_user(arg1, crate::scheduler::AT_FDCWD, arg2),
             vanta_linuxd::LinuxOp::SymLinkAt => linux_symlinkat_user(arg1, arg2, arg3),
+            vanta_linuxd::LinuxOp::LSeek => seek_user(arg1, arg2 as i64, arg3),
             vanta_linuxd::LinuxOp::PRead64 => linux_pread64_user(arg1, arg2, arg3, arg4),
             vanta_linuxd::LinuxOp::PWrite64 => linux_pwrite64_user(arg1, arg2, arg3, arg4),
             vanta_linuxd::LinuxOp::SendFile => linux_sendfile_user(arg1, arg2, arg3, arg4),
@@ -647,6 +648,8 @@ fn dispatch_linux(
             vanta_linuxd::LinuxOp::MkDirAt => linux_mkdirat_user(arg1, arg2, arg3),
             vanta_linuxd::LinuxOp::Unlink => linux_unlink_user(arg1),
             vanta_linuxd::LinuxOp::UnlinkAt => linux_unlinkat_user(arg1, arg2, arg3),
+            vanta_linuxd::LinuxOp::Mount => linux_mount_user(arg1, arg2, arg3, arg4, arg5),
+            vanta_linuxd::LinuxOp::UMount2 => linux_umount2_user(arg1, arg2),
             vanta_linuxd::LinuxOp::ClockGetTime => linux_clock_gettime_user(arg1, arg2),
             vanta_linuxd::LinuxOp::ClockSetTime => linux_clock_settime_user(arg1, arg2),
             vanta_linuxd::LinuxOp::ClockGetRes => linux_clock_getres_user(arg1, arg2),
@@ -939,11 +942,8 @@ fn linux_openat_user(directory_fd: u64, path_pointer: u64, flags: u64) -> u64 {
     let path = resolved.as_str();
     if path.starts_with("/proc/") || path.starts_with("/sys/") {
         if let Some(contents) = generate_procfs_content(path) {
-            return crate::scheduler::open_native_current(
-                alloc::string::String::from(path),
+            return crate::scheduler::open_buffer_current(
                 contents,
-                false,
-                false,
             )
             .unwrap_or(SYSCALL_ERROR);
         }
@@ -951,44 +951,56 @@ fn linux_openat_user(directory_fd: u64, path_pointer: u64, flags: u64) -> u64 {
     if let Ok(entries) = crate::vfs::list_dir_root(path) {
         return crate::scheduler::open_directory_current(alloc::string::String::from(path), entries).unwrap_or(SYSCALL_ERROR);
     }
-    let Ok(contents) = crate::vfs::read_root(path) else {
-        let writable = flags & 3 != 0;
-        let create = flags & 64 != 0;
-        if writable && create {
-            let contents = alloc::vec::Vec::new();
-            let credentials = crate::scheduler::current_credentials();
-            let _ = crate::vfs::write_root_as(path, &contents, &credentials);
-            return crate::scheduler::open_native_current(
-                alloc::string::String::from(path),
-                contents,
+    let writable = flags & 3 != 0;
+    let create = flags & 64 != 0;
+    let trunc = flags & 512 != 0;
+    let append = flags & 1024 != 0;
+
+    let mut final_path = alloc::string::String::from(path);
+    if let Ok(info) = crate::vfs::file_info_root(path) {
+        if !info.is_directory && info.length < 512 {
+            let mut prefix_buf = [0u8; 16];
+            if let Ok(n) = crate::vfs::read_root_at(path, 0, &mut prefix_buf) {
+                if n >= 9 && &prefix_buf[..9] == b"#symlink:" {
+                    if let Ok(full) = crate::vfs::read_root(path) {
+                        let symlink_target = core::str::from_utf8(&full[9..]).unwrap_or("");
+                        final_path = resolve_vfs_path(u64::MAX - 99, symlink_target);
+                    }
+                }
+            }
+        }
+    }
+
+    let target_path = final_path.as_str();
+    let exists = crate::vfs::file_info_root(target_path).is_ok();
+    if !exists {
+        let credentials = crate::scheduler::current_credentials();
+        if writable && create && crate::scheduler::can_mutate_path(target_path) {
+            if crate::vfs::write_root_as(target_path, &[], &credentials).is_err() {
+                return SYSCALL_ERROR;
+            }
+            return crate::scheduler::open_vfs_current(
+                alloc::string::String::from(target_path),
                 writable,
-                flags & 1024 != 0,
+                append,
             )
             .unwrap_or(SYSCALL_ERROR);
         }
         return (-(2 as i64)) as u64; // ENOENT
-    };
-    let (contents, path) = if contents.starts_with(b"#symlink:") {
-        let symlink_target = core::str::from_utf8(&contents[9..]).unwrap_or("");
-        let target_resolved = resolve_vfs_path(u64::MAX - 99, symlink_target);
-        if let Ok(c) = crate::vfs::read_root(&target_resolved) {
-            (c, target_resolved)
-        } else {
-            (contents, alloc::string::String::from(path))
-        }
-    } else {
-        (contents, alloc::string::String::from(path))
-    };
-    let writable = flags & 3 != 0;
-    let mut contents = contents;
-    if writable && (flags & 512 != 0) {
-        contents.clear();
     }
-    crate::scheduler::open_native_current(
-        path,
-        contents,
+    if writable {
+        if !crate::scheduler::can_mutate_path(target_path) {
+            return (-(13 as i64)) as u64; // EACCES
+        }
+        if trunc {
+            let credentials = crate::scheduler::current_credentials();
+            let _ = crate::vfs::truncate_root_as(target_path, 0, &credentials);
+        }
+    }
+    crate::scheduler::open_vfs_current(
+        alloc::string::String::from(target_path),
         writable,
-        flags & 1024 != 0,
+        append,
     )
     .unwrap_or(SYSCALL_ERROR)
 }
@@ -1358,6 +1370,61 @@ fn linux_unlinkat_user(dirfd: u64, path_ptr: u64, _flags: u64) -> u64 {
 
 fn linux_unlink_user(path_ptr: u64) -> u64 {
     linux_unlinkat_user(crate::scheduler::AT_FDCWD, path_ptr, 0)
+}
+
+fn linux_mount_user(
+    _source_ptr: u64,
+    target_ptr: u64,
+    fstype_ptr: u64,
+    flags: u64,
+    _data_ptr: u64,
+) -> u64 {
+    let target_bytes = match copy_cstring(target_ptr, 256) {
+        Ok(b) => b,
+        Err(_) => return (-(14 as i64)) as u64, // EFAULT
+    };
+    let Ok(target_str) = core::str::from_utf8(&target_bytes) else {
+        return (-(22 as i64)) as u64; // EINVAL
+    };
+    let fstype_bytes = if fstype_ptr != 0 {
+        match copy_cstring(fstype_ptr, 64) {
+            Ok(b) => b,
+            Err(_) => return (-(14 as i64)) as u64,
+        }
+    } else {
+        alloc::vec::Vec::new()
+    };
+    let fstype_str = core::str::from_utf8(&fstype_bytes).unwrap_or("");
+    let resolved_target = resolve_vfs_path(crate::scheduler::AT_FDCWD, target_str);
+
+    let fs: alloc::sync::Arc<dyn crate::vfs::Filesystem> = match fstype_str {
+        "tmpfs" | "ramfs" | "" => alloc::sync::Arc::new(crate::tmpfs::TmpFs::new()),
+        _ => return (-(19 as i64)) as u64, // ENODEV
+    };
+
+    match crate::vfs::mount_filesystem(&resolved_target, fs, flags as u32) {
+        Ok(()) => 0,
+        Err(crate::vfs::VfsError::AlreadyExists) => (-(16 as i64)) as u64, // EBUSY
+        Err(crate::vfs::VfsError::NoSpace) => (-(28 as i64)) as u64, // ENOSPC
+        Err(_) => (-(22 as i64)) as u64, // EINVAL
+    }
+}
+
+fn linux_umount2_user(target_ptr: u64, flags: u64) -> u64 {
+    let target_bytes = match copy_cstring(target_ptr, 256) {
+        Ok(b) => b,
+        Err(_) => return (-(14 as i64)) as u64, // EFAULT
+    };
+    let Ok(target_str) = core::str::from_utf8(&target_bytes) else {
+        return (-(22 as i64)) as u64; // EINVAL
+    };
+    let resolved_target = resolve_vfs_path(crate::scheduler::AT_FDCWD, target_str);
+
+    match crate::vfs::unmount_filesystem(&resolved_target, flags as u32) {
+        Ok(()) => 0,
+        Err(crate::vfs::VfsError::NotFound) => (-(22 as i64)) as u64, // EINVAL
+        Err(_) => (-(22 as i64)) as u64,
+    }
 }
 
 fn linux_symlinkat_user(target_ptr: u64, newdirfd: u64, linkpath_ptr: u64) -> u64 {
@@ -2662,31 +2729,32 @@ fn open_native_user(pointer: u64, length: u64, flags: u64) -> u64 {
     if writable && !crate::scheduler::can_mutate_path(path) {
         return SYSCALL_ERROR;
     }
-    let mut contents = match crate::vfs::read_root_as(path, &credentials) {
-        Ok(contents) => contents,
-        Err(_) if writable && create => Vec::new(),
-        Err(_) => return SYSCALL_ERROR,
-    };
-    if writable && truncate {
-        contents.clear();
-        if crate::vfs::write_root_as(path, &contents, &credentials).is_err() {
-            return SYSCALL_ERROR;
+    let exists = crate::vfs::file_info_root_as(path, &credentials).is_ok();
+    if !exists {
+        if writable && create {
+            if crate::vfs::write_root_as(path, &[], &credentials).is_err() {
+                return SYSCALL_ERROR;
+            }
+            return crate::scheduler::open_vfs_current(
+                alloc::string::String::from(path),
+                writable,
+                append,
+            )
+            .unwrap_or(SYSCALL_ERROR);
         }
-    } else if writable
-        && create
-        && crate::vfs::file_info_root_as(path, &credentials).is_err()
-        && crate::vfs::write_root_as(path, &contents, &credentials).is_err()
-    {
         return SYSCALL_ERROR;
     }
-    let descriptor = crate::scheduler::open_native_current(
+    if writable && truncate {
+        if crate::vfs::truncate_root_as(path, 0, &credentials).is_err() {
+            return SYSCALL_ERROR;
+        }
+    }
+    crate::scheduler::open_vfs_current(
         alloc::string::String::from(path),
-        contents,
         writable,
         append,
     )
-    .unwrap_or(SYSCALL_ERROR);
-    descriptor
+    .unwrap_or(SYSCALL_ERROR)
 }
 
 fn read_user(descriptor: u64, pointer: u64, length: u64) -> u64 {

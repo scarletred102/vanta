@@ -135,6 +135,8 @@ pub enum LinuxOp {
     MkDirAt,
     Unlink,
     UnlinkAt,
+    Mount,
+    UMount2,
     Unsupported(u64),
 }
 
@@ -595,6 +597,8 @@ pub fn translate(number: u64) -> Result<Translation, UnsupportedSyscall> {
         157 => (LinuxOp::Prctl, None),
         158 => (LinuxOp::ArchPrctl, None),
         160 | 302 => (LinuxOp::Prlimit64, None),
+        165 => (LinuxOp::Mount, None),
+        166 => (LinuxOp::UMount2, None),
         186 => (LinuxOp::GetTid, None),
         200 => (LinuxOp::TKill, None),
         202 => (LinuxOp::Futex, None),

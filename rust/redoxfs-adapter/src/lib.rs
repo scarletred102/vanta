@@ -5,6 +5,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use redoxfs::{Disk, FileSystem, Node, Transaction, TreePtr, BLOCK_SIZE};
+pub use redoxfs;
 use syscall::error::{Error, Result, EACCES, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR};
 use vanta_abi::Credentials;
 use vanta_gpt::RootPartition;
@@ -104,7 +105,7 @@ impl<D: SectorIo> Disk for RedoxDisk<D> {
 
 /// Scheduler-independent RedoxFS root operations over a bounded sector device.
 pub struct RedoxFsBackend<D: SectorIo> {
-    filesystem: FileSystem<RedoxDisk<D>>,
+    pub filesystem: FileSystem<RedoxDisk<D>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
