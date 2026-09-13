@@ -282,7 +282,11 @@ $firstRequired = $common + @(
     "[cache-durability] PASS: zero-copy mmap(MAP_SHARED) coherence with read()/write() verified",
     "[cache-durability] PASS: write speed exceeded 500 MB/s requirement",
     "[cache-durability] PASS: fsync() completed",
-    "[cache-durability] PASS: Phase 1 complete, ready for simulated power loss"
+    "[cache-durability] PASS: Phase 1 complete, ready for simulated power loss",
+    "[flusher-test] PASS: sync() system call committed page cache to disk",
+    "[flusher-test] PASS: background flusher daemon committed dirty pages after 500ms sleep",
+    "[flusher-test] PASS: LRU clean page eviction under memory pressure verified",
+    "[flusher-test] ALL TESTS PASSED SUCCESSFULLY (Exit Code 0)"
 )
 $first = Invoke-GptBoot -DiskImage $image -Label "first boot" -Required $firstRequired
 Start-Sleep -Milliseconds 500
@@ -309,4 +313,4 @@ Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required 
 Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
 
 Write-Host "[test] GPT Gate A, Gate B, Gate C, Gate D, Gate E, and Gate F acceptance passed"
-$first -split "`n" | Where-Object { $_ -match "afunix|SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net|http-server|wget|mount-test|symlink-test|cache-durability" } | ForEach-Object { Write-Host $_ }
+$first -split "`n" | Where-Object { $_ -match "afunix|SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net|http-server|wget|mount-test|symlink-test|cache-durability|flusher-test" } | ForEach-Object { Write-Host $_ }

@@ -727,6 +727,8 @@ pub fn timer_tick(context: *mut InterruptContext) -> *const InterruptContext {
         crate::network::dispatch_network_bottom_half();
     }
 
+    crate::page_cache::flusher_tick();
+
     let interrupted = unsafe { &*context };
     if !interrupted.interrupted_user_mode() {
         return context;
@@ -1121,6 +1123,9 @@ fn wait_for_next_runnable(
         drop(scheduler_guard);
         if crate::virtio_net::is_bottom_half_pending() {
             crate::network::dispatch_network_bottom_half();
+        }
+        if crate::page_cache::is_flusher_pending() {
+            crate::page_cache::run_flusher();
         }
         x86_64::instructions::interrupts::enable();
         x86_64::instructions::hlt();

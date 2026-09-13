@@ -427,11 +427,13 @@ pub fn init(response: &MemmapResponse, hhdm_offset: u64) -> MemoryStats {
 pub fn alloc_frame() -> Option<PhysFrame> {
     let wm = crate::swap::low_watermark();
     if wm > 0 && free_frames_count() <= wm {
+        let _ = crate::page_cache::evict_clean_pages(32);
         let _ = crate::swap::evict_page_clock();
     }
 
     let mut res = FRAME_ALLOCATOR.lock().alloc();
     if res.is_none() && wm > 0 {
+        let _ = crate::page_cache::evict_clean_pages(32);
         let _ = crate::swap::evict_page_clock();
         res = FRAME_ALLOCATOR.lock().alloc();
     }
@@ -441,6 +443,7 @@ pub fn alloc_frame() -> Option<PhysFrame> {
 pub fn alloc_frames(order: usize) -> Option<PhysFrame> {
     let wm = crate::swap::low_watermark();
     if wm > 0 && free_frames_count() <= wm {
+        let _ = crate::page_cache::evict_clean_pages(32);
         let _ = crate::swap::evict_page_clock();
     }
     FRAME_ALLOCATOR

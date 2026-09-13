@@ -6,6 +6,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
 use crate::memory::{alloc_frame, free_frame, PhysFrame, PAGE_SIZE};
@@ -498,3 +499,80 @@ pub fn invalidate_inode(mount_id: usize, ino: u64) {
         }
     }
 }
+
+static FLUSHER_TICKS: AtomicU64 = AtomicU64::new(0);
+static FLUSHER_RUN_COUNT: AtomicU64 = AtomicU64::new(0);
+static FLUSHER_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Background flusher tick, invoked on BSP timer tick.
+/// Wakes every 500 ms (500 ticks) by requesting background flush.
+pub fn flusher_tick() {
+    let ticks = FLUSHER_TICKS.fetch_add(1, Ordering::Relaxed);
+    if ticks > 0 && ticks % 500 == 0 {
+        FLUSHER_PENDING.store(true, Ordering::Release);
+    }
+}
+
+pub fn is_flusher_pending() -> bool {
+    FLUSHER_PENDING.load(Ordering::Acquire)
+}
+
+/// Run background flusher in kernel task/scheduler context safely.
+pub fn run_flusher() {
+    if FLUSHER_PENDING.swap(false, Ordering::AcqRel) {
+        FLUSHER_RUN_COUNT.fetch_add(1, Ordering::Relaxed);
+        let _ = flush_all();
+    }
+}
+
+pub fn flusher_run_count() -> u64 {
+    FLUSHER_RUN_COUNT.load(Ordering::Relaxed)
+}
+
+pub fn dirty_count() -> usize {
+    let cache = PAGE_CACHE.lock();
+    cache.entries.values().filter(|e| e.dirty).count()
+}
+
+pub fn cached_pages_count() -> usize {
+    let cache = PAGE_CACHE.lock();
+    cache.entries.len()
+}
+
+/// Evict up to `max_count` clean pages from the page cache LRU list,
+/// immediately reclaiming physical frames for the Buddy Allocator.
+/// Uses `try_lock()` to avoid deadlocking if called under memory pressure during a cache operation.
+pub fn evict_clean_pages(max_count: usize) -> usize {
+    let mut cache = match PAGE_CACHE.try_lock() {
+        Some(c) => c,
+        None => return 0,
+    };
+
+    let mut clean_keys: Vec<(PageKey, u64, PhysFrame)> = cache
+        .entries
+        .iter()
+        .filter(|(_, e)| !e.dirty)
+        .map(|(k, e)| (*k, e.lru_seq, e.frame))
+        .collect();
+
+    if clean_keys.is_empty() {
+        return 0;
+    }
+
+    clean_keys.sort_by_key(|(_, lru, _)| *lru);
+
+    let to_evict = clean_keys.len().min(max_count);
+    let mut evicted = 0;
+    for (k, _, frame) in &clean_keys[..to_evict] {
+        if let Some(entry) = cache.entries.remove(k) {
+            if !entry.dirty {
+                free_frame(*frame);
+                evicted += 1;
+            } else {
+                cache.entries.insert(*k, entry);
+            }
+        }
+    }
+    evicted
+}
+
