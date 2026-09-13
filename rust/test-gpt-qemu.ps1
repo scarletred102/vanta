@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
-    [ValidateRange(5, 900)]
-    [int]$TimeoutSeconds = 480
+    [ValidateRange(5, 2400)]
+    [int]$TimeoutSeconds = 1500
 )
 
 $ErrorActionPreference = "Stop"
@@ -286,7 +286,14 @@ $firstRequired = $common + @(
     "[flusher-test] PASS: sync() system call committed page cache to disk",
     "[flusher-test] PASS: background flusher daemon committed dirty pages after 500ms sleep",
     "[flusher-test] PASS: LRU clean page eviction under memory pressure verified",
-    "[flusher-test] ALL TESTS PASSED SUCCESSFULLY (Exit Code 0)"
+    "[flusher-test] ALL TESTS PASSED SUCCESSFULLY (Exit Code 0)",
+    "[proc-conformance] PASS: /proc/self/exe resolves to valid ELF binary",
+    "[proc-conformance] PASS: /proc/self/maps displays valid VMA layout",
+    "[proc-conformance] PASS: /dev/null discards writes and returns EOF on read",
+    "[proc-conformance] PASS: /dev/zero returns continuous 0x00 bytes",
+    "[proc-conformance] PASS: /dev/urandom furnishes non-deterministic CSPRNG entropy",
+    "[proc-conformance] PASS: system telemetry streams furnish accurate runtime stats",
+    "[proc-conformance] ALL TESTS PASSED SUCCESSFULLY (Exit Code 0)"
 )
 $first = Invoke-GptBoot -DiskImage $image -Label "first boot" -Required $firstRequired
 Start-Sleep -Milliseconds 500
@@ -313,4 +320,4 @@ Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required 
 Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
 
 Write-Host "[test] GPT Gate A, Gate B, Gate C, Gate D, Gate E, and Gate F acceptance passed"
-$first -split "`n" | Where-Object { $_ -match "afunix|SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net|http-server|wget|mount-test|symlink-test|cache-durability|flusher-test" } | ForEach-Object { Write-Host $_ }
+$first -split "`n" | Where-Object { $_ -match "afunix|SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net|http-server|wget|mount-test|symlink-test|cache-durability|flusher-test|proc-conformance" } | ForEach-Object { Write-Host $_ }

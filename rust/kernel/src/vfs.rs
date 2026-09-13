@@ -1522,6 +1522,25 @@ impl Filesystem for RedoxFsAdapter {
     }
 }
 
+pub fn mount_synthetic_filesystems(table: &mut MountTable) -> Result<(), VfsError> {
+    let devfs = Arc::new(crate::devfs::DevFs::new());
+    let _ = table.mount("/dev", devfs, mount_flags::MS_REMOUNT);
+
+    let procfs = Arc::new(crate::procfs::ProcFs::new());
+    let _ = table.mount("/proc", procfs, mount_flags::MS_REMOUNT);
+
+    let sysfs = Arc::new(crate::sysfs::SysFs::new());
+    let _ = table.mount("/sys", sysfs, mount_flags::MS_REMOUNT);
+
+    let tmpfs = Arc::new(crate::tmpfs::TmpFs::new());
+    let _ = table.mount("/tmp", tmpfs, mount_flags::MS_REMOUNT);
+
+    let shmfs = Arc::new(crate::tmpfs::TmpFs::new());
+    let _ = table.mount("/dev/shm", shmfs, mount_flags::MS_REMOUNT);
+
+    Ok(())
+}
+
 pub fn initialize_root(sectors: u64) -> Result<(), VfsError> {
     let disk = RamDisk::new(sectors).map_err(VfsError::Storage)?;
     let filesystem = VantaFs::format(RootDevice::Ram(disk))?;
@@ -1532,8 +1551,7 @@ pub fn initialize_root(sectors: u64) -> Result<(), VfsError> {
     let mut table = MOUNT_TABLE.lock();
     table.mount("/", adapter, 0)?;
 
-    let tmpfs = Arc::new(crate::tmpfs::TmpFs::new());
-    table.mount("/tmp", tmpfs, 0)?;
+    mount_synthetic_filesystems(&mut table)?;
     Ok(())
 }
 
@@ -1543,7 +1561,9 @@ pub fn mount_virtio_root(device: VirtioBlock) -> Result<bool, VfsError> {
     vfs.mount_root(filesystem)?;
     let adapter = Arc::new(VantaFsAdapter::new(vfs));
     *ROOT.lock() = Some(adapter.clone());
-    MOUNT_TABLE.lock().mount("/", adapter, mount_flags::MS_REMOUNT)?;
+    let mut table = MOUNT_TABLE.lock();
+    table.mount("/", adapter, mount_flags::MS_REMOUNT)?;
+    mount_synthetic_filesystems(&mut table)?;
     Ok(existed)
 }
 
@@ -1555,7 +1575,9 @@ pub fn mount_virtio_redox_root(
         .map_err(|_| VfsError::RedoxFs)?;
     let adapter = Arc::new(RedoxFsAdapter::new(backend));
     *REDOX_ROOT.lock() = Some(adapter.clone());
-    MOUNT_TABLE.lock().mount("/", adapter, mount_flags::MS_REMOUNT)?;
+    let mut table = MOUNT_TABLE.lock();
+    table.mount("/", adapter, mount_flags::MS_REMOUNT)?;
+    mount_synthetic_filesystems(&mut table)?;
     Ok(())
 }
 

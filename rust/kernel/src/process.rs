@@ -57,6 +57,7 @@ pub struct Process {
     mmap_next: u64,
     mappings: Vec<MappedPage>,
     pub memory_map: alloc::sync::Arc<spin::Mutex<crate::vma::ProcessMemoryMap>>,
+    pub exe_path: alloc::string::String,
     destroyed: bool,
 }
 
@@ -67,6 +68,22 @@ impl Process {
 
     pub fn personality(&self) -> ProcessPersonality {
         self.personality
+    }
+
+    pub fn exe_path(&self) -> &str {
+        &self.exe_path
+    }
+
+    pub fn set_exe_path(&mut self, path: &str) {
+        self.exe_path = alloc::string::String::from(path);
+    }
+
+    pub fn brk_start(&self) -> u64 {
+        self.brk_start
+    }
+
+    pub fn brk_current(&self) -> u64 {
+        self.brk_current
     }
 
     #[allow(dead_code)]
@@ -109,6 +126,7 @@ impl Process {
             mmap_next: self.mmap_next,
             mappings,
             memory_map: child_memory_map,
+            exe_path: self.exe_path.clone(),
             destroyed: false,
         }
     }
@@ -519,6 +537,7 @@ fn load_elf_with_personality(
         mmap_next: 0x0000_7000_0000_0000,
         mappings: Vec::new(),
         memory_map: alloc::sync::Arc::clone(&memory_map),
+        exe_path: alloc::string::String::new(),
         destroyed: false,
     };
 

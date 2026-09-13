@@ -887,68 +887,6 @@ fn linux_mmap_user(
     base_vaddr
 }
 
-fn generate_procfs_content(path: &str) -> Option<alloc::vec::Vec<u8>> {
-    use alloc::format;
-    if path == "/proc/cpuinfo" {
-        Some(alloc::vec::Vec::from(
-            "processor\t: 0\nvendor_id\t: GenuineIntel\nmodel name\t: Vanta Virtual CPU\ncpu MHz\t\t: 3000.000\n\n"
-        ))
-    } else if path == "/proc/meminfo" {
-        let stats = crate::memory::stats();
-        let total_kb = (stats.tracked_frames as u64) * 4;
-        let free_kb = (crate::memory::free_frames_count() as u64) * 4;
-        let swap_total_kb = crate::swap::swap_total_sectors() / 2;
-        let s = format!(
-            "MemTotal:       {:8} kB\nMemFree:        {:8} kB\nMemAvailable:   {:8} kB\nBuffers:           1024 kB\nCached:           16384 kB\nSwapTotal:      {:8} kB\nSwapFree:       {:8} kB\n",
-            total_kb, free_kb, free_kb, swap_total_kb, swap_total_kb
-        );
-        Some(s.into_bytes())
-    } else if path == "/proc/version" {
-        Some(alloc::vec::Vec::from(
-            "Linux version 6.1.0-vanta (vanta@build) (gcc 12.2.0) #1 SMP PREEMPT\n"
-        ))
-    } else if path == "/proc/uptime" {
-        Some(alloc::vec::Vec::from("10.00 10.00\n"))
-    } else if path == "/proc/net/dns" {
-        let (queries, hits, entries) = crate::dns::get_dns_stats();
-        let s = format!("queries: {}\nhits: {}\nentries: {}\n", queries, hits, entries);
-        Some(s.into_bytes())
-    } else if path == "/proc/net/tcp" {
-        Some(crate::network::generate_proc_net_tcp().into_bytes())
-    } else if path == "/proc/net/dhcp" {
-        if let Some(lease) = crate::dhcp::get_dhcp_lease() {
-            let s = format!(
-                "state: BOUND\nip: {}.{}.{}.{}\nnetmask: {}.{}.{}.{}\ngateway: {}.{}.{}.{}\ndns: {}.{}.{}.{}\nserver_id: {}.{}.{}.{}\nlease_time: {}\nnak_retries: {}\n",
-                lease.ip[0], lease.ip[1], lease.ip[2], lease.ip[3],
-                lease.netmask[0], lease.netmask[1], lease.netmask[2], lease.netmask[3],
-                lease.gateway[0], lease.gateway[1], lease.gateway[2], lease.gateway[3],
-                lease.dns[0], lease.dns[1], lease.dns[2], lease.dns[3],
-                lease.server_id[0], lease.server_id[1], lease.server_id[2], lease.server_id[3],
-                lease.lease_time,
-                crate::dhcp::get_nak_retry_count(),
-            );
-            Some(s.into_bytes())
-        } else {
-            Some(alloc::vec::Vec::from("state: STATIC\n"))
-        }
-    } else if path.ends_with("/status") {
-        let pid = crate::scheduler::current_pid();
-        let ppid = crate::scheduler::current_parent_pid();
-        let s = format!("Name:\tvanta-app\nState:\tR (running)\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nThreads:\t1\n", pid, pid, ppid);
-        Some(s.into_bytes())
-    } else if path.ends_with("/cmdline") {
-        Some(alloc::vec::Vec::from("vanta-app\0"))
-    } else if path.ends_with("/maps") {
-        Some(alloc::vec::Vec::from(
-            "00400000-00450000 r-xp 00000000 00:00 0 [text]\n700000000000-700000020000 rw-p 00000000 00:00 0 [heap]\n7fffffff0000-800000000000 rw-p 00000000 00:00 0 [stack]\n"
-        ))
-    } else if path.starts_with("/sys/class/net/") {
-        Some(alloc::vec::Vec::from("up\n"))
-    } else {
-        None
-    }
-}
-
 fn resolve_vfs_path(dirfd: u64, path: &str) -> alloc::string::String {
     if path.starts_with('/') {
         crate::scheduler::canonicalize_path("/", path)
@@ -972,14 +910,6 @@ fn linux_openat_user(directory_fd: u64, path_pointer: u64, flags: u64) -> u64 {
     };
     let resolved = resolve_vfs_path(directory_fd, path_str);
     let path = resolved.as_str();
-    if path.starts_with("/proc/") || path.starts_with("/sys/") {
-        if let Some(contents) = generate_procfs_content(path) {
-            return crate::scheduler::open_buffer_current(
-                contents,
-            )
-            .unwrap_or(SYSCALL_ERROR);
-        }
-    }
     let writable = flags & 3 != 0;
     let create = flags & 64 != 0;
     let trunc = flags & 512 != 0;
@@ -1050,31 +980,6 @@ fn linux_stat_helper(path_str: &str, follow: bool, pointer: u64) -> u64 {
     }
     let resolved = resolve_vfs_path(u64::MAX - 99, path_str);
     let path = resolved.as_str();
-    if path.starts_with("/proc/") || path.starts_with("/sys/") {
-        let size = generate_procfs_content(path).map(|c| c.len() as i64).unwrap_or(64);
-        let mut stat = [0u8; 144];
-        let mode = 0o100444u32;
-        let dev = 1u64;
-        let ino = 1u64;
-        let nlink = 1u64;
-        let uid = 0u32;
-        let gid = 0u32;
-        let blksize = 4096i64;
-        let blocks = (size + 511) / 512;
-        stat[0..8].copy_from_slice(&dev.to_ne_bytes());
-        stat[8..16].copy_from_slice(&ino.to_ne_bytes());
-        stat[16..24].copy_from_slice(&nlink.to_ne_bytes());
-        stat[24..28].copy_from_slice(&mode.to_ne_bytes());
-        stat[28..32].copy_from_slice(&uid.to_ne_bytes());
-        stat[32..36].copy_from_slice(&gid.to_ne_bytes());
-        stat[48..56].copy_from_slice(&size.to_ne_bytes());
-        stat[56..64].copy_from_slice(&blksize.to_ne_bytes());
-        stat[64..72].copy_from_slice(&blocks.to_ne_bytes());
-        if copy_to_user(pointer, &stat).is_err() {
-            return (-(14 as i64)) as u64;
-        }
-        return 0;
-    }
     let credentials = crate::scheduler::current_credentials();
     let res = if follow {
         crate::vfs::file_info_root_as(path, &credentials)
@@ -1454,6 +1359,9 @@ fn linux_mount_user(
 
     let fs: alloc::sync::Arc<dyn crate::vfs::Filesystem> = match fstype_str {
         "tmpfs" | "ramfs" | "" => alloc::sync::Arc::new(crate::tmpfs::TmpFs::new()),
+        "proc" | "procfs" => alloc::sync::Arc::new(crate::procfs::ProcFs::new()),
+        "devtmpfs" | "devfs" => alloc::sync::Arc::new(crate::devfs::DevFs::new()),
+        "sysfs" => alloc::sync::Arc::new(crate::sysfs::SysFs::new()),
         _ => return (-(19 as i64)) as u64, // ENODEV
     };
 
@@ -3591,9 +3499,10 @@ fn spawn_legacy_user(pointer: u64, length: u64) -> u64 {
     } else {
         crate::process::load_elf(&image)
     };
-    let Ok(process) = process else {
+    let Ok(mut process) = process else {
         return SYSCALL_ERROR;
     };
+    process.set_exe_path(path);
     crate::scheduler::spawn_current(alloc::boxed::Box::new(process)).unwrap_or(SYSCALL_ERROR)
 }
 
@@ -3662,7 +3571,7 @@ fn spawn_native_user(pointer: u64, length: u64, stdio_pointer: u64, with_args: u
     } else {
         default_env.to_vec()
     };
-    let process = match if !is_native {
+    let mut process = match if !is_native {
         crate::process::load_linux_elf_with_args_and_env(
             &image,
             &argument_references,
@@ -3686,6 +3595,7 @@ fn spawn_native_user(pointer: u64, length: u64, stdio_pointer: u64, with_args: u
             return SYSCALL_ERROR;
         }
     };
+    process.set_exe_path(path);
     let stdin = u64::from_ne_bytes(stdio[0..8].try_into().unwrap());
     let stdout = u64::from_ne_bytes(stdio[8..16].try_into().unwrap());
     let stderr = u64::from_ne_bytes(stdio[16..24].try_into().unwrap());

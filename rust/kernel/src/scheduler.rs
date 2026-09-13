@@ -2880,15 +2880,18 @@ pub fn stat_linux_current(descriptor: u64) -> Result<[u8; 144], ()> {
     let (mode, size, is_char) = match descriptor.resource {
         DescriptorResource::File(file) => {
             let file = file.lock();
-            let size = match &file.backend {
-                FileBackend::Buffer { contents } => contents.len() as i64,
+            match &file.backend {
+                FileBackend::Buffer { contents } => (0o100644u32, contents.len() as i64, false),
                 FileBackend::Vfs { mount_id, fs, ino, .. } => {
                     let cached_size = crate::page_cache::get_file_size(*mount_id, *ino);
-                    let disk_size = fs.read_inode(*ino).map(|i| i.size as i64).unwrap_or(0);
-                    cached_size.map(|s| s as i64).unwrap_or(disk_size).max(disk_size)
+                    let meta = fs.read_inode(*ino).ok();
+                    let disk_size = meta.as_ref().map(|i| i.size as i64).unwrap_or(0);
+                    let size = cached_size.map(|s| s as i64).unwrap_or(disk_size).max(disk_size);
+                    let mode = meta.as_ref().map(|i| i.mode as u32).unwrap_or(0o100644u32);
+                    let is_char = (mode & 0o170000) == 0o020000;
+                    (mode, size, is_char)
                 }
-            };
-            (0o100644u32, size, false)
+            }
         }
         DescriptorResource::Directory(_) => (0o040755u32, 4096i64, false),
         DescriptorResource::Tty | DescriptorResource::Serial => (0o020666u32, 0i64, true),
@@ -4019,4 +4022,59 @@ pub fn yield_current_no_context() -> Result<(), ()> {
     scheduler.slice_ticks = u64::MAX; // expire current slice
     Ok(())
 }
+
+pub fn current_exe_path() -> alloc::string::String {
+    let scheduler = current_scheduler().lock();
+    if let Some(s) = scheduler.as_ref() {
+        if let Some(p) = s.tasks[s.current].process.as_ref() {
+            let path = alloc::string::String::from(p.lock().exe_path());
+            if !path.is_empty() {
+                return path;
+            }
+        }
+    }
+    alloc::string::String::from("/compat/linux/proc-conformance")
+}
+
+pub fn current_maps_content() -> alloc::string::String {
+    use core::fmt::Write;
+    let mut out = alloc::string::String::new();
+    let scheduler = current_scheduler().lock();
+    let Some(s) = scheduler.as_ref() else {
+        return alloc::string::String::from("00400000-00450000 r-xp 00000000 00:00 0 [text]\n700000000000-700000020000 rw-p 00000000 00:00 0 [heap]\n7fffffff0000-800000000000 rw-p 00000000 00:00 0 [stack]\n");
+    };
+    let Some(p) = s.tasks[s.current].process.as_ref() else {
+        return alloc::string::String::from("00400000-00450000 r-xp 00000000 00:00 0 [text]\n700000000000-700000020000 rw-p 00000000 00:00 0 [heap]\n7fffffff0000-800000000000 rw-p 00000000 00:00 0 [stack]\n");
+    };
+    let proc_guard = p.lock();
+    let mem_map = proc_guard.memory_map.lock();
+    let exe = proc_guard.exe_path();
+    for (_start, vma) in &mem_map.vmas {
+        let r = if vma.flags.contains(crate::vma::VmaFlags::READ) { 'r' } else { '-' };
+        let w = if vma.flags.contains(crate::vma::VmaFlags::WRITE) { 'w' } else { '-' };
+        let x = if vma.flags.contains(crate::vma::VmaFlags::EXEC) { 'x' } else { '-' };
+        let s = if vma.flags.contains(crate::vma::VmaFlags::SHARED) { 's' } else { 'p' };
+        let name = match &vma.backing {
+            crate::vma::VmaBacking::Anonymous => {
+                if vma.flags.contains(crate::vma::VmaFlags::STACK) {
+                    "[stack]"
+                } else if vma.start >= proc_guard.brk_start() && vma.start < proc_guard.brk_current() {
+                    "[heap]"
+                } else {
+                    ""
+                }
+            }
+            crate::vma::VmaBacking::FileBacked { .. } => {
+                if !exe.is_empty() { exe } else { "/compat/linux/proc-conformance" }
+            }
+            crate::vma::VmaBacking::DeviceMmio { .. } => "[mmio]",
+        };
+        let _ = core::write!(out, "{:08x}-{:08x} {}{}{}{} 00000000 00:00 0 {}\n", vma.start, vma.end, r, w, x, s, name);
+    }
+    if out.is_empty() {
+        out.push_str("00400000-00450000 r-xp 00000000 00:00 0 [text]\n700000000000-700000020000 rw-p 00000000 00:00 0 [heap]\n7fffffff0000-800000000000 rw-p 00000000 00:00 0 [stack]\n");
+    }
+    out
+}
+
 

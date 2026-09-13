@@ -420,6 +420,15 @@ fn gate_d_acceptance() -> bool {
     print_val(b"[linux] flusher-test", flusher_test, flusher_test_exit);
     let flusher_test_ok = flusher_test != u64::MAX && flusher_test_exit == 0;
 
+    let proc_test = vanta_userland::spawn_linux(b"/compat/linux/proc-conformance");
+    let proc_test_exit = if proc_test != u64::MAX {
+        vanta_userland::wait(proc_test)
+    } else {
+        999
+    };
+    print_val(b"[linux] proc-conformance", proc_test, proc_test_exit);
+    let proc_test_ok = proc_test != u64::MAX && proc_test_exit == 0;
+
     let dyn_shlib = vanta_userland::spawn_linux(b"/compat/linux/dynamic-shlib");
     let dyn_shlib_exit = if dyn_shlib != u64::MAX {
         vanta_userland::wait(dyn_shlib)
@@ -526,6 +535,7 @@ fn gate_d_acceptance() -> bool {
         && symlink_test_ok
         && cache_durability_ok
         && flusher_test_ok
+        && proc_test_ok
         && dyn_shlib_ok
         && displayd_ok
         && desktop_ok

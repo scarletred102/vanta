@@ -51,6 +51,9 @@ pub mod random;
 mod swap;
 pub mod tmpfs;
 pub mod page_cache;
+pub mod procfs;
+pub mod devfs;
+pub mod sysfs;
 
 #[used]
 #[link_section = ".requests"]
@@ -590,7 +593,8 @@ extern "C" fn bootstrap_main() -> ! {
         match vfs::read_root("/sbin/init")
             .and_then(|image| process::load_elf(&image).map_err(|_| vfs::VfsError::InvalidFormat))
         {
-            Ok(init) => {
+            Ok(mut init) => {
+                init.set_exe_path("/sbin/init");
                 serial_println!("[proc] launching native /sbin/init");
                 unsafe { scheduler::start_native(alloc::vec![Box::new(init)]) }
             }

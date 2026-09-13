@@ -87,10 +87,14 @@ pub fn read(
 
     // Determine current effective file size (cached in-memory size or filesystem disk size)
     let current_size = {
-        let cache = PAGE_CACHE.lock();
-        cache
-            .get_file_size(mount_id, ino)
-            .unwrap_or_else(|| fs.read_inode(ino).map(|m| m.size).unwrap_or(0))
+        let mut cache = PAGE_CACHE.lock();
+        if let Some(sz) = cache.get_file_size(mount_id, ino) {
+            sz
+        } else {
+            let sz = fs.read_inode(ino).map(|m| m.size).unwrap_or(0);
+            cache.set_file_size(mount_id, ino, sz);
+            sz
+        }
     };
 
     if offset >= current_size {
@@ -131,32 +135,91 @@ pub fn read(
             f
         } else {
             cache.misses += 1;
+
+            // Determine contiguous pages to batch readahead (up to 16 pages / 64 KiB)
+            const MAX_READAHEAD: u64 = 16;
+            let total_file_pages = (current_size + PAGE_SIZE as u64 - 1) / (PAGE_SIZE as u64);
+            let mut readahead_pages = 1u64;
+            while readahead_pages < MAX_READAHEAD && page_index + readahead_pages < total_file_pages {
+                let next_key = PageKey {
+                    mount_id,
+                    ino,
+                    page_index: page_index + readahead_pages,
+                };
+                if cache.entries.contains_key(&next_key) {
+                    break;
+                }
+                readahead_pages += 1;
+            }
             drop(cache);
 
-            // Read 4 KiB from disk
-            let frame = alloc_frame().ok_or(VfsError::NoSpace)?;
-            let virt = phys_to_virt(frame.start_address()).ok_or(VfsError::RedoxFs)?;
-            let frame_slice = unsafe { core::slice::from_raw_parts_mut(virt as *mut u8, PAGE_SIZE as usize) };
-            
-            let disk_offset = page_index * (PAGE_SIZE as u64);
-            let read_bytes = fs.read(ino, disk_offset, frame_slice).unwrap_or(0);
-            if read_bytes < PAGE_SIZE as usize {
-                frame_slice[read_bytes..].fill(0);
+            // Allocate frames for the batch
+            let mut allocated_frames = Vec::with_capacity(readahead_pages as usize);
+            for _ in 0..readahead_pages {
+                if let Some(f) = alloc_frame() {
+                    allocated_frames.push(f);
+                } else {
+                    break;
+                }
             }
 
+            if allocated_frames.is_empty() {
+                return Err(VfsError::NoSpace);
+            }
+
+            let batch_count = allocated_frames.len();
+            let disk_offset = page_index * (PAGE_SIZE as u64);
+            let read_total_bytes = (batch_count * (PAGE_SIZE as usize)).min((current_size.saturating_sub(disk_offset)) as usize);
+
+            // Read contiguous chunk from disk in one single fs.read transaction
+            let mut disk_buf = alloc::vec![0u8; read_total_bytes];
+            let actual_read = fs.read(ino, disk_offset, &mut disk_buf).unwrap_or(0);
+
+            // Distribute bytes across allocated frames and insert into cache
             let mut cache = PAGE_CACHE.lock();
-            cache.next_seq += 1;
-            let seq = cache.next_seq;
-            cache.entries.insert(
-                key,
-                PageEntry {
-                    frame,
-                    dirty: false,
-                    valid_bytes: read_bytes,
-                    lru_seq: seq,
-                },
-            );
-            frame
+            let mut target_frame = None;
+            for (i, frame) in allocated_frames.into_iter().enumerate() {
+                let p_idx = page_index + i as u64;
+                let virt = phys_to_virt(frame.start_address()).ok_or(VfsError::RedoxFs)?;
+                let frame_slice = unsafe { core::slice::from_raw_parts_mut(virt as *mut u8, PAGE_SIZE as usize) };
+                
+                let chunk_start = i * (PAGE_SIZE as usize);
+                let valid = if chunk_start < actual_read {
+                    let chunk_end = (chunk_start + PAGE_SIZE as usize).min(actual_read);
+                    let len = chunk_end - chunk_start;
+                    frame_slice[..len].copy_from_slice(&disk_buf[chunk_start..chunk_end]);
+                    if len < PAGE_SIZE as usize {
+                        frame_slice[len..].fill(0);
+                    }
+                    len
+                } else {
+                    frame_slice.fill(0);
+                    0
+                };
+
+                cache.next_seq += 1;
+                let seq = cache.next_seq;
+                let k = PageKey {
+                    mount_id,
+                    ino,
+                    page_index: p_idx,
+                };
+                cache.entries.insert(
+                    k,
+                    PageEntry {
+                        frame,
+                        dirty: false,
+                        valid_bytes: valid,
+                        lru_seq: seq,
+                    },
+                );
+
+                if i == 0 {
+                    target_frame = Some(frame);
+                }
+            }
+
+            target_frame.ok_or(VfsError::NoSpace)?
         };
 
         // Copy chunk into destination buffer
