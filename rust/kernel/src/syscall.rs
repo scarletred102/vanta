@@ -910,6 +910,14 @@ fn linux_openat_user(directory_fd: u64, path_pointer: u64, flags: u64) -> u64 {
     };
     let resolved = resolve_vfs_path(directory_fd, path_str);
     let path = resolved.as_str();
+    if path == "/dev/ptmx" {
+        return crate::scheduler::open_ptmx_current().unwrap_or(SYSCALL_ERROR);
+    }
+    if let Some(pts_str) = path.strip_prefix("/dev/pts/") {
+        if let Ok(id) = pts_str.parse::<u32>() {
+            return crate::scheduler::open_pts_slave_current(id).unwrap_or(SYSCALL_ERROR);
+        }
+    }
     let writable = flags & 3 != 0;
     let create = flags & 64 != 0;
     let trunc = flags & 512 != 0;
@@ -2688,6 +2696,14 @@ fn open_native_user(pointer: u64, length: u64, flags: u64) -> u64 {
     let Ok(path) = core::str::from_utf8(&path_bytes) else {
         return SYSCALL_ERROR;
     };
+    if path == "/dev/ptmx" {
+        return crate::scheduler::open_ptmx_current().unwrap_or(SYSCALL_ERROR);
+    }
+    if let Some(pts_str) = path.strip_prefix("/dev/pts/") {
+        if let Ok(id) = pts_str.parse::<u32>() {
+            return crate::scheduler::open_pts_slave_current(id).unwrap_or(SYSCALL_ERROR);
+        }
+    }
     let credentials = crate::scheduler::current_credentials();
     if let Ok(info) = crate::vfs::file_info_root_as(path, &credentials) {
         if info.is_directory {
@@ -3655,14 +3671,14 @@ fn copy_from_user(pointer: u64, length: u64, writable: bool) -> Result<Vec<u8>, 
     Ok(bytes)
 }
 
-fn copy_from_user_into(pointer: u64, buf: &mut [u8]) -> Result<(), ()> {
+pub(crate) fn copy_from_user_into(pointer: u64, buf: &mut [u8]) -> Result<(), ()> {
     for (offset, byte) in buf.iter_mut().enumerate() {
         *byte = read_user_byte(pointer.checked_add(offset as u64).ok_or(())?, false)?;
     }
     Ok(())
 }
 
-fn copy_to_user(pointer: u64, bytes: &[u8]) -> Result<(), ()> {
+pub(crate) fn copy_to_user(pointer: u64, bytes: &[u8]) -> Result<(), ()> {
     for (offset, byte) in bytes.iter().enumerate() {
         let address = pointer.checked_add(offset as u64).ok_or(())?;
         let physical = user_physical_address(address, true)?;
@@ -4022,8 +4038,12 @@ fn audio_play_user(_buf_ptr: u64, len: u64) -> u64 {
     len
 }
 
-fn tty_ioctl_user(_fd: u64, cmd: u64, arg: u64) -> u64 {
-    match cmd {
+fn tty_ioctl_user(fd: u64, cmd: u64, arg: u64) -> u64 {
+    if let Some(pty_res) = crate::scheduler::pty_ioctl_current(fd, cmd, arg) {
+        return pty_res.unwrap_or(SYSCALL_ERROR);
+    }
+    let cmd32 = cmd as u32;
+    match cmd32 {
         // TIOCGWINSZ = 0x5413: Get window size (rows=24, cols=80, xpixel=1280, ypixel=800)
         0x5413 => {
             if arg == 0 {

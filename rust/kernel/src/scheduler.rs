@@ -203,8 +203,8 @@ pub(crate) enum DescriptorResource {
     Epoll(Arc<Mutex<EpollInstance>>),
     EventFd(Arc<Mutex<EventFdInstance>>),
     SignalFd(Arc<Mutex<SignalFdState>>),
-    PtyMaster(Arc<Mutex<PtyState>>),
-    PtySlave(Arc<Mutex<PtyState>>),
+    PtyMaster(Arc<Mutex<crate::pty::PtyState>>),
+    PtySlave(Arc<Mutex<crate::pty::PtyState>>),
 }
 
 pub struct EpollItem {
@@ -225,17 +225,6 @@ pub struct EventFdInstance {
 pub struct SignalFdState {
     pub mask: u64,
     pub flags: u32,
-}
-
-pub struct PtyState {
-    pub master_to_slave: Vec<u8>,
-    pub slave_to_master: Vec<u8>,
-    #[allow(dead_code)]
-    pub rows: u16,
-    #[allow(dead_code)]
-    pub cols: u16,
-    #[allow(dead_code)]
-    pub raw: bool,
 }
 
 enum FileBackend {
@@ -1415,7 +1404,7 @@ pub fn kill_process(pid: u64, signal: u64) -> Result<(), ()> {
     };
     let pid_i64 = pid as i64;
     let is_group = pid_i64 <= 0;
-    let target_pgid = if pid_i64 < -1 {
+    let target_pgid = if pid_i64 < 0 {
         (-pid_i64) as u64
     } else {
         current_pgid
@@ -1494,28 +1483,30 @@ pub fn kill_process(pid: u64, signal: u64) -> Result<(), ()> {
         } else if (action.sa_handler == 1 || (action.sa_handler == 0 && default_act == SignalDefaultAction::Ignore)) && !is_blocked {
             // Signal ignored
         } else {
-            let target = &mut scheduler.tasks[first_idx];
-            target.pending_signals |= sig_bit;
-            if !is_blocked && matches!(target.state, TaskState::PipeWaiting { .. } | TaskState::FutexWait { .. } | TaskState::Sleeping { .. }) {
-                if let TaskState::Sleeping { target_tick, rem_ptr } = target.state {
-                    crate::timer::cancel_sleep_timer(target.tid);
-                    if rem_ptr != 0 {
-                        let current_tick = crate::timer::current_tick();
-                        let rem_ticks = target_tick.saturating_sub(current_tick);
-                        let rem_sec = (rem_ticks / 1000) as i64;
-                        let rem_nsec = ((rem_ticks % 1000) * 1_000_000) as i64;
-                        let mut ts = [0u8; 16];
-                        ts[0..8].copy_from_slice(&rem_sec.to_ne_bytes());
-                        ts[8..16].copy_from_slice(&rem_nsec.to_ne_bytes());
-                        if let Some(ref proc_arc) = target.process {
-                            let space = proc_arc.lock().address_space();
-                            let _ = crate::process::write_user_bytes_in(space, rem_ptr, &ts);
+            for &target_idx in &matching_indices {
+                let target = &mut scheduler.tasks[target_idx];
+                target.pending_signals |= sig_bit;
+                if !is_blocked && matches!(target.state, TaskState::PipeWaiting { .. } | TaskState::FutexWait { .. } | TaskState::Sleeping { .. }) {
+                    if let TaskState::Sleeping { target_tick, rem_ptr } = target.state {
+                        crate::timer::cancel_sleep_timer(target.tid);
+                        if rem_ptr != 0 {
+                            let current_tick = crate::timer::current_tick();
+                            let rem_ticks = target_tick.saturating_sub(current_tick);
+                            let rem_sec = (rem_ticks / 1000) as i64;
+                            let rem_nsec = ((rem_ticks % 1000) * 1_000_000) as i64;
+                            let mut ts = [0u8; 16];
+                            ts[0..8].copy_from_slice(&rem_sec.to_ne_bytes());
+                            ts[8..16].copy_from_slice(&rem_nsec.to_ne_bytes());
+                            if let Some(ref proc_arc) = target.process {
+                                let space = proc_arc.lock().address_space();
+                                let _ = crate::process::write_user_bytes_in(space, rem_ptr, &ts);
+                            }
                         }
+                        target.interrupt_context.rax = (-(4 as i64)) as u64;
+                        target.context.return_value = (-(4 as i64)) as u64;
                     }
-                    target.interrupt_context.rax = (-(4 as i64)) as u64;
-                    target.context.return_value = (-(4 as i64)) as u64;
+                    target.state = TaskState::Runnable;
                 }
-                target.state = TaskState::Runnable;
             }
         }
     }
@@ -1551,6 +1542,13 @@ pub fn kill_process(pid: u64, signal: u64) -> Result<(), ()> {
     }
 
     Ok(())
+}
+
+pub fn signal_pgrp(pgid: u32, signal: u64) -> Result<(), ()> {
+    if pgid == 0 {
+        return Ok(());
+    }
+    kill_process(-(pgid as i64) as u64, signal)
 }
 
 pub fn kill_thread(tid: u64, signal: u64) -> Result<(), ()> {
@@ -2510,6 +2508,14 @@ pub fn open_vfs_current(
     writable: bool,
     append: bool,
 ) -> Result<u64, ()> {
+    if path == "/dev/ptmx" {
+        return open_ptmx_current();
+    }
+    if let Some(pts_str) = path.strip_prefix("/dev/pts/") {
+        if let Ok(id) = pts_str.parse::<u32>() {
+            return open_pts_slave_current(id);
+        }
+    }
     let (mount_id, fs, ino, initial_offset) = crate::vfs::open_path(&path, writable, append).map_err(|_| ())?;
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
@@ -2989,13 +2995,8 @@ pub fn open_pipe_current() -> Result<(u64, u64), ()> {
 }
 
 pub fn open_pty_current() -> Result<(u64, u64), ()> {
-    let state = Arc::new(Mutex::new(PtyState {
-        master_to_slave: Vec::new(),
-        slave_to_master: Vec::new(),
-        rows: 24,
-        cols: 80,
-        raw: false,
-    }));
+    let (_id, state) = crate::pty::create_pty();
+    state.lock().slave_open = true;
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
     let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
@@ -3016,6 +3017,226 @@ pub fn open_pty_current() -> Result<(u64, u64), ()> {
         },
     )?;
     Ok((master, slave))
+}
+
+pub fn open_ptmx_current() -> Result<u64, ()> {
+    let (_id, state) = crate::pty::create_pty();
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
+    install_descriptor(
+        &mut descriptors,
+        FileDescriptor {
+            capability: allocate_capability(),
+            rights: Rights::READ | Rights::WRITE | Rights::TRANSFER,
+            resource: DescriptorResource::PtyMaster(state),
+        },
+    )
+}
+
+pub fn open_pts_slave_current(id: u32) -> Result<u64, ()> {
+    let state = crate::pty::get_pty(id).ok_or(())?;
+    state.lock().slave_open = true;
+    let mut scheduler = current_scheduler().lock();
+    let scheduler = scheduler.as_mut().ok_or(())?;
+    let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
+    install_descriptor(
+        &mut descriptors,
+        FileDescriptor {
+            capability: allocate_capability(),
+            rights: Rights::READ | Rights::WRITE | Rights::TRANSFER,
+            resource: DescriptorResource::PtySlave(state),
+        },
+    )
+}
+
+pub fn pty_ioctl_current(descriptor: u64, cmd: u64, arg: u64) -> Option<Result<u64, ()>> {
+    let desc = current_descriptor(descriptor).ok()?;
+    let (is_master, pty) = match desc.resource {
+        DescriptorResource::PtyMaster(pty) => (true, pty),
+        DescriptorResource::PtySlave(pty) => (false, pty),
+        _ => return None,
+    };
+
+    let cmd32 = cmd as u32;
+    let res = match cmd32 {
+        // TIOCGPTN (0x80045430): Get PTY number (master only)
+        0x80045430 => {
+            if !is_master || arg == 0 {
+                return Some(Err(()));
+            }
+            let pty_guard = pty.lock();
+            let id = pty_guard.id;
+            drop(pty_guard);
+            if crate::syscall::copy_to_user(arg, &id.to_ne_bytes()).is_ok() {
+                Ok(0)
+            } else {
+                Err(())
+            }
+        }
+        // TIOCSPTLCK (0x40045431): Lock/unlock PTY slave (master only)
+        0x40045431 => {
+            if !is_master || arg == 0 {
+                return Some(Err(()));
+            }
+            let mut val_bytes = [0u8; 4];
+            if crate::syscall::copy_from_user_into(arg, &mut val_bytes).is_err() {
+                return Some(Err(()));
+            }
+            let lock_val = u32::from_ne_bytes(val_bytes);
+            let mut pty_guard = pty.lock();
+            pty_guard.locked = lock_val != 0;
+            Ok(0)
+        }
+        // TIOCGWINSZ (0x5413): Get window size
+        0x5413 => {
+            if arg == 0 {
+                return Some(Err(()));
+            }
+            let pty_guard = pty.lock();
+            let winsize = pty_guard.winsize;
+            drop(pty_guard);
+            let raw = unsafe {
+                core::slice::from_raw_parts(&winsize as *const _ as *const u8, core::mem::size_of::<crate::pty::WinSize>())
+            };
+            if crate::syscall::copy_to_user(arg, raw).is_ok() {
+                Ok(0)
+            } else {
+                Err(())
+            }
+        }
+        // TIOCSWINSZ (0x5414): Set window size
+        0x5414 => {
+            if arg == 0 {
+                return Some(Err(()));
+            }
+            let mut winsize = crate::pty::WinSize::default();
+            let raw = unsafe {
+                core::slice::from_raw_parts_mut(&mut winsize as *mut _ as *mut u8, core::mem::size_of::<crate::pty::WinSize>())
+            };
+            if crate::syscall::copy_from_user_into(arg, raw).is_err() {
+                return Some(Err(()));
+            }
+            let mut pty_guard = pty.lock();
+            pty_guard.winsize = winsize;
+            let fg_pgrp = pty_guard.fg_pgrp;
+            drop(pty_guard);
+            if fg_pgrp != 0 {
+                let _ = signal_pgrp(fg_pgrp, 28); // SIGWINCH = 28
+            }
+            Ok(0)
+        }
+        // TCGETS (0x5401): Get termios attributes
+        0x5401 => {
+            if arg == 0 {
+                return Some(Err(()));
+            }
+            let pty_guard = pty.lock();
+            let termios = pty_guard.termios;
+            drop(pty_guard);
+            let raw = unsafe {
+                core::slice::from_raw_parts(&termios as *const _ as *const u8, core::mem::size_of::<crate::pty::Termios>())
+            };
+            if crate::syscall::copy_to_user(arg, raw).is_ok() {
+                Ok(0)
+            } else {
+                Err(())
+            }
+        }
+        // TCSETS (0x5402), TCSETSW (0x5403), TCSETSF (0x5404): Set termios attributes
+        0x5402 | 0x5403 | 0x5404 => {
+            if arg == 0 {
+                return Some(Err(()));
+            }
+            let mut termios = crate::pty::Termios::default();
+            let raw = unsafe {
+                core::slice::from_raw_parts_mut(&mut termios as *mut _ as *mut u8, core::mem::size_of::<crate::pty::Termios>())
+            };
+            if crate::syscall::copy_from_user_into(arg, raw).is_err() {
+                return Some(Err(()));
+            }
+            let mut pty_guard = pty.lock();
+            pty_guard.termios = termios;
+            Ok(0)
+        }
+        // TIOCSCTTY (0x540E): Acquire controlling terminal
+        0x540E => {
+            let (sid, pgid) = {
+                let mut scheduler = current_scheduler().lock();
+                let Some(scheduler) = scheduler.as_mut() else { return Some(Err(())); };
+                let cur = scheduler.current;
+                (scheduler.tasks[cur].sid as u32, scheduler.tasks[cur].pgid as u32)
+            };
+            let mut pty_guard = pty.lock();
+            pty_guard.session_id = sid;
+            pty_guard.fg_pgrp = pgid;
+            Ok(0)
+        }
+        // TIOCGPGRP (0x540F): Get foreground process group ID
+        0x540F => {
+            if arg == 0 {
+                return Some(Err(()));
+            }
+            let pty_guard = pty.lock();
+            let fg_pgrp = pty_guard.fg_pgrp;
+            drop(pty_guard);
+            if crate::syscall::copy_to_user(arg, &fg_pgrp.to_ne_bytes()).is_ok() {
+                Ok(0)
+            } else {
+                Err(())
+            }
+        }
+        // TIOCSPGRP (0x5410): Set foreground process group ID
+        0x5410 => {
+            if arg == 0 {
+                return Some(Err(()));
+            }
+            let mut val_bytes = [0u8; 4];
+            if crate::syscall::copy_from_user_into(arg, &mut val_bytes).is_err() {
+                return Some(Err(()));
+            }
+            let new_fg = u32::from_ne_bytes(val_bytes);
+            let mut pty_guard = pty.lock();
+            pty_guard.fg_pgrp = new_fg;
+            Ok(0)
+        }
+        // TIOCGSID (0x5429): Get session ID
+        0x5429 => {
+            if arg == 0 {
+                return Some(Err(()));
+            }
+            let pty_guard = pty.lock();
+            let sid = pty_guard.session_id;
+            drop(pty_guard);
+            if crate::syscall::copy_to_user(arg, &sid.to_ne_bytes()).is_ok() {
+                Ok(0)
+            } else {
+                Err(())
+            }
+        }
+        // FIONREAD (0x541B): Get number of bytes available to read
+        0x541B => {
+            if arg == 0 {
+                return Some(Err(()));
+            }
+            let pty_guard = pty.lock();
+            let bytes_avail: u32 = if is_master {
+                pty_guard.slave_to_master.len() as u32
+            } else {
+                pty_guard.master_to_slave.len() as u32
+            };
+            drop(pty_guard);
+            if crate::syscall::copy_to_user(arg, &bytes_avail.to_ne_bytes()).is_ok() {
+                Ok(0)
+            } else {
+                Err(())
+            }
+        }
+        // TCFLSH (0x540B)
+        0x540B => Ok(0),
+        _ => Err(()),
+    };
+    Some(res)
 }
 
 pub fn open_ipc_pair_current() -> Result<(u64, u64), ()> {
@@ -3308,15 +3529,11 @@ pub fn read_current(descriptor: u64, length: usize) -> Result<Vec<u8>, ()> {
         }
         DescriptorResource::PtyMaster(pty) => {
             let mut pty = pty.lock();
-            let count = pty.slave_to_master.len().min(length);
-            let bytes = pty.slave_to_master.drain(..count).collect();
-            Ok(bytes)
+            pty.read_master(length)
         }
         DescriptorResource::PtySlave(pty) => {
             let mut pty = pty.lock();
-            let count = pty.master_to_slave.len().min(length);
-            let bytes = pty.master_to_slave.drain(..count).collect();
-            Ok(bytes)
+            pty.read_slave(length)
         }
         DescriptorResource::Epoll(_) => Err(()),
     }
@@ -3347,6 +3564,14 @@ pub fn read_would_block(descriptor: u64) -> bool {
         DescriptorResource::AfUnix(socket) => {
             !socket.lock().has_pending_data()
         }
+        DescriptorResource::PtyMaster(pty) => {
+            let pty = pty.lock();
+            pty.slave_to_master.is_empty() && pty.slave_open
+        }
+        DescriptorResource::PtySlave(pty) => {
+            let pty = pty.lock();
+            pty.master_to_slave.is_empty() && pty.master_open
+        }
         _ => false,
     }
 }
@@ -3376,6 +3601,14 @@ pub fn close_current(descriptor: u64) -> Result<(), ()> {
             }
         }
         DescriptorResource::PipeWrite(writer) => close_pipe_writer(writer),
+        DescriptorResource::PtyMaster(pty) => {
+            let id = { pty.lock().id };
+            crate::pty::close_master(id);
+        }
+        DescriptorResource::PtySlave(pty) => {
+            let id = { pty.lock().id };
+            crate::pty::close_slave(id);
+        }
         DescriptorResource::File(_)
         | DescriptorResource::Directory(_)
         | DescriptorResource::Serial
@@ -3384,8 +3617,6 @@ pub fn close_current(descriptor: u64) -> Result<(), ()> {
         | DescriptorResource::Ipc(_)
         | DescriptorResource::Epoll(_)
         | DescriptorResource::EventFd(_)
-        | DescriptorResource::PtyMaster(_)
-        | DescriptorResource::PtySlave(_)
         | DescriptorResource::SignalFd(_) => {}
     }
     Ok(())
@@ -3462,13 +3693,12 @@ pub fn write_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
         }
         DescriptorResource::PtyMaster(pty) => {
             let mut pty = pty.lock();
-            pty.master_to_slave.extend_from_slice(bytes);
+            pty.write_master(bytes);
             Ok(())
         }
         DescriptorResource::PtySlave(pty) => {
             let mut pty = pty.lock();
-            pty.slave_to_master.extend_from_slice(bytes);
-            Ok(())
+            pty.write_slave(bytes).map(|_| ())
         }
         DescriptorResource::Directory(_)
         | DescriptorResource::PipeRead(_)

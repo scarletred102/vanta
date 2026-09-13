@@ -269,6 +269,7 @@ fn build_default_image() -> Result<(), String> {
     let linux_cache_durability = read_file(root.join("target/compat/linux/cache-durability"))?;
     let linux_flusher_test = read_file(root.join("target/compat/linux/flusher-test"))?;
     let linux_proc_conformance = read_file(root.join("target/compat/linux/proc-conformance"))?;
+    let linux_pty_test = read_file(root.join("target/compat/linux/pty-test"))?;
     let busybox = read_file(root.join("target/compat/linux/busybox"))?;
     let lua = read_file(root.join("target/compat/linux/lua"))?;
     let linux_wget = read_file(root.join("target/x86_64-unknown-linux-musl/release/wget"))?;
@@ -747,6 +748,13 @@ fn build_default_image() -> Result<(), String> {
             gid: 0,
         },
         RootFile {
+            path: "/compat/linux/pty-test",
+            contents: &linux_pty_test,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
             path: "/bin/busybox",
             contents: &busybox,
             mode: 0o755,
@@ -1144,6 +1152,7 @@ fn build_linux_samples(root: &Path) -> Result<(), String> {
         ("cache-durability.c", "cache-durability"),
         ("flusher-test.c", "flusher-test"),
         ("proc-conformance.c", "proc-conformance"),
+        ("pty-test.c", "pty-test"),
     ] {
         let sample_output = output.join(executable);
         let status = Command::new("zig")

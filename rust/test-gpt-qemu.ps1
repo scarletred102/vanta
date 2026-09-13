@@ -293,7 +293,14 @@ $firstRequired = $common + @(
     "[proc-conformance] PASS: /dev/zero returns continuous 0x00 bytes",
     "[proc-conformance] PASS: /dev/urandom furnishes non-deterministic CSPRNG entropy",
     "[proc-conformance] PASS: system telemetry streams furnish accurate runtime stats",
-    "[proc-conformance] ALL TESTS PASSED SUCCESSFULLY (Exit Code 0)"
+    "[proc-conformance] ALL TESTS PASSED SUCCESSFULLY (Exit Code 0)",
+    "[pty-test] PASS: Master/slave pair opened successfully",
+    "[pty-test] PASS: Canonical line discipline & backspace editing verified",
+    "[pty-test] PASS: Raw mode pass-through verified",
+    "[pty-test] PASS: TIOCSWINSZ updated winsize and injected SIGWINCH",
+    "[pty-test] PASS: Ctrl+C injected SIGINT into foreground process group",
+    "[pty-test] PASS: Master close produced EOF on slave read",
+    "[pty-test] ALL TESTS PASSED SUCCESSFULLY (Exit Code 0)"
 )
 $first = Invoke-GptBoot -DiskImage $image -Label "first boot" -Required $firstRequired
 Start-Sleep -Milliseconds 500
@@ -319,5 +326,5 @@ Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required 
 ) | Out-Null
 Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
 
-Write-Host "[test] GPT Gate A, Gate B, Gate C, Gate D, Gate E, and Gate F acceptance passed"
-$first -split "`n" | Where-Object { $_ -match "afunix|SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net|http-server|wget|mount-test|symlink-test|cache-durability|flusher-test|proc-conformance" } | ForEach-Object { Write-Host $_ }
+Write-Host "[test] GPT Gate A, Gate B, Gate C, Gate D, Gate E, Gate F, and Gate H acceptance passed"
+$first -split "`n" | Where-Object { $_ -match "afunix|SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net|http-server|wget|mount-test|symlink-test|cache-durability|flusher-test|proc-conformance|pty-test" } | ForEach-Object { Write-Host $_ }

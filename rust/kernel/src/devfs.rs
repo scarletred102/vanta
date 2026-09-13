@@ -38,7 +38,17 @@ impl Filesystem for DevFs {
             match name {
                 "." | "" => Ok(8),
                 ".." => Ok(1),
-                _ => Err(VfsError::NotFound),
+                _ => {
+                    if let Ok(id) = name.parse::<u32>() {
+                        if crate::pty::has_pty(id) {
+                            Ok(100 + id as u64)
+                        } else {
+                            Err(VfsError::NotFound)
+                        }
+                    } else {
+                        Err(VfsError::NotFound)
+                    }
+                }
             }
         } else {
             Err(VfsError::NotFound)
@@ -51,6 +61,14 @@ impl Filesystem for DevFs {
             2..=7 | 9 => (0o020666, 0), // Character device, rw-rw-rw-
             8 => (0o040755, 0),
             10 => (0o040777, 0),
+            100..=1000000 => {
+                let pty_id = (ino - 100) as u32;
+                if crate::pty::has_pty(pty_id) {
+                    (0o020666, 0)
+                } else {
+                    return Err(VfsError::NotFound);
+                }
+            }
             _ => return Err(VfsError::NotFound),
         };
         Ok(InodeMetadata {
@@ -158,7 +176,11 @@ impl Filesystem for DevFs {
                 "shm".into(),
             ])
         } else if ino == 8 {
-            Ok(alloc::vec![".".into(), "..".into()])
+            let mut entries = alloc::vec![".".into(), "..".into()];
+            for id in crate::pty::list_ptys() {
+                entries.push(alloc::format!("{}", id));
+            }
+            Ok(entries)
         } else {
             Err(VfsError::NotDirectory)
         }

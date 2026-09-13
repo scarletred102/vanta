@@ -54,6 +54,7 @@ pub mod page_cache;
 pub mod procfs;
 pub mod devfs;
 pub mod sysfs;
+pub mod pty;
 
 #[used]
 #[link_section = ".requests"]
