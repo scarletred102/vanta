@@ -661,6 +661,17 @@ fn dispatch_linux(
             vanta_linuxd::LinuxOp::UnlinkAt => linux_unlinkat_user(arg1, arg2, arg3),
             vanta_linuxd::LinuxOp::Mount => linux_mount_user(arg1, arg2, arg3, arg4, arg5),
             vanta_linuxd::LinuxOp::UMount2 => linux_umount2_user(arg1, arg2),
+            vanta_linuxd::LinuxOp::Fsync | vanta_linuxd::LinuxOp::Fdatasync => {
+                if crate::scheduler::fsync_current(arg1).is_ok() {
+                    0
+                } else {
+                    SYSCALL_ERROR
+                }
+            }
+            vanta_linuxd::LinuxOp::Sync => {
+                let _ = crate::scheduler::sync_all_current();
+                0
+            }
             vanta_linuxd::LinuxOp::ClockGetTime => linux_clock_gettime_user(arg1, arg2),
             vanta_linuxd::LinuxOp::ClockSetTime => linux_clock_settime_user(arg1, arg2),
             vanta_linuxd::LinuxOp::ClockGetRes => linux_clock_getres_user(arg1, arg2),
@@ -828,6 +839,16 @@ fn linux_mmap_user(
         return SYSCALL_ERROR;
     }
     let is_anonymous = flags & 0x20 != 0 || fd == u64::MAX || fd as i64 == -1;
+    if !is_anonymous {
+        if let Some((mount_id, inode, file_size)) = crate::scheduler::file_vfs_info_current(fd) {
+            let shared = (flags & 1) != 0;
+            if let Ok(base_vaddr) = crate::scheduler::mmap_file_current(
+                addr, length, prot, flags, mount_id, inode, offset, file_size, shared,
+            ) {
+                return base_vaddr;
+            }
+        }
+    }
     let alloc_prot = if !is_anonymous { prot | 2 } else { prot };
     let mapped = crate::scheduler::mmap_current(addr, length, alloc_prot, flags);
     let Ok(base_vaddr) = mapped else {
@@ -966,12 +987,15 @@ fn linux_openat_user(directory_fd: u64, path_pointer: u64, flags: u64) -> u64 {
 
     let res = crate::vfs::open_path(path, writable, append);
     match res {
-        Ok((fs, ino, _initial_offset)) => {
+        Ok((mount_id, fs, ino, _initial_offset)) => {
             if writable {
                 if !crate::scheduler::can_mutate_path(path) {
                     return (-(13 as i64)) as u64; // EACCES
                 }
                 if trunc {
+                    if fs.is_page_cached() {
+                        crate::page_cache::truncate(mount_id, ino, 0);
+                    }
                     let _ = fs.truncate(ino, 0);
                 }
             }

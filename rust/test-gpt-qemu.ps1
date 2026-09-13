@@ -277,9 +277,21 @@ $common = @(
     "[linux] Gate D dynamic & networking acceptance passed"
 )
 
-$first = Invoke-GptBoot -DiskImage $image -Label "first boot" -Required ($common + "[storage] RedoxFS reboot persistence marker: false")
+$firstRequired = $common + @(
+    "[storage] RedoxFS reboot persistence marker: false",
+    "[cache-durability] PASS: zero-copy mmap(MAP_SHARED) coherence with read()/write() verified",
+    "[cache-durability] PASS: write speed exceeded 500 MB/s requirement",
+    "[cache-durability] PASS: fsync() completed",
+    "[cache-durability] PASS: Phase 1 complete, ready for simulated power loss"
+)
+$first = Invoke-GptBoot -DiskImage $image -Label "first boot" -Required $firstRequired
 Start-Sleep -Milliseconds 500
-$second = Invoke-GptBoot -DiskImage $image -Label "reboot persistence" -Required ($common + "[storage] RedoxFS reboot persistence marker: true")
+$secondRequired = $common + @(
+    "[storage] RedoxFS reboot persistence marker: true",
+    "[cache-durability] PASS: reboot persistence verified, 50 MiB sha256 bit-for-bit match",
+    "[cache-durability] ALL TESTS PASSED SUCCESSFULLY (Exit Code 0)"
+)
+$second = Invoke-GptBoot -DiskImage $image -Label "reboot persistence" -Required $secondRequired
 
 $corruptRoot = Join-Path $env:TEMP "vanta-gpt-corrupt-root.img"
 Copy-Item -LiteralPath $image -Destination $corruptRoot -Force
@@ -297,4 +309,4 @@ Invoke-GptBoot -DiskImage $corruptRoot -Label "corrupt-root recovery" -Required 
 Remove-Item -LiteralPath $corruptRoot -Force -ErrorAction SilentlyContinue
 
 Write-Host "[test] GPT Gate A, Gate B, Gate C, Gate D, Gate E, and Gate F acceptance passed"
-$first -split "`n" | Where-Object { $_ -match "afunix|SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net|http-server|wget|mount-test|symlink-test" } | ForEach-Object { Write-Host $_ }
+$first -split "`n" | Where-Object { $_ -match "afunix|SIGSEGV|linux-fork|destroy_address_space|Vector|swap|dynamic-shlib|dynamic-threads|spin-barrier|rounds=|net-test|virtio-net|http-server|wget|mount-test|symlink-test|cache-durability" } | ForEach-Object { Write-Host $_ }

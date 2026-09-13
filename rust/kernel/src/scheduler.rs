@@ -241,6 +241,7 @@ pub struct PtyState {
 enum FileBackend {
     Vfs {
         path: String,
+        mount_id: usize,
         fs: Arc<dyn crate::vfs::Filesystem>,
         ino: u64,
     },
@@ -2095,6 +2096,52 @@ pub fn mmap_current(addr: u64, length: u64, prot: u64, flags: u64) -> Result<u64
     res
 }
 
+pub fn mmap_file_current(
+    addr: u64,
+    length: u64,
+    prot: u64,
+    flags: u64,
+    mount_id: usize,
+    inode: u64,
+    offset: u64,
+    file_size: u64,
+    shared: bool,
+) -> Result<u64, ()> {
+    let proc_arc = {
+        let scheduler = current_scheduler().lock();
+        let scheduler = scheduler.as_ref().ok_or(())?;
+        let process = scheduler.tasks[scheduler.current].process.as_ref().ok_or(())?;
+        Arc::clone(process)
+    };
+    let backing = crate::vma::VmaBacking::FileBacked {
+        mount_id,
+        inode,
+        offset,
+        file_size,
+        shared,
+    };
+    let res = proc_arc.lock().mmap_backing(addr, length, prot, flags, backing);
+    res
+}
+
+pub fn file_vfs_info_current(descriptor: u64) -> Option<(usize, u64, u64)> {
+    let desc = current_descriptor(descriptor).ok()?;
+    match desc.resource {
+        DescriptorResource::File(file) => {
+            let f = file.lock();
+            match &f.backend {
+                FileBackend::Vfs { mount_id, fs, ino, .. } => {
+                    let size = crate::page_cache::get_file_size(*mount_id, *ino)
+                        .unwrap_or_else(|| fs.read_inode(*ino).map(|m| m.size).unwrap_or(0));
+                    Some((*mount_id, *ino, size))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 pub fn munmap_current(addr: u64, length: u64) -> Result<(), ()> {
     let proc_arc = {
         let scheduler = current_scheduler().lock();
@@ -2458,7 +2505,7 @@ pub fn open_vfs_current(
     writable: bool,
     append: bool,
 ) -> Result<u64, ()> {
-    let (fs, ino, initial_offset) = crate::vfs::open_path(&path, writable, append).map_err(|_| ())?;
+    let (mount_id, fs, ino, initial_offset) = crate::vfs::open_path(&path, writable, append).map_err(|_| ())?;
     let mut scheduler = current_scheduler().lock();
     let scheduler = scheduler.as_mut().ok_or(())?;
     let mut descriptors = scheduler.tasks[scheduler.current].descriptors.lock();
@@ -2472,7 +2519,7 @@ pub fn open_vfs_current(
             capability: allocate_capability(),
             rights,
             resource: DescriptorResource::File(Arc::new(Mutex::new(OpenFile {
-                backend: FileBackend::Vfs { path, fs, ino },
+                backend: FileBackend::Vfs { path, mount_id, fs, ino },
                 offset: initial_offset,
                 writable,
             }))),
@@ -2830,8 +2877,10 @@ pub fn stat_linux_current(descriptor: u64) -> Result<[u8; 144], ()> {
             let file = file.lock();
             let size = match &file.backend {
                 FileBackend::Buffer { contents } => contents.len() as i64,
-                FileBackend::Vfs { fs, ino, .. } => {
-                    fs.read_inode(*ino).map(|i| i.size as i64).unwrap_or(0)
+                FileBackend::Vfs { mount_id, fs, ino, .. } => {
+                    let cached_size = crate::page_cache::get_file_size(*mount_id, *ino);
+                    let disk_size = fs.read_inode(*ino).map(|i| i.size as i64).unwrap_or(0);
+                    cached_size.map(|s| s as i64).unwrap_or(disk_size).max(disk_size)
                 }
             };
             (0o100644u32, size, false)
@@ -3114,8 +3163,10 @@ pub fn stat_current(descriptor: u64) -> Result<(u64, u64), ()> {
             let file = file.lock();
             let size = match &file.backend {
                 FileBackend::Buffer { contents } => contents.len() as u64,
-                FileBackend::Vfs { fs, ino, .. } => {
-                    fs.read_inode(*ino).map(|i| i.size).unwrap_or(0)
+                FileBackend::Vfs { mount_id, fs, ino, .. } => {
+                    let cached_size = crate::page_cache::get_file_size(*mount_id, *ino);
+                    let disk_size = fs.read_inode(*ino).map(|i| i.size).unwrap_or(0);
+                    cached_size.unwrap_or(disk_size).max(disk_size)
                 }
             };
             Ok((size, 0o100644))
@@ -3161,9 +3212,13 @@ pub fn read_current(descriptor: u64, length: usize) -> Result<Vec<u8>, ()> {
                     file.offset = end;
                     Ok(bytes)
                 }
-                FileBackend::Vfs { fs, ino, .. } => {
+                FileBackend::Vfs { mount_id, fs, ino, .. } => {
                     let mut buf = alloc::vec![0u8; length];
-                    let read_len = fs.read(*ino, offset as u64, &mut buf).map_err(|_| ())?;
+                    let read_len = if fs.is_page_cached() {
+                        crate::page_cache::read(*mount_id, fs.as_ref(), *ino, offset as u64, &mut buf).map_err(|_| ())?
+                    } else {
+                        fs.read(*ino, offset as u64, &mut buf).map_err(|_| ())?
+                    };
                     buf.truncate(read_len);
                     file.offset = offset.saturating_add(read_len);
                     Ok(buf)
@@ -3371,8 +3426,12 @@ pub fn write_current(descriptor: u64, bytes: &[u8]) -> Result<(), ()> {
                     file.offset = end;
                     Ok(())
                 }
-                FileBackend::Vfs { fs, ino, .. } => {
-                    let written = fs.write(*ino, offset as u64, bytes).map_err(|_| ())?;
+                FileBackend::Vfs { mount_id, fs, ino, .. } => {
+                    let written = if fs.is_page_cached() {
+                        crate::page_cache::write(*mount_id, fs.as_ref(), *ino, offset as u64, bytes).map_err(|_| ())?
+                    } else {
+                        fs.write(*ino, offset as u64, bytes).map_err(|_| ())?
+                    };
                     file.offset = file.offset.saturating_add(written);
                     Ok(())
                 }
@@ -3832,9 +3891,13 @@ pub fn pread_current(descriptor: u64, length: usize, offset: u64) -> Result<Vec<
                     let end = start.saturating_add(length).min(contents.len());
                     Ok(contents[start..end].to_vec())
                 }
-                FileBackend::Vfs { fs, ino, .. } => {
+                FileBackend::Vfs { mount_id, fs, ino, .. } => {
                     let mut buf = alloc::vec![0u8; length];
-                    let read_len = fs.read(*ino, offset, &mut buf).map_err(|_| ())?;
+                    let read_len = if fs.is_page_cached() {
+                        crate::page_cache::read(*mount_id, fs.as_ref(), *ino, offset, &mut buf).map_err(|_| ())?
+                    } else {
+                        fs.read(*ino, offset, &mut buf).map_err(|_| ())?
+                    };
                     buf.truncate(read_len);
                     Ok(buf)
                 }
@@ -3865,9 +3928,12 @@ pub fn pwrite_current(descriptor: u64, bytes: &[u8], offset: u64) -> Result<usiz
                     contents[start..end].copy_from_slice(bytes);
                     Ok(bytes.len())
                 }
-                FileBackend::Vfs { fs, ino, .. } => {
-                    let written = fs.write(*ino, offset, bytes).map_err(|_| ())?;
-                    Ok(written)
+                FileBackend::Vfs { mount_id, fs, ino, .. } => {
+                    if fs.is_page_cached() {
+                        crate::page_cache::write(*mount_id, fs.as_ref(), *ino, offset, bytes).map_err(|_| ())
+                    } else {
+                        fs.write(*ino, offset, bytes).map_err(|_| ())
+                    }
                 }
             }
         }
@@ -3891,13 +3957,40 @@ pub fn truncate_current(descriptor: u64, length: u64) -> Result<(), ()> {
                     contents.resize(length as usize, 0);
                     Ok(())
                 }
-                FileBackend::Vfs { fs, ino, .. } => {
+                FileBackend::Vfs { mount_id, fs, ino, .. } => {
+                    if fs.is_page_cached() {
+                        crate::page_cache::truncate(*mount_id, *ino, length);
+                    }
                     fs.truncate(*ino, length).map_err(|_| ())
                 }
             }
         }
         _ => Err(()),
     }
+}
+
+pub fn fsync_current(descriptor: u64) -> Result<(), ()> {
+    let desc = current_descriptor(descriptor)?;
+    match desc.resource {
+        DescriptorResource::File(file) => {
+            let file = file.lock();
+            match &file.backend {
+                FileBackend::Buffer { .. } => Ok(()),
+                FileBackend::Vfs { mount_id, fs, ino, .. } => {
+                    if fs.is_page_cached() {
+                        crate::page_cache::flush_inode(*mount_id, fs.as_ref(), *ino).map_err(|_| ())?;
+                    }
+                    fs.sync().map_err(|_| ())
+                }
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+pub fn sync_all_current() -> Result<(), ()> {
+    crate::page_cache::flush_all().map_err(|_| ())?;
+    crate::vfs::sync_all_mounts().map_err(|_| ())
 }
 
 pub fn set_current_uid(uid: u32) -> Result<(), ()> {

@@ -266,6 +266,7 @@ fn build_default_image() -> Result<(), String> {
     let linux_dynamic_proc = read_file(root.join("target/compat/linux/dynamic-proc"))?;
     let linux_mount_test = read_file(root.join("target/compat/linux/mount-test"))?;
     let linux_symlink_test = read_file(root.join("target/compat/linux/symlink-test"))?;
+    let linux_cache_durability = read_file(root.join("target/compat/linux/cache-durability"))?;
     let busybox = read_file(root.join("target/compat/linux/busybox"))?;
     let lua = read_file(root.join("target/compat/linux/lua"))?;
     let linux_wget = read_file(root.join("target/x86_64-unknown-linux-musl/release/wget"))?;
@@ -723,6 +724,13 @@ fn build_default_image() -> Result<(), String> {
             gid: 0,
         },
         RootFile {
+            path: "/compat/linux/cache-durability",
+            contents: &linux_cache_durability,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        },
+        RootFile {
             path: "/bin/busybox",
             contents: &busybox,
             mode: 0o755,
@@ -1117,6 +1125,7 @@ fn build_linux_samples(root: &Path) -> Result<(), String> {
         ("dynamic-proc.c", "dynamic-proc"),
         ("mount-test.c", "mount-test"),
         ("symlink-test.c", "symlink-test"),
+        ("cache-durability.c", "cache-durability"),
     ] {
         let sample_output = output.join(executable);
         let status = Command::new("zig")

@@ -50,6 +50,7 @@ pub mod af_unix;
 pub mod random;
 mod swap;
 pub mod tmpfs;
+pub mod page_cache;
 
 #[used]
 #[link_section = ".requests"]

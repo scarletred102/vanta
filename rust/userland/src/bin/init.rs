@@ -402,6 +402,15 @@ fn gate_d_acceptance() -> bool {
     print_val(b"[linux] symlink-test", symlink_test, symlink_test_exit);
     let symlink_test_ok = symlink_test != u64::MAX && symlink_test_exit == 0;
 
+    let cache_durability = vanta_userland::spawn_linux(b"/compat/linux/cache-durability");
+    let cache_durability_exit = if cache_durability != u64::MAX {
+        vanta_userland::wait(cache_durability)
+    } else {
+        999
+    };
+    print_val(b"[linux] cache-durability", cache_durability, cache_durability_exit);
+    let cache_durability_ok = cache_durability != u64::MAX && cache_durability_exit == 0;
+
     let dyn_shlib = vanta_userland::spawn_linux(b"/compat/linux/dynamic-shlib");
     let dyn_shlib_exit = if dyn_shlib != u64::MAX {
         vanta_userland::wait(dyn_shlib)
@@ -506,6 +515,7 @@ fn gate_d_acceptance() -> bool {
         && dyn_proc_ok
         && mount_test_ok
         && symlink_test_ok
+        && cache_durability_ok
         && dyn_shlib_ok
         && displayd_ok
         && desktop_ok

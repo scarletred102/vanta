@@ -157,12 +157,13 @@ impl Process {
         self.brk_current
     }
 
-    pub fn mmap_anonymous(
+    pub fn mmap_backing(
         &mut self,
         addr: u64,
         length: u64,
         prot: u64,
         flags: u64,
+        backing: crate::vma::VmaBacking,
     ) -> Result<u64, ()> {
         if length == 0 {
             return Err(());
@@ -233,7 +234,7 @@ impl Process {
             }
         };
 
-        let mut vma_flags = crate::vma::VmaFlags::ANONYMOUS;
+        let mut vma_flags = crate::vma::VmaFlags::empty();
         if prot & 1 != 0 {
             vma_flags |= crate::vma::VmaFlags::READ;
         }
@@ -243,13 +244,30 @@ impl Process {
         if prot & 4 != 0 {
             vma_flags |= crate::vma::VmaFlags::EXEC;
         }
+        if let crate::vma::VmaBacking::Anonymous = backing {
+            vma_flags |= crate::vma::VmaFlags::ANONYMOUS;
+        } else if let crate::vma::VmaBacking::FileBacked { shared, .. } = backing {
+            if shared {
+                vma_flags |= crate::vma::VmaFlags::SHARED;
+            }
+        }
         self.memory_map.lock().insert_vma(
             base_address,
             base_address + aligned_length,
             vma_flags,
-            crate::vma::VmaBacking::Anonymous,
+            backing,
         )?;
         Ok(base_address)
+    }
+
+    pub fn mmap_anonymous(
+        &mut self,
+        addr: u64,
+        length: u64,
+        prot: u64,
+        flags: u64,
+    ) -> Result<u64, ()> {
+        self.mmap_backing(addr, length, prot, flags, crate::vma::VmaBacking::Anonymous)
     }
 
     #[allow(dead_code)]

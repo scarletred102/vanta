@@ -157,6 +157,7 @@ pub trait Filesystem: Send + Sync {
     fn statfs(&self) -> Result<StatFs, VfsError>;
     fn sync(&self) -> Result<(), VfsError>;
     fn read_dir(&self, ino: u64) -> Result<Vec<String>, VfsError>;
+    fn is_page_cached(&self) -> bool { false }
     fn open_inode(&self, _ino: u64) {}
     fn close_inode(&self, _ino: u64) {}
 
@@ -1449,6 +1450,10 @@ impl Filesystem for RedoxFsAdapter {
         }).map_err(|_| VfsError::Storage(StorageError::IoFailed))
     }
 
+    fn is_page_cached(&self) -> bool {
+        true
+    }
+
     fn read_dir(&self, ino: u64) -> Result<Vec<String>, VfsError> {
         let mut guard = self.backend.lock();
         let backend = guard.as_mut().ok_or(VfsError::NotMounted)?;
@@ -1758,8 +1763,12 @@ pub fn read_root_at(path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Vf
 }
 
 pub fn read_root_at_as(path: &str, offset: u64, buf: &mut [u8], _credentials: &Credentials) -> Result<usize, VfsError> {
-    let (_, fs, ino, _, _) = resolve_path_vfs(path, true)?;
-    fs.read(ino, offset, buf)
+    let (mount_id, fs, ino, _, _) = resolve_path_vfs(path, true)?;
+    if fs.is_page_cached() {
+        crate::page_cache::read(mount_id, fs.as_ref(), ino, offset, buf)
+    } else {
+        fs.read(ino, offset, buf)
+    }
 }
 
 pub fn write_root_at(path: &str, offset: u64, buf: &[u8]) -> Result<usize, VfsError> {
@@ -1778,7 +1787,11 @@ pub fn write_root_at_as(path: &str, offset: u64, buf: &[u8], _credentials: &Cred
         }
     }
     drop(table);
-    fs.write(ino, offset, buf)
+    if fs.is_page_cached() {
+        crate::page_cache::write(mount_id, fs.as_ref(), ino, offset, buf)
+    } else {
+        fs.write(ino, offset, buf)
+    }
 }
 
 pub fn truncate_root(path: &str, size: u64) -> Result<(), VfsError> {
@@ -1797,6 +1810,9 @@ pub fn truncate_root_as(path: &str, size: u64, _credentials: &Credentials) -> Re
         }
     }
     drop(table);
+    if fs.is_page_cached() {
+        crate::page_cache::truncate(mount_id, ino, size);
+    }
     fs.truncate(ino, size)
 }
 
@@ -1804,7 +1820,7 @@ pub fn open_path(
     path: &str,
     writable: bool,
     append: bool,
-) -> Result<(Arc<dyn Filesystem>, u64, usize), VfsError> {
+) -> Result<(usize, Arc<dyn Filesystem>, u64, usize), VfsError> {
     let (mount_id, fs, ino, meta, _) = resolve_path_vfs(path, true)?;
     if (meta.mode & 0o170000) == 0o040000 {
         return Err(VfsError::IsDirectory);
@@ -1817,8 +1833,13 @@ pub fn open_path(
     }
     drop(table);
     fs.open_inode(ino);
-    let initial_offset = if append { meta.size as usize } else { 0 };
-    Ok((fs, ino, initial_offset))
+    let current_size = if fs.is_page_cached() {
+        crate::page_cache::get_file_size(mount_id, ino).unwrap_or(meta.size)
+    } else {
+        meta.size
+    };
+    let initial_offset = if append { current_size as usize } else { 0 };
+    Ok((mount_id, fs, ino, initial_offset))
 }
 
 pub fn list_root() -> Result<Vec<String>, VfsError> {
@@ -1880,6 +1901,7 @@ pub fn remove_root_as(path: &str, _credentials: &Credentials) -> Result<(), VfsE
         fs.rmdir(p_ino, file_name)?;
     } else {
         fs.unlink(p_ino, file_name)?;
+        crate::page_cache::invalidate_inode(mount_id, child_ino);
     }
     DCACHE.lock().invalidate(mount_id, p_ino, file_name);
     Ok(())
@@ -2039,6 +2061,19 @@ fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
 
 fn get_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+pub fn get_mount_fs(mount_id: usize) -> Option<Arc<dyn Filesystem>> {
+    let table = MOUNT_TABLE.lock();
+    table.mounts.iter().find(|m| m.id == mount_id).map(|m| m.fs.clone())
+}
+
+pub fn sync_all_mounts() -> Result<(), VfsError> {
+    let table = MOUNT_TABLE.lock();
+    for m in &table.mounts {
+        let _ = m.fs.sync();
+    }
+    Ok(())
 }
 
 fn get_u64(bytes: &[u8], offset: usize) -> u64 {

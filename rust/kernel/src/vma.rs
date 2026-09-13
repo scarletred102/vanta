@@ -69,9 +69,11 @@ impl core::ops::BitAnd for VmaFlags {
 pub enum VmaBacking {
     Anonymous,
     FileBacked {
+        mount_id: usize,
         inode: u64,
         offset: u64,
         file_size: u64,
+        shared: bool,
     },
     DeviceMmio {
         phys_addr: u64,
@@ -194,12 +196,14 @@ impl ProcessMemoryMap {
                 if vma.end > end {
                     let new_backing = match vma.backing {
                         VmaBacking::Anonymous => VmaBacking::Anonymous,
-                        VmaBacking::FileBacked { inode, offset, file_size } => {
+                        VmaBacking::FileBacked { mount_id, inode, offset, file_size, shared } => {
                             let skipped = end - vma.start;
                             VmaBacking::FileBacked {
+                                mount_id,
                                 inode,
                                 offset: offset + skipped,
                                 file_size,
+                                shared,
                             }
                         }
                         VmaBacking::DeviceMmio { phys_addr } => {
@@ -408,30 +412,106 @@ pub fn resolve_demand_page(space: AddressSpace, address: u64, is_write: bool) ->
         if is_write && !vma.flags.contains(VmaFlags::WRITE) {
             return Ok(false);
         }
-        if vma.backing == VmaBacking::Anonymous {
-            let page_aligned = address & !(PAGE_SIZE - 1);
-            let frame = crate::memory::alloc_frame().ok_or(())?;
-            let phys = frame.start_address();
-            if let Some(virt) = crate::paging::phys_to_virt(phys) {
-                unsafe {
-                    core::ptr::write_bytes(virt as *mut u8, 0, PAGE_SIZE as usize);
+        match vma.backing {
+            VmaBacking::Anonymous => {
+                let page_aligned = address & !(PAGE_SIZE - 1);
+                let frame = crate::memory::alloc_frame().ok_or(())?;
+                let phys = frame.start_address();
+                if let Some(virt) = crate::paging::phys_to_virt(phys) {
+                    unsafe {
+                        core::ptr::write_bytes(virt as *mut u8, 0, PAGE_SIZE as usize);
+                    }
+                }
+                let mut pte_flags = crate::paging::MAP_USER;
+                if vma.flags.contains(VmaFlags::WRITE) {
+                    pte_flags |= crate::paging::MAP_WRITABLE;
+                }
+                if !vma.flags.contains(VmaFlags::EXEC) {
+                    pte_flags |= crate::paging::MAP_NO_EXECUTE;
+                }
+                if crate::paging::map(space, page_aligned, phys, pte_flags).is_ok() {
+                    mem_map.dynamic_mappings.push(page_aligned);
+                    crate::swap::track_user_page(space, page_aligned);
+                    return Ok(true);
+                } else {
+                    let _ = crate::memory::free_frame(frame);
+                    return Err(());
                 }
             }
-            let mut pte_flags = crate::paging::MAP_USER;
-            if vma.flags.contains(VmaFlags::WRITE) {
-                pte_flags |= crate::paging::MAP_WRITABLE;
+            VmaBacking::FileBacked {
+                mount_id,
+                inode,
+                offset,
+                file_size,
+                shared,
+            } => {
+                let page_aligned = address & !(PAGE_SIZE - 1);
+                let rel_offset = (page_aligned - vma.start).checked_add(offset).ok_or(())?;
+                let page_index = rel_offset / PAGE_SIZE;
+
+                let fs = crate::vfs::get_mount_fs(mount_id).ok_or(())?;
+
+                let page_frame = crate::page_cache::get_or_fetch_frame(
+                    mount_id,
+                    fs.as_ref(),
+                    inode,
+                    file_size,
+                    page_index,
+                )?;
+
+                if shared {
+                    let mut pte_flags = crate::paging::MAP_USER;
+                    if vma.flags.contains(VmaFlags::WRITE) {
+                        pte_flags |= crate::paging::MAP_WRITABLE;
+                    }
+                    if !vma.flags.contains(VmaFlags::EXEC) {
+                        pte_flags |= crate::paging::MAP_NO_EXECUTE;
+                    }
+                    if is_write {
+                        crate::page_cache::mark_dirty(mount_id, inode, page_index);
+                    }
+                    if crate::paging::map(space, page_aligned, page_frame.start_address(), pte_flags).is_ok() {
+                        mem_map.dynamic_mappings.push(page_aligned);
+                        return Ok(true);
+                    } else {
+                        return Err(());
+                    }
+                } else {
+                    let target_frame = if is_write {
+                        let cow_frame = crate::memory::alloc_frame().ok_or(())?;
+                        if let (Some(src_virt), Some(dst_virt)) = (
+                            crate::paging::phys_to_virt(page_frame.start_address()),
+                            crate::paging::phys_to_virt(cow_frame.start_address()),
+                        ) {
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    src_virt as *const u8,
+                                    dst_virt as *mut u8,
+                                    PAGE_SIZE as usize,
+                                );
+                            }
+                        }
+                        cow_frame
+                    } else {
+                        page_frame
+                    };
+
+                    let mut pte_flags = crate::paging::MAP_USER;
+                    if is_write && vma.flags.contains(VmaFlags::WRITE) {
+                        pte_flags |= crate::paging::MAP_WRITABLE;
+                    }
+                    if !vma.flags.contains(VmaFlags::EXEC) {
+                        pte_flags |= crate::paging::MAP_NO_EXECUTE;
+                    }
+                    if crate::paging::map(space, page_aligned, target_frame.start_address(), pte_flags).is_ok() {
+                        mem_map.dynamic_mappings.push(page_aligned);
+                        return Ok(true);
+                    } else {
+                        return Err(());
+                    }
+                }
             }
-            if !vma.flags.contains(VmaFlags::EXEC) {
-                pte_flags |= crate::paging::MAP_NO_EXECUTE;
-            }
-            if crate::paging::map(space, page_aligned, phys, pte_flags).is_ok() {
-                mem_map.dynamic_mappings.push(page_aligned);
-                crate::swap::track_user_page(space, page_aligned);
-                return Ok(true);
-            } else {
-                let _ = crate::memory::free_frame(frame);
-                return Err(());
-            }
+            VmaBacking::DeviceMmio { .. } => {}
         }
     }
 
