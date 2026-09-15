@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -225,6 +226,132 @@ int main(void) {
     close(mfd);
     unlink(MMAP_FILE);
     printf("[cache-durability] PASS: zero-copy mmap(MAP_SHARED) coherence with read()/write() verified\n");
+
+    // Test 1b: Cross-process MAP_SHARED coherence across separate address spaces
+    printf("[cache-durability] Test 1b: Cross-process MAP_SHARED coherence...\n");
+    const char *cross_mmap_file = "/home/vanta/mmap_crossproc.bin";
+    int cmfd = open(cross_mmap_file, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (cmfd < 0) {
+        printf("[cache-durability] FAIL: cannot open %s: %d\n", cross_mmap_file, errno);
+        return 1;
+    }
+    char c_init[4096];
+    memset(c_init, 'X', sizeof(c_init));
+    if (write(cmfd, c_init, sizeof(c_init)) != sizeof(c_init)) {
+        printf("[cache-durability] FAIL: write cross init failed\n");
+        return 1;
+    }
+    void *parent_mmap = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, cmfd, 0);
+    if (parent_mmap == MAP_FAILED) {
+        printf("[cache-durability] FAIL: parent mmap failed: %d\n", errno);
+        return 1;
+    }
+
+    int p2c[2];
+    int c2p[2];
+    if (pipe(p2c) != 0 || pipe(c2p) != 0) {
+        printf("[cache-durability] FAIL: pipe creation failed: %d\n", errno);
+        return 1;
+    }
+
+    pid_t cpid = fork();
+    if (cpid < 0) {
+        printf("[cache-durability] FAIL: fork failed: %d\n", errno);
+        return 1;
+    }
+
+    if (cpid == 0) {
+        // Child process (separate address space)
+        close(p2c[1]);
+        close(c2p[0]);
+
+        int child_fd = open(cross_mmap_file, O_RDWR);
+        if (child_fd < 0) {
+            printf("[cache-durability] FAIL: child open failed: %d\n", errno);
+            exit(10);
+        }
+        void *child_mmap = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, child_fd, 0);
+        if (child_mmap == MAP_FAILED) {
+            printf("[cache-durability] FAIL: child mmap failed: %d\n", errno);
+            exit(11);
+        }
+        if (*(char *)child_mmap != 'X') {
+            printf("[cache-durability] FAIL: child initial mmap byte is not 'X'\n");
+            exit(12);
+        }
+
+        // Notify parent child is ready
+        char sync = 1;
+        write(c2p[1], &sync, 1);
+
+        // Wait for parent to write 'Y' through parent's mmap mapping
+        read(p2c[0], &sync, 1);
+
+        // 1. Confirm child's MAP_SHARED mapping sees 'Y' written by parent
+        char *child_c = (char *)child_mmap;
+        if (child_c[0] != 'Y' || child_c[4095] != 'Y') {
+            printf("[cache-durability] FAIL: child MAP_SHARED did not see parent's update ('%c')\n", child_c[0]);
+            exit(13);
+        }
+
+        // 2. Confirm child's plain read() on child_fd also sees 'Y'
+        char read_check[4096];
+        lseek(child_fd, 0, SEEK_SET);
+        if (read(child_fd, read_check, sizeof(read_check)) != sizeof(read_check) || read_check[0] != 'Y') {
+            printf("[cache-durability] FAIL: child read() did not see parent's mmap update\n");
+            exit(14);
+        }
+
+        // 3. Child writes 'Z' through its own MAP_SHARED mapping
+        memset(child_mmap, 'Z', 4096);
+
+        // Notify parent child wrote 'Z'
+        write(c2p[1], &sync, 1);
+
+        munmap(child_mmap, 4096);
+        close(child_fd);
+        close(p2c[0]);
+        close(c2p[1]);
+        exit(0);
+    }
+
+    // Parent process
+    close(p2c[0]);
+    close(c2p[1]);
+
+    char sync_byte = 0;
+    // Wait for child to be ready
+    read(c2p[0], &sync_byte, 1);
+
+    // Parent writes 'Y' through its own mapping
+    memset(parent_mmap, 'Y', 4096);
+
+    // Tell child update is done
+    write(p2c[1], &sync_byte, 1);
+
+    // Wait for child to write 'Z' and exit
+    read(c2p[0], &sync_byte, 1);
+
+    // Confirm parent sees child's update 'Z' through its own mapping
+    char *parent_c = (char *)parent_mmap;
+    if (parent_c[0] != 'Z' || parent_c[4095] != 'Z') {
+        printf("[cache-durability] FAIL: parent did not see child's 'Z' update (got '%c')\n", parent_c[0]);
+        return 1;
+    }
+
+    int status = 0;
+    waitpid(cpid, &status, 0);
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        printf("[cache-durability] FAIL: child exited with status %d\n", status);
+        return 1;
+    }
+
+    munmap(parent_mmap, 4096);
+    close(cmfd);
+    close(p2c[1]);
+    close(c2p[0]);
+    unlink(cross_mmap_file);
+    printf("[cache-durability] PASS: cross-process MAP_SHARED memory and read() coherence verified\n");
 
     // Test 2: 50 MiB Page Cache write, throughput measurement, fsync, and reboot durability
     struct stat st;
