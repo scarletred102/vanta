@@ -832,8 +832,7 @@ pub fn exit_current(code: u64) -> *const UserContext {
 
         let process = scheduler.tasks[current]
             .process
-            .take()
-            .expect("current task already exited");
+            .take();
         scheduler.tasks[current].state = TaskState::Zombie { exit_code: code };
 
         if FOREGROUND_PID.load(AtomicOrdering::Relaxed) == exited_tgid

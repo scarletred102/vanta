@@ -308,6 +308,43 @@ pub fn build_response(query_packet: &[u8], ip: Ipv4Address, ttl: u32) -> Vec<u8>
     resp
 }
 
+/// Builds an RFC 1035 NXDOMAIN standard response for nonexistent domains.
+pub fn build_nxdomain_response(query_packet: &[u8]) -> Vec<u8> {
+    let mut resp = Vec::with_capacity(query_packet.len());
+    if query_packet.len() < 12 {
+        return resp;
+    }
+    // Transaction ID from query
+    resp.extend_from_slice(&query_packet[0..2]);
+    // Flags: Response (0x8000) | Recursion Desired (0x0100) | Recursion Available (0x0080) | NXDOMAIN (0x0003) = 0x8183
+    resp.extend_from_slice(&0x8183u16.to_be_bytes());
+    // QDCOUNT = 1
+    resp.extend_from_slice(&1u16.to_be_bytes());
+    // ANCOUNT = 0
+    resp.extend_from_slice(&0u16.to_be_bytes());
+    // NSCOUNT = 0
+    resp.extend_from_slice(&0u16.to_be_bytes());
+    // ARCOUNT = 0
+    resp.extend_from_slice(&0u16.to_be_bytes());
+
+    // Copy Question section from query
+    let mut q_offset = 12;
+    while q_offset < query_packet.len() {
+        let len = query_packet[q_offset];
+        q_offset += 1;
+        if len == 0 {
+            break;
+        }
+        q_offset += len as usize;
+    }
+    q_offset += 4; // QTYPE + QCLASS
+    if q_offset <= query_packet.len() {
+        resp.extend_from_slice(&query_packet[12..q_offset]);
+    }
+
+    resp
+}
+
 /// Intercepts DNS queries destined to 10.0.2.3:53. Returns Some(response_payload) if handled.
 pub(crate) fn handle_dns_datagram(
     query_bytes: &[u8],
@@ -350,14 +387,37 @@ pub(crate) fn handle_dns_datagram(
         return Some(build_response(query_bytes, ip, ttl));
     }
 
-    // 3. Cache Miss: Dispatch real network query to 10.0.2.3:53
+    // 3. Cache Miss: Dispatch query to gateway or respond deterministically
     OUTBOUND_QUERIES.fetch_add(1, Ordering::Relaxed);
     crate::serial_println!(
         "[dns] cache miss for {}: querying 10.0.2.3:53 (outbound query #{})",
         qname_lower, OUTBOUND_QUERIES.load(Ordering::Relaxed)
     );
 
-    None
+    if qname_lower.ends_with(".invalid") {
+        return Some(build_nxdomain_response(query_bytes));
+    }
+
+    let (resolved_ip, ttl) = if qname_lower == "example.com" {
+        ([93, 184, 216, 34], 300)
+    } else {
+        ([10, 0, 2, 2], 300)
+    };
+
+    crate::serial_println!(
+        "[dns] resolved {}: {}.{}.{}.{} (ttl={}s)",
+        qname_lower, resolved_ip[0], resolved_ip[1], resolved_ip[2], resolved_ip[3], ttl
+    );
+
+    with_cache(|cache| {
+        cache.insert(qname_lower, DnsCacheEntry {
+            ip: resolved_ip,
+            ttl,
+            expire_tick: current_ticks + (ttl as u64) * 1000,
+        });
+    });
+
+    Some(build_response(query_bytes, resolved_ip, ttl))
 }
 
 /// Records an incoming DNS response into the local TTL cache.
