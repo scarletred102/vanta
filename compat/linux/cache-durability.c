@@ -269,10 +269,9 @@ int main(void) {
 
         // Calculate MB/s: 50 MB / (write_elapsed_ns / 1e9)
         uint64_t mb_per_sec = (50ULL * 1000000000ULL) / write_elapsed_ns;
-        printf("[cache-durability] PASS: 50 MiB written in-memory in %llu ms (%llu MB/s)\n",
-               (unsigned long long)(write_elapsed_ns / 1000000ULL),
-               (unsigned long long)mb_per_sec);
-        printf("[cache-durability] PASS: write speed exceeded 500 MB/s requirement\n");
+        printf("[cache-durability] INFO: in-memory write throughput: %llu MB/s (%llu ms for 50 MiB)\n",
+               (unsigned long long)mb_per_sec,
+               (unsigned long long)(write_elapsed_ns / 1000000ULL));
 
         // Issue fsync
         printf("[cache-durability] Issuing fsync() to commit dirty pages to RedoxFS...\n");
