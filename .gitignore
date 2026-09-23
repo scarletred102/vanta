@@ -1,0 +1,7 @@
+target/
+rust/target/
+*.log
+*.img
+*.iso
+*.o
+*.elf
